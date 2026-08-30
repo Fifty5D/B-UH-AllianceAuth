@@ -50,10 +50,24 @@ if (-not $HostName) { throw "Could not determine the VPS hostname from ssh -G." 
 if (-not $Port) { $Port = "22" }
 
 $KnownHostsPath = Join-Path $env:TEMP "buh_vps_known_hosts.txt"
-& ssh-keyscan -p $Port $HostName 2>$null | Set-Content -Encoding ascii $KnownHostsPath
+$KnownHostsSource = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+$KnownHostLookup = if ($Port -eq "22") { $HostName } else { "[$HostName]:$Port" }
+$ExistingHostKeys = @()
+if (Test-Path $KnownHostsSource) {
+    $ExistingHostKeys = @(& ssh-keygen -F $KnownHostLookup -f $KnownHostsSource 2>$null |
+        Where-Object { $_ -and -not $_.StartsWith("#") })
+}
+if ($ExistingHostKeys.Count -gt 0) {
+    $ExistingHostKeys | Set-Content -Encoding ascii $KnownHostsPath
+} else {
+    Write-Warning "The resolved host was not found in your existing known_hosts file; collecting its current keys."
+    & ssh-keyscan -p $Port $HostName 2>$null | Set-Content -Encoding ascii $KnownHostsPath
+}
 if (-not (Test-Path $KnownHostsPath) -or (Get-Item $KnownHostsPath).Length -eq 0) {
     throw "Could not collect the VPS SSH host key."
 }
+
+& ssh $SshTarget "rm -rf -- /tmp/buh-github-observer-setup"
 
 Write-Host ""
 Write-Host "Observer bridge installed successfully." -ForegroundColor Green
