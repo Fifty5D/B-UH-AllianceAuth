@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# The deploy SSH key is forced to this entry point in authorized_keys. It has no
+# general shell and accepts exactly one operation; the release archive arrives on
+# standard input and is validated again by the root helper.
+if [[ "${SSH_ORIGINAL_COMMAND:-}" != "deploy moon-tax" ]]; then
+    echo "Denied: this key may only deploy a checked Moon Tax release." >&2
+    exit 64
+fi
+
+exec sudo -n /usr/local/sbin/buh-github-deploy-root

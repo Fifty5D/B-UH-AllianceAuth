@@ -15,31 +15,44 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run observer guard tests
         run: bash tests/test-observer-guards.sh
+      - name: Run deployment guard tests
+        run: bash tests/test-deployer-guards.sh
       - name: Run Discord token rotation tests
         run: python3 tests/test-token-rotation.py
       - name: Verify Moon Tax release artifact
         run: |
-          cd releases/moon-tax/v0.2.2
-          sha256sum -c SHA256SUMS
+          cd releases/moon-tax/v0.3.0
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 9
+          test "$(find . -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 5
+          test "$(wc -l < SHA256SUMS)" -eq 7
+          sha256sum --check --strict SHA256SUMS
           python3 - <<'PY'
           import zipfile
 
-          wheel = "aa_buh_moon_tax-0.2.2-py3-none-any.whl"
+          wheel = "aa_buh_moon_tax-0.3.0-py3-none-any.whl"
           with zipfile.ZipFile(wheel) as archive:
               names = set(archive.namelist())
-              setup = archive.read(
-                  "buh_moon_tax/management/commands/buh_moon_tax_setup.py"
-              ).decode()
               model = archive.read("buh_moon_tax/models.py").decode()
+              urls = archive.read("buh_moon_tax/urls.py").decode()
+              exemptions = archive.read("buh_moon_tax/exemptions.py").decode()
+              auditor = archive.read("buh_moon_tax/auditor.py").decode()
+              javascript = archive.read(
+                  "buh_moon_tax/static/buh_moon_tax/js/moon-tax.js"
+              ).decode()
               metadata = archive.read(
-                  "aa_buh_moon_tax-0.2.2.dist-info/METADATA"
+                  "aa_buh_moon_tax-0.3.0.dist-info/METADATA"
               ).decode()
 
-          assert "raw_units=1" in setup
-          assert "raw_units = models.PositiveIntegerField(default=1)" in model
-          assert "Version: 0.2.2" in metadata
+          assert "class AssessmentAdjustment" in model
+          assert "small_balance_threshold" in model
+          assert 'name="decide_payment_direct"' in urls
+          assert "def state_hash" in exemptions
+          assert '"full_exemption_history_recheck"' in auditor
+          assert 'querySelectorAll("[data-drop-decision]")' in javascript
+          assert "event.submitter" in javascript
+          assert "Version: 0.3.0" in metadata
           assert (
-              "buh_moon_tax/migrations/0004_fix_post_2022_compression_units.py"
+              "buh_moon_tax/migrations/0005_payment_workspace_and_bill_adjustments.py"
               in names
           )
           PY

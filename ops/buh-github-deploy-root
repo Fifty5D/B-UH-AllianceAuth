@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly MAX_ARCHIVE_BYTES=67108864
+readonly LOCK_FILE="/run/lock/buh-github-deploy.lock"
+readonly STATE_DIR="/var/lib/buh-deployer"
+readonly CONFIG_FILE="/etc/buh-github-deployer.conf"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "The guarded deployment receiver must run as root." >&2
+    exit 77
+fi
+
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    echo "Another guarded deployment is already running." >&2
+    exit 75
+fi
+
+archive="$(mktemp /tmp/buh-github-deploy.XXXXXX.tar.gz)"
+stage="$(mktemp -d /tmp/buh-github-deploy.XXXXXX)"
+cleanup() {
+    rm -f -- "${archive}"
+    rm -rf -- "${stage}"
+}
+trap cleanup EXIT
+
+# Read at most one byte beyond the limit so an oversized stream is rejected
+# without filling the host filesystem.
+if ! timeout 180 head -c "$((MAX_ARCHIVE_BYTES + 1))" >"${archive}"; then
+    echo "The deployment upload timed out." >&2
+    exit 74
+fi
+archive_size="$(stat -c '%s' "${archive}")"
+if (( archive_size == 0 || archive_size > MAX_ARCHIVE_BYTES )); then
+    echo "The deployment archive is empty or exceeds 64 MiB." >&2
+    exit 65
+fi
+
+mapfile -t members < <(tar -tzf "${archive}")
+if (( ${#members[@]} == 0 || ${#members[@]} > 12 )); then
+    echo "The deployment archive contains an unexpected number of entries." >&2
+    exit 65
+fi
+for member in "${members[@]}"; do
+    if [[ ! "${member}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "Unsafe deployment archive member: ${member}" >&2
+        exit 65
+    fi
+done
+if printf '%s\n' "${members[@]}" | sort | uniq -d | grep -q .; then
+    echo "The deployment archive contains duplicate member names." >&2
+    exit 65
+fi
+
+tar --extract --gzip --file "${archive}" --directory "${stage}" \
+    --no-same-owner --no-same-permissions
+if find "${stage}" -mindepth 1 ! -type f -print -quit | grep -q .; then
+    echo "The deployment archive may contain only regular files." >&2
+    exit 65
+fi
+
+manifest="${stage}/DEPLOYMENT.env"
+checksums="${stage}/SHA256SUMS"
+if [[ ! -f "${manifest}" || ! -f "${checksums}" ]]; then
+    echo "The deployment manifest or checksum list is missing." >&2
+    exit 65
+fi
+
+read_manifest_value() {
+    local key="$1" value count
+    count="$(grep -Ec "^${key}=" "${manifest}" || true)"
+    if [[ "${count}" -ne 1 ]]; then
+        echo "Manifest key ${key} must occur exactly once." >&2
+        return 65
+    fi
+    value="$(sed -n "s/^${key}=//p" "${manifest}" | tr -d '\r')"
+    if [[ -z "${value}" || "${value}" == *$'\n'* ]]; then
+        echo "Manifest key ${key} is invalid." >&2
+        return 65
+    fi
+    printf '%s' "${value}"
+}
+
+app="$(read_manifest_value APP)"
+version="$(read_manifest_value VERSION)"
+remote_script="$(read_manifest_value REMOTE_SCRIPT)"
+if [[ "${app}" != "moon-tax" || ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Unsupported deployment application or version." >&2
+    exit 65
+fi
+if [[ "${remote_script}" != "buh-moon-tax-platform-remote-v${version}.sh" ]]; then
+    echo "The release script does not match the declared version." >&2
+    exit 65
+fi
+
+checksum_count=0
+while read -r digest filename extra; do
+    if [[ -n "${extra:-}" || ! "${digest}" =~ ^[a-f0-9]{64}$ \
+        || ! "${filename}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+        || "${filename}" == "SHA256SUMS" ]]; then
+        echo "The deployment checksum list is malformed." >&2
+        exit 65
+    fi
+    checksum_count=$((checksum_count + 1))
+done <"${checksums}"
+if [[ "${checksum_count}" -ne 7 ]]; then
+    echo "The deployment must contain exactly seven checked release files." >&2
+    exit 65
+fi
+
+file_count="$(find "${stage}" -maxdepth 1 -type f | wc -l)"
+wheel_count="$(find "${stage}" -maxdepth 1 -type f -name '*.whl' | wc -l)"
+if [[ "${file_count}" -ne 8 || "${wheel_count}" -ne 5 \
+    || ! -f "${stage}/${remote_script}" ]]; then
+    echo "The deployment release file set is incomplete or contains extras." >&2
+    exit 65
+fi
+actual_checked="$(
+    find "${stage}" -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort
+)"
+declared_checked="$(awk '{print $2}' "${checksums}" | sort)"
+if [[ "${actual_checked}" != "${declared_checked}" ]]; then
+    echo "Every deployment release file must appear exactly once in SHA256SUMS." >&2
+    exit 65
+fi
+(
+    cd "${stage}"
+    sha256sum --check --strict SHA256SUMS
+)
+
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "The guarded deployer is not configured." >&2
+    exit 78
+fi
+read_config_value() {
+    local key="$1" value count
+    count="$(grep -Ec "^${key}=" "${CONFIG_FILE}" || true)"
+    [[ "${count}" -eq 1 ]] || return 78
+    value="$(sed -n "s/^${key}=//p" "${CONFIG_FILE}" | tr -d '\r')"
+    [[ -n "${value}" && "${value}" != *$'\n'* ]] || return 78
+    printf '%s' "${value}"
+}
+auth_dir="$(read_config_value AUTH_DIR)"
+admin_character="$(read_config_value ADMIN_CHARACTER)"
+payment_corporation="$(read_config_value PAYMENT_CORPORATION)"
+if [[ ! "${auth_dir}" =~ ^/[A-Za-z0-9._/-]+$ \
+    || ! "${admin_character}" =~ ^[A-Za-z0-9._\ -]+$ \
+    || -z "${payment_corporation}" || ${#payment_corporation} -gt 255 \
+    || "${payment_corporation}" == *$'\n'* ]]; then
+    echo "The guarded deployer configuration is invalid." >&2
+    exit 78
+fi
+
+mkdir -p "${STATE_DIR}"
+started_at="$(date --iso-8601=seconds)"
+archive_sha256="$(sha256sum "${archive}" | awk '{print $1}')"
+write_state() {
+    local status="$1" finished_at
+    finished_at="$(date --iso-8601=seconds)"
+    temp_state="$(mktemp "${STATE_DIR}/last-deployment.XXXXXX")"
+    printf 'APP=%s\nVERSION=%s\nSTATUS=%s\nSTARTED_AT=%s\nFINISHED_AT=%s\nARCHIVE_SHA256=%s\n' \
+        "${app}" "${version}" "${status}" "${started_at}" "${finished_at}" \
+        "${archive_sha256}" >"${temp_state}"
+    chmod 0644 "${temp_state}"
+    mv -f -- "${temp_state}" "${STATE_DIR}/last-deployment.env"
+}
+deployment_failed() {
+    exit_code=$?
+    trap - ERR
+    write_state FAILED
+    exit "${exit_code}"
+}
+trap deployment_failed ERR
+
+install -o root -g root -m 0700 "${stage}/${remote_script}" "/tmp/${remote_script}"
+while IFS= read -r wheel; do
+    install -o root -g root -m 0600 "${wheel}" "/tmp/$(basename "${wheel}")"
+done < <(find "${stage}" -maxdepth 1 -type f -name '*.whl' -print | sort)
+
+echo "Deploying checked Moon Tax v${version} (${archive_sha256})..."
+bash "/tmp/${remote_script}" install "${auth_dir}" "${admin_character}" \
+    "${payment_corporation}"
+write_state SUCCEEDED
+trap - ERR
+echo "Guarded Moon Tax v${version} deployment completed successfully."

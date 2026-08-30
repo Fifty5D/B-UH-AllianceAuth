@@ -1,0 +1,113 @@
+name: Deploy Moon Tax
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Checked Moon Tax release to deploy
+        required: true
+        default: v0.3.0
+        type: choice
+        options:
+          - v0.3.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buh-production-moon-tax
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: production
+
+    steps:
+      - name: Check out trusted release
+        uses: actions/checkout@v4
+
+      - name: Validate and package release
+        id: release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${RELEASE_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          release_dir="releases/moon-tax/${RELEASE_VERSION}"
+          test -d "${release_dir}"
+          (
+            cd "${release_dir}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          declared_version="$(sed -n 's/^VERSION=//p' "${release_dir}/DEPLOYMENT.env")"
+          remote_script="$(sed -n 's/^REMOTE_SCRIPT=//p' "${release_dir}/DEPLOYMENT.env")"
+          test "v${declared_version}" = "${RELEASE_VERSION}"
+          test "${remote_script}" = "buh-moon-tax-platform-remote-${RELEASE_VERSION}.sh"
+          mapfile -t wheels < <(find "${release_dir}" -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | sort)
+          test "${#wheels[@]}" -eq 5
+          files=(DEPLOYMENT.env SHA256SUMS "${remote_script}" "${wheels[@]}")
+          tar --create --gzip --file moon-tax-deployment.tar.gz \
+            --directory "${release_dir}" "${files[@]}"
+          printf 'archive_sha256=%s\n' "$(sha256sum moon-tax-deployment.tar.gz | awk '{print $1}')" >>"${GITHUB_OUTPUT}"
+
+      - name: Configure guarded deployment SSH
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.BUH_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BUH_VPS_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${DEPLOY_KEY}" || { echo "BUH_DEPLOY_SSH_KEY is not configured." >&2; exit 78; }
+          test -n "${KNOWN_HOSTS}" || { echo "BUH_VPS_KNOWN_HOSTS is not configured." >&2; exit 78; }
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" >"${HOME}/.ssh/buh_deployer"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/buh_deployer" "${HOME}/.ssh/known_hosts"
+
+      - name: Deploy through forced command
+        shell: bash
+        env:
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+          DEPLOY_USER: ${{ vars.BUH_DEPLOY_USER || 'buh-deployer' }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${VPS_HOST}" || { echo "BUH_VPS_HOST is not configured." >&2; exit 78; }
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=12 \
+            -i "${HOME}/.ssh/buh_deployer" -p "${VPS_PORT}" \
+            "${DEPLOY_USER}@${VPS_HOST}" "deploy moon-tax" \
+            <moon-tax-deployment.tar.gz
+
+      - name: Collect post-deployment diagnostics
+        if: success()
+        continue-on-error: true
+        shell: bash
+        env:
+          OBSERVER_KEY: ${{ secrets.BUH_OBSERVER_SSH_KEY }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER || 'buh-observer' }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${OBSERVER_KEY}" || exit 0
+          printf '%s\n' "${OBSERVER_KEY}" >"${HOME}/.ssh/buh_observer"
+          chmod 0600 "${HOME}/.ssh/buh_observer"
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
+            "${OBSERVER_USER}@${VPS_HOST}" "diagnostics 15" >diagnostics.txt
+          python3 ops/buh-redact-diagnostics.py diagnostics.txt >diagnostics.sanitized.txt
+          mv diagnostics.sanitized.txt diagnostics.txt
+          python3 ops/buh-redact-diagnostics.py --validate diagnostics.txt
+
+      - name: Upload post-deployment diagnostics
+        if: success() && hashFiles('diagnostics.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: buh-moon-tax-deploy-${{ github.run_id }}
+          path: diagnostics.txt
+          retention-days: 7
+          if-no-files-found: ignore
