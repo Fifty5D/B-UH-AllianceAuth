@@ -15,8 +15,9 @@ Bureau of Unified Harvesting Alliance Auth installation.
 
 Repository issue **#1** is the private diagnostics console. After the one-time
 observer setup, the repository owner can comment `/diagnostics 15` to collect a
-sanitized 15-minute status and log report. Supported windows are 5, 15, 30, and
-60 minutes.
+sanitized 15-minute status and log report. Supported windows are 5, 15, 30, 60,
+180, and 360 minutes. Longer windows are intended for diagnosing completed
+one-shot jobs whose final logs are no longer recent.
 
 The report includes host pressure, every current Compose container, container
 resource usage, health and exit states, Celery workload, and bounded recent logs.

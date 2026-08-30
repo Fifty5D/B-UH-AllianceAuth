@@ -8,8 +8,10 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     "diagnostics 15") minutes=15 ;;
     "diagnostics 30") minutes=30 ;;
     "diagnostics 60") minutes=60 ;;
+    "diagnostics 180") minutes=180 ;;
+    "diagnostics 360") minutes=360 ;;
     *)
-        echo "Denied: the observer key only accepts diagnostics for 5, 15, 30, or 60 minutes." >&2
+        echo "Denied: unsupported diagnostics window." >&2
         exit 64
         ;;
 esac

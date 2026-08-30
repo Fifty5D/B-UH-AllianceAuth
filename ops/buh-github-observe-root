@@ -7,7 +7,7 @@ readonly PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 IFS= read -r minutes
 case "${minutes}" in
-    5|15|30|60) ;;
+    5|15|30|60|180|360) ;;
     *)
         echo "Denied: invalid diagnostics window." >&2
         exit 64

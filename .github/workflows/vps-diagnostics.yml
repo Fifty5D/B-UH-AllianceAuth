@@ -10,7 +10,7 @@ on:
         required: true
         default: "15"
         type: choice
-        options: ["5", "15", "30", "60"]
+        options: ["5", "15", "30", "60", "180", "360"]
 
 permissions:
   actions: write
@@ -73,10 +73,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           if [[ "${EVENT_NAME}" == "issue_comment" ]]; then
-            if [[ "${COMMENT_BODY}" =~ ^/diagnostics[[:space:]]+(5|15|30|60)[[:space:]]*$ ]]; then
+            if [[ "${COMMENT_BODY}" =~ ^/diagnostics[[:space:]]+(5|15|30|60|180|360)[[:space:]]*$ ]]; then
               minutes="${BASH_REMATCH[1]}"
             else
-              echo "Use exactly /diagnostics followed by 5, 15, 30, or 60." >&2
+              echo "Use exactly /diagnostics followed by 5, 15, 30, 60, 180, or 360." >&2
               exit 64
             fi
           else

@@ -59,7 +59,7 @@ fi
 
 fake_bin="${repo_root}/tests/fakebin"
 
-for minutes in 5 15 30 60; do
+for minutes in 5 15 30 60 180 360; do
     output="$(PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="diagnostics ${minutes}" "${entry}")"
     [[ "${output}" == "sudo_target=-n /usr/local/sbin/buh-github-observe-root stdin=${minutes}" ]]
 done
