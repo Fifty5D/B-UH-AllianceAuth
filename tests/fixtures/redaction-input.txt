@@ -7,3 +7,5 @@ ordinary_line=keep-this-visible
 request headers: {'authorization': 'Bot discord-secret-value-1234567890', 'content-type': 'application/json'}
 response headers: {'Set-Cookie': '__dcfduid=cookie-secret; Secure; HttpOnly'}
 callback=https://example.invalid/report?sentry_key=sentry-secret&mode=test
+DISCORD_BOT_TOKEN = None
+service_refresh_token_status=healthy

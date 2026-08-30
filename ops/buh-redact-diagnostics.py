@@ -11,6 +11,7 @@ SENSITIVE_KEY = (
     r"set[_-]?cookie|client[_-]?secret|refresh[_-]?token|access[_-]?token|"
     r"session(?:id)?|csrf(?:token)?)"
 )
+SENSITIVE_IDENTIFIER = rf"(?:[A-Za-z0-9_.-]*{SENSITIVE_KEY}[A-Za-z0-9_.-]*)"
 
 
 PATTERNS = (
@@ -18,13 +19,13 @@ PATTERNS = (
     (re.compile(r"(?i)\bBot\s+[A-Za-z0-9._~+/=-]{12,}"), "Bot <redacted>"),
     (
         re.compile(
-            rf"(?i)([\"']?{SENSITIVE_KEY}[\"']?\s*[:=]\s*)([\"'])(.*?)\2"
+            rf"(?i)([\"']?{SENSITIVE_IDENTIFIER}[\"']?\s*[:=]\s*)([\"'])(.*?)\2"
         ),
         r"\1\2<redacted>\2",
     ),
     (
         re.compile(
-            rf"(?i)\b({SENSITIVE_KEY})\b(\s*[:=]\s*)([^\s,;}}]+)"
+            rf"(?i)({SENSITIVE_IDENTIFIER})(\s*[:=]\s*)([^\s,;}}]+)"
         ),
         r"\1\2<redacted>",
     ),
@@ -58,7 +59,7 @@ VALIDATION_PATTERNS = (
     (
         "sensitive-setting",
         re.compile(
-            rf"(?i)[\"']?{SENSITIVE_KEY}[\"']?\s*[:=]\s*"
+            rf"(?i)[\"']?{SENSITIVE_IDENTIFIER}[\"']?\s*[:=]\s*"
             r"(?![\"']?<redacted(?:-[a-z]+)?>)[\"']?[^\s,;}}]+"
         ),
     ),

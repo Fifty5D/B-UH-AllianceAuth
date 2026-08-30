@@ -44,6 +44,10 @@ if [[ "$(grep -o '<redacted' <<<"${redacted}" | wc -l)" -lt 5 ]]; then
     echo "Redactor did not replace all expected secret forms." >&2
     exit 1
 fi
+if ! grep -Fq 'ordinary_line=keep-this-visible' <<<"${redacted}"; then
+    echo "Redactor removed an ordinary diagnostic field." >&2
+    exit 1
+fi
 redacted_file="$(mktemp -t buh-redacted-test.XXXXXX)"
 trap 'rm -f -- "${redacted_file}"' EXIT
 python3 "${redactor}" "${redaction_input}" >"${redacted_file}"
