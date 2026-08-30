@@ -21,7 +21,7 @@ jobs:
         run: python3 tests/test-token-rotation.py
       - name: Verify Moon Tax release artifact
         run: |
-          cd releases/moon-tax/v0.3.0
+          cd releases/moon-tax/v0.3.1
           test "$(find . -maxdepth 1 -type f | wc -l)" -eq 9
           test "$(find . -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 5
           test "$(wc -l < SHA256SUMS)" -eq 7
@@ -29,28 +29,44 @@ jobs:
           python3 - <<'PY'
           import zipfile
 
-          wheel = "aa_buh_moon_tax-0.3.0-py3-none-any.whl"
+          wheel = "aa_buh_moon_tax-0.3.1-py3-none-any.whl"
           with zipfile.ZipFile(wheel) as archive:
               names = set(archive.namelist())
               model = archive.read("buh_moon_tax/models.py").decode()
               urls = archive.read("buh_moon_tax/urls.py").decode()
               exemptions = archive.read("buh_moon_tax/exemptions.py").decode()
               auditor = archive.read("buh_moon_tax/auditor.py").decode()
+              payments = archive.read("buh_moon_tax/payments.py").decode()
               javascript = archive.read(
                   "buh_moon_tax/static/buh_moon_tax/js/moon-tax.js"
               ).decode()
+              dashboard = archive.read(
+                  "buh_moon_tax/templates/buh_moon_tax/dashboard.html"
+              ).decode()
+              payment_page = archive.read(
+                  "buh_moon_tax/templates/buh_moon_tax/payments.html"
+              ).decode()
               metadata = archive.read(
-                  "aa_buh_moon_tax-0.3.0.dist-info/METADATA"
+                  "aa_buh_moon_tax-0.3.1.dist-info/METADATA"
               ).decode()
 
           assert "class AssessmentAdjustment" in model
           assert "small_balance_threshold" in model
           assert 'name="decide_payment_direct"' in urls
+          assert 'name="member_detail"' in urls
+          assert 'name="character_detail"' in urls
           assert "def state_hash" in exemptions
           assert '"full_exemption_history_recheck"' in auditor
-          assert 'querySelectorAll("[data-drop-decision]")' in javascript
+          assert "select_for_update" in payments
+          assert "setupSortableTables" in javascript
+          assert "setupRowNavigation" in javascript
           assert "event.submitter" in javascript
-          assert "Version: 0.3.0" in metadata
+          assert "data-row-url" in dashboard
+          assert "data-sortable-table" in dashboard
+          assert "data-drop-decision" not in javascript
+          assert "data-payment-drag" not in payment_page
+          assert "Version: 0.3.1" in metadata
+          assert "buh_moon_tax/templates/buh_moon_tax/person_detail.html" in names
           assert (
               "buh_moon_tax/migrations/0005_payment_workspace_and_bill_adjustments.py"
               in names
