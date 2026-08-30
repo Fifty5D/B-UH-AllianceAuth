@@ -29,6 +29,11 @@ fi
 
 redaction_input="${repo_root}/tests/fixtures/redaction-input.txt"
 redacted="$(python3 "${redactor}" "${redaction_input}")"
+redacted_again="$(printf '%s' "${redacted}" | python3 "${redactor}" /dev/stdin)"
+if [[ "${redacted}" != "${redacted_again}" ]]; then
+    echo "Redactor output is not stable after one invocation." >&2
+    exit 1
+fi
 for forbidden in super-secret abc.def.ghi client-password webhook-token discord-secret cookie-secret sentry-secret; do
     if grep -Fq "${forbidden}" <<<"${redacted}"; then
         echo "Redactor leaked fixture secret: ${forbidden}" >&2
