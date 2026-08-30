@@ -29,7 +29,7 @@ fi
 
 redaction_input="${repo_root}/tests/fixtures/redaction-input.txt"
 redacted="$(python3 "${redactor}" "${redaction_input}")"
-for forbidden in super-secret abc.def.ghi client-password webhook-token; do
+for forbidden in super-secret abc.def.ghi client-password webhook-token discord-secret cookie-secret sentry-secret; do
     if grep -Fq "${forbidden}" <<<"${redacted}"; then
         echo "Redactor leaked fixture secret: ${forbidden}" >&2
         exit 1
@@ -37,6 +37,14 @@ for forbidden in super-secret abc.def.ghi client-password webhook-token; do
 done
 if [[ "$(grep -o '<redacted' <<<"${redacted}" | wc -l)" -lt 5 ]]; then
     echo "Redactor did not replace all expected secret forms." >&2
+    exit 1
+fi
+redacted_file="$(mktemp -t buh-redacted-test.XXXXXX)"
+trap 'rm -f -- "${redacted_file}"' EXIT
+python3 "${redactor}" "${redaction_input}" >"${redacted_file}"
+python3 "${redactor}" --validate "${redacted_file}"
+if python3 "${redactor}" --validate "${redaction_input}" >/dev/null 2>&1; then
+    echo "Credential validator accepted unsafe input." >&2
     exit 1
 fi
 
