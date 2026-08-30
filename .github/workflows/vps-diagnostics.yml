@@ -1,0 +1,120 @@
+name: VPS diagnostics
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Recent log window
+        required: true
+        default: "15"
+        type: choice
+        options: ["5", "15", "30", "60"]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: buh-vps-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.number == 1 &&
+       github.event.comment.user.login == github.repository_owner &&
+       startsWith(github.event.comment.body, '/diagnostics'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate request
+        id: request
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          MANUAL_MINUTES: ${{ inputs.minutes }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+            if [[ "${COMMENT_BODY}" =~ ^/diagnostics[[:space:]]+(5|15|30|60)[[:space:]]*$ ]]; then
+              minutes="${BASH_REMATCH[1]}"
+            else
+              echo "Use exactly /diagnostics followed by 5, 15, 30, or 60." >&2
+              exit 64
+            fi
+          else
+            minutes="${MANUAL_MINUTES}"
+          fi
+          printf 'minutes=%s\n' "${minutes}" >>"${GITHUB_OUTPUT}"
+
+      - name: Configure guarded SSH
+        shell: bash
+        env:
+          OBSERVER_KEY: ${{ secrets.BUH_OBSERVER_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BUH_VPS_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${OBSERVER_KEY}" || { echo "BUH_OBSERVER_SSH_KEY is not configured." >&2; exit 78; }
+          test -n "${KNOWN_HOSTS}" || { echo "BUH_VPS_KNOWN_HOSTS is not configured." >&2; exit 78; }
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${OBSERVER_KEY}" >"${HOME}/.ssh/buh_observer"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/buh_observer" "${HOME}/.ssh/known_hosts"
+
+      - name: Collect sanitized diagnostics
+        shell: bash
+        env:
+          VPS_HOST: ${{ vars.BUH_VPS_HOST }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT }}
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER }}
+          MINUTES: ${{ steps.request.outputs.minutes }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${VPS_HOST}" || { echo "BUH_VPS_HOST is not configured." >&2; exit 78; }
+          port="${VPS_PORT:-22}"
+          observer_user="${OBSERVER_USER:-buh-observer}"
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -i "${HOME}/.ssh/buh_observer" -p "${port}" \
+            "${observer_user}@${VPS_HOST}" "diagnostics ${MINUTES}" >diagnostics.txt
+          test -s diagnostics.txt
+
+      - name: Upload full diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: buh-vps-diagnostics-${{ github.run_id }}
+          path: diagnostics.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Post report to diagnostics console
+        if: github.event_name == 'issue_comment'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MINUTES: ${{ steps.request.outputs.minutes }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path("diagnostics.txt").read_text(encoding="utf-8", errors="replace")
+          limit = 52_000
+          if len(text) > limit:
+              text = text[:limit] + "\n\n[Issue preview truncated; use the workflow artifact for the full report.]"
+          Path("diagnostics-comment.md").write_text(
+              "## VPS diagnostics — last ${{ steps.request.outputs.minutes }} minutes\n\n"
+              "[Workflow run and full artifact](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\n"
+              "```text\n" + text.replace("```", "` ` `") + "\n```\n",
+              encoding="utf-8",
+          )
+          PY
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" --body-file diagnostics-comment.md

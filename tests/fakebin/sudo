@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+read -r value
+printf 'sudo_target=%s stdin=%s\n' "$*" "${value}"

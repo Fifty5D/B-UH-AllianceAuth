@@ -1,0 +1,6 @@
+password=super-secret
+Authorization: Bearer abc.def.ghi
+database=https://alice:client-password@example.invalid/db
+webhook=https://discord.com/api/webhooks/12345/webhook-token
+access_token=eyJ0123456789.eyJABCDEFGHIJ.eyJ9876543210
+ordinary_line=keep-this-visible

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly APP_DIR="/opt/aa-docker"
+readonly MAX_LOG_LINES_PER_CONTAINER=250
+readonly PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+IFS= read -r minutes
+case "${minutes}" in
+    5|15|30|60) ;;
+    *)
+        echo "Denied: invalid diagnostics window." >&2
+        exit 64
+        ;;
+esac
+
+if [[ ! -d "${APP_DIR}" || ! -f "${APP_DIR}/docker-compose.yml" || ! -f "${APP_DIR}/.env" ]]; then
+    echo "Alliance Auth Docker was not found at ${APP_DIR}." >&2
+    exit 69
+fi
+
+umask 077
+raw_output="$(mktemp -t buh-diagnostics-raw.XXXXXX)"
+trap 'rm -f -- "${raw_output}"' EXIT
+
+cd "${APP_DIR}"
+
+compose() {
+    docker compose --env-file=.env "$@"
+}
+
+section() {
+    printf '\n===== %s =====\n' "$1"
+}
+
+{
+    printf 'B-UH Alliance Auth guarded diagnostics\n'
+    printf 'generated_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'host=%s\n' "$(hostname)"
+    printf 'window_minutes=%s\n' "${minutes}"
+
+    section "HOST"
+    uptime || true
+    free -h || true
+    df -h / || true
+    systemctl is-active docker 2>&1 || true
+
+    section "COMPOSE STATUS"
+    compose ps -a 2>&1 || true
+
+    section "CONTAINER RESOURCE SNAPSHOT"
+    mapfile -t container_ids < <(compose ps -aq 2>/dev/null | sed '/^$/d' | sort -u)
+    if ((${#container_ids[@]})); then
+        docker stats --no-stream \
+            --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}' \
+            "${container_ids[@]}" 2>&1 || true
+    else
+        echo "No Compose containers were found."
+    fi
+
+    section "CONTAINER STATES"
+    for container_id in "${container_ids[@]:-}"; do
+        [[ -n "${container_id}" ]] || continue
+        docker inspect --format \
+            'name={{.Name}} service={{index .Config.Labels "com.docker.compose.service"}} state={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} error={{.State.Error}}' \
+            "${container_id}" 2>&1 || true
+    done
+
+    section "CELERY WORKLOAD"
+    for celery_command in active reserved scheduled stats; do
+        printf '\n--- celery inspect %s ---\n' "${celery_command}"
+        timeout 20 docker compose --env-file=.env exec -T allianceauth_worker \
+            celery -A myauth inspect "${celery_command}" --timeout=5 2>&1 || true
+    done
+
+    section "RECENT CONTAINER LOGS"
+    for container_id in "${container_ids[@]:-}"; do
+        [[ -n "${container_id}" ]] || continue
+        container_name="$(docker inspect --format '{{.Name}}' "${container_id}" 2>/dev/null | sed 's#^/##')"
+        printf '\n--- %s ---\n' "${container_name:-unknown-container}"
+        docker logs --since "${minutes}m" --tail "${MAX_LOG_LINES_PER_CONTAINER}" \
+            "${container_id}" 2>&1 || true
+    done
+} >"${raw_output}" 2>&1
+
+# Redaction is intentionally performed on the VPS before anything leaves it.
+# The observer never reads .env; this is a second safety layer for secrets that
+# an application may accidentally place in its logs.
+python3 /usr/local/libexec/buh-redact-diagnostics "${raw_output}"
