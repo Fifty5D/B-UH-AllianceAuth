@@ -23,6 +23,13 @@ The report includes host pressure, every current Compose container, container
 resource usage, health and exit states, Celery workload, and bounded recent logs.
 New Compose services are discovered automatically.
 
+## Moon Tax releases
+
+Pinned Moon Tax application wheels and their release notes are stored under
+`releases/moon-tax/`. Version 0.2.2 corrects the legacy 100x ore undervaluation
+by using EVE's post-2022 1:1 compressed/uncompressed item count. Installation
+still uses the checksum-verified Windows updater supplied with each handoff.
+
 ## One-time observer setup
 
 1. Download this private repository as a ZIP and extract it on Windows.
