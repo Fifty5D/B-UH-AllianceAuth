@@ -34,7 +34,7 @@ if [[ "${redacted}" != "${redacted_again}" ]]; then
     echo "Redactor output is not stable after one invocation." >&2
     exit 1
 fi
-for forbidden in super-secret abc.def.ghi client-password webhook-token discord-secret cookie-secret sentry-secret; do
+for forbidden in super-secret abc.def.ghi client-password webhook-token discord-secret cookie-secret sentry-secret '_token()'; do
     if grep -Fq "${forbidden}" <<<"${redacted}"; then
         echo "Redactor leaked fixture secret: ${forbidden}" >&2
         exit 1

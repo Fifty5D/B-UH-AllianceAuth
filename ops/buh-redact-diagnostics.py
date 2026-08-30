@@ -25,7 +25,7 @@ PATTERNS = (
     ),
     (
         re.compile(
-            rf"(?i)({SENSITIVE_IDENTIFIER})(\s*[:=]\s*)([^\s,;}}]+)"
+            rf"(?i)([\"']?{SENSITIVE_IDENTIFIER}[\"']?)(\s*[:=]\s*)([^\s,;}}]+)"
         ),
         r"\1\2<redacted>",
     ),

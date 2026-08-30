@@ -9,3 +9,4 @@ response headers: {'Set-Cookie': '__dcfduid=cookie-secret; Secure; HttpOnly'}
 callback=https://example.invalid/report?sentry_key=sentry-secret&mode=test
 DISCORD_BOT_TOKEN = None
 service_refresh_token_status=healthy
+source code: message = {"token": _token(), "operation": operation}
