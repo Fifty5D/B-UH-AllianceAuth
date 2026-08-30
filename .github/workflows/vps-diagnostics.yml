@@ -83,9 +83,9 @@ jobs:
       - name: Collect sanitized diagnostics
         shell: bash
         env:
-          VPS_HOST: ${{ vars.BUH_VPS_HOST }}
-          VPS_PORT: ${{ vars.BUH_VPS_PORT }}
-          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT }}
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER }}
           MINUTES: ${{ steps.request.outputs.minutes }}
         run: |
           set -Eeuo pipefail
