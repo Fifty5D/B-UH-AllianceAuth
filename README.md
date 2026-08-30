@@ -36,3 +36,17 @@ New Compose services are discovered automatically.
    **Settings → Secrets and variables → Actions**.
 
 Never paste the generated private key into chat.
+
+## Emergency Discord token rotation
+
+If a Discord bot token must be replaced, reset it in the Discord Developer
+Portal, download the latest repository ZIP, and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup\Rotate-BUH-DiscordToken.ps1
+```
+
+The helper accepts the new token through a hidden prompt, validates it directly
+with Discord, creates a timestamped `local.py` backup, runs Django checks,
+recreates the Auth services, rolls back on failure, and reinstalls the hardened
+diagnostics observer. The token is never printed or placed in a command line.

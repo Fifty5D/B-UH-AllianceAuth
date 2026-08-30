@@ -15,3 +15,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run observer guard tests
         run: bash tests/test-observer-guards.sh
+      - name: Run Discord token rotation tests
+        run: python3 tests/test-token-rotation.py
