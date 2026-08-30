@@ -13,6 +13,7 @@ on:
         options: ["5", "15", "30", "60"]
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
@@ -21,6 +22,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  purge-artifacts:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.number == 1 &&
+      github.event.comment.user.login == github.repository_owner &&
+      github.event.comment.body == '/purge-diagnostics'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete diagnostic artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r artifact_id; do
+            [[ -n "${artifact_id}" ]] || continue
+            gh api --method DELETE "/repos/${GH_REPO}/actions/artifacts/${artifact_id}"
+            count=$((count + 1))
+          done < <(gh api --paginate "/repos/${GH_REPO}/actions/artifacts" \
+            --jq '.artifacts[] | select(.name | startswith("buh-vps-diagnostics-")) | .id')
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" \
+            --body "Purged ${count} stored VPS diagnostic artifact(s)."
+
   collect:
     if: >-
       github.event_name == 'workflow_dispatch' ||
