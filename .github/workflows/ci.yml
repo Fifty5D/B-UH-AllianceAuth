@@ -21,11 +21,15 @@ jobs:
         run: python3 tests/test-token-rotation.py
       - name: Verify Moon Tax release artifact
         run: |
-          cd releases/moon-tax/v0.3.1
+          cd releases/moon-tax/v0.3.2
           test "$(find . -maxdepth 1 -type f | wc -l)" -eq 9
           test "$(find . -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 5
           test "$(wc -l < SHA256SUMS)" -eq 7
           sha256sum --check --strict SHA256SUMS
+          bash -n buh-moon-tax-platform-remote-v0.3.2.sh
+          grep -Fq 'VERSION="0.3.2"' buh-moon-tax-platform-remote-v0.3.2.sh
+          grep -Fq 'install -o root -g root -m 0644 "/tmp/${TAX_WHEEL}"' \
+            buh-moon-tax-platform-remote-v0.3.2.sh
           python3 - <<'PY'
           import zipfile
 

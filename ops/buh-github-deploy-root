@@ -176,7 +176,7 @@ trap deployment_failed ERR
 
 install -o root -g root -m 0700 "${stage}/${remote_script}" "/tmp/${remote_script}"
 while IFS= read -r wheel; do
-    install -o root -g root -m 0600 "${wheel}" "/tmp/$(basename "${wheel}")"
+    install -o root -g root -m 0644 "${wheel}" "/tmp/$(basename "${wheel}")"
 done < <(find "${stage}" -maxdepth 1 -type f -name '*.whl' -print | sort)
 
 echo "Deploying checked Moon Tax v${version} (${archive_sha256})..."
