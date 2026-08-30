@@ -17,3 +17,29 @@ jobs:
         run: bash tests/test-observer-guards.sh
       - name: Run Discord token rotation tests
         run: python3 tests/test-token-rotation.py
+      - name: Verify Moon Tax release artifact
+        run: |
+          cd releases/moon-tax/v0.2.2
+          sha256sum -c SHA256SUMS
+          python3 - <<'PY'
+          import zipfile
+
+          wheel = "aa_buh_moon_tax-0.2.2-py3-none-any.whl"
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              setup = archive.read(
+                  "buh_moon_tax/management/commands/buh_moon_tax_setup.py"
+              ).decode()
+              model = archive.read("buh_moon_tax/models.py").decode()
+              metadata = archive.read(
+                  "aa_buh_moon_tax-0.2.2.dist-info/METADATA"
+              ).decode()
+
+          assert "raw_units=1" in setup
+          assert "raw_units = models.PositiveIntegerField(default=1)" in model
+          assert "Version: 0.2.2" in metadata
+          assert (
+              "buh_moon_tax/migrations/0004_fix_post_2022_compression_units.py"
+              in names
+          )
+          PY
