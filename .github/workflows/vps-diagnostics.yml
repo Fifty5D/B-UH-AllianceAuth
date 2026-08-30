@@ -60,6 +60,9 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Check out trusted sanitizer
+        uses: actions/checkout@v4
+
       - name: Validate request
         id: request
         shell: bash
@@ -124,6 +127,14 @@ jobs:
             -i "${HOME}/.ssh/buh_observer" -p "${port}" \
             "${observer_user}@${VPS_HOST}" "diagnostics ${MINUTES}" >diagnostics.txt
           test -s diagnostics.txt
+
+      - name: Sanitize and verify diagnostics again
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 ops/buh-redact-diagnostics.py diagnostics.txt >diagnostics.sanitized.txt
+          mv diagnostics.sanitized.txt diagnostics.txt
+          python3 ops/buh-redact-diagnostics.py --validate diagnostics.txt
 
       - name: Upload full diagnostics
         uses: actions/upload-artifact@v4
