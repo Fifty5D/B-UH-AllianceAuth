@@ -53,6 +53,19 @@ jobs:
           fi
           printf 'minutes=%s\n' "${minutes}" >>"${GITHUB_OUTPUT}"
 
+      - name: Acknowledge diagnostics request
+        if: github.event_name == 'issue_comment'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MINUTES: ${{ steps.request.outputs.minutes }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" \
+            --body "Diagnostics request accepted for ${MINUTES} minutes. [Follow the workflow run](${RUN_URL})."
+
       - name: Configure guarded SSH
         shell: bash
         env:
@@ -118,3 +131,15 @@ jobs:
           )
           PY
           gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" --body-file diagnostics-comment.md
+
+      - name: Report diagnostics failure
+        if: failure() && github.event_name == 'issue_comment'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" \
+            --body "Diagnostics collection failed. [Open the workflow run for the exact failed step](${RUN_URL})."
