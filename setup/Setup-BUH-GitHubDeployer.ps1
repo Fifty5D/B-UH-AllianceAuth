@@ -34,6 +34,13 @@ if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
     throw "Repository must use owner/name format."
 }
 
+$SshConfig = & ssh -G $SshTarget
+if ($LASTEXITCODE -ne 0) { throw "Could not resolve SSH target '$SshTarget'." }
+$ResolvedHost = ($SshConfig | Select-String '^hostname\s+(.+)$').Matches.Groups[1].Value.Trim()
+$ResolvedPort = ($SshConfig | Select-String '^port\s+(.+)$').Matches.Groups[1].Value.Trim()
+if (-not $ResolvedHost) { throw "Could not determine the VPS hostname from ssh -G." }
+if (-not $ResolvedPort) { $ResolvedPort = "22" }
+
 if (-not (Test-Path -LiteralPath $KeyPath)) {
     Write-Host "Creating a dedicated guarded deployment key..." -ForegroundColor Cyan
     & ssh-keygen -q -t ed25519 -N '""' -C "buh-github-deployer" -f $KeyPath
@@ -78,6 +85,10 @@ if ($Gh) {
     }
     & $Gh.Source variable set BUH_DEPLOY_USER --body "buh-deployer" --repo $Repository
     if ($LASTEXITCODE -ne 0) { throw "GitHub CLI could not save BUH_DEPLOY_USER." }
+    & $Gh.Source variable set BUH_VPS_HOST --body $ResolvedHost --repo $Repository
+    if ($LASTEXITCODE -ne 0) { throw "GitHub CLI could not save BUH_VPS_HOST." }
+    & $Gh.Source variable set BUH_VPS_PORT --body $ResolvedPort --repo $Repository
+    if ($LASTEXITCODE -ne 0) { throw "GitHub CLI could not save BUH_VPS_PORT." }
     Write-Host "GitHub deployment settings saved." -ForegroundColor Green
 }
 else {
@@ -87,7 +98,10 @@ else {
     Write-Host "  Name:  BUH_DEPLOY_SSH_KEY"
     Write-Host "  Value: complete contents of $KeyPath"
     Write-Host ""
-    Write-Host "Your existing BUH_VPS_KNOWN_HOSTS secret and BUH_VPS_HOST/PORT variables are reused."
+    Write-Host "Repository variables:"
+    Write-Host "  BUH_VPS_HOST = $ResolvedHost"
+    Write-Host "  BUH_VPS_PORT = $ResolvedPort"
+    Write-Host "Your existing BUH_VPS_KNOWN_HOSTS secret is reused."
     Write-Host "GitHub Actions defaults the deployment user to buh-deployer."
     Write-Host "Open: $SecretsUrl"
     $OpenSettings = Read-Host "Type OPEN to open the GitHub Actions secrets page"

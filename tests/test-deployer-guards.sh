@@ -6,6 +6,7 @@ entry="${repo_root}/ops/buh-github-deploy-entry"
 root_helper="${repo_root}/ops/buh-github-deploy-root"
 bootstrap="${repo_root}/ops/bootstrap-deployer.sh"
 workflow="${repo_root}/.github/workflows/deploy-moon-tax.yml"
+setup="${repo_root}/setup/Setup-BUH-GitHubDeployer.ps1"
 
 bash -n "${entry}" "${root_helper}" "${bootstrap}"
 
@@ -39,6 +40,9 @@ grep -Fq 'flock -n' "${root_helper}"
 grep -Fq 'sha256sum --check --strict SHA256SUMS' "${root_helper}"
 grep -Fq -- '--no-same-owner --no-same-permissions' "${root_helper}"
 grep -Fq 'workflow_dispatch:' "${workflow}"
+grep -Fq "vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52'" "${workflow}"
+grep -Fq 'variable set BUH_VPS_HOST' "${setup}"
+grep -Fq 'variable set BUH_VPS_PORT' "${setup}"
 if grep -Eq '^[[:space:]]+(push|pull_request|release):' "${workflow}"; then
     echo "Production deployment must remain an explicit release-promotion action." >&2
     exit 1
