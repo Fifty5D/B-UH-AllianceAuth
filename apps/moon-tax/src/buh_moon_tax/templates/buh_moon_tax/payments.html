@@ -1,0 +1,305 @@
+{% extends "buh_moon_tax/base.html" %}
+{% load humanize %}
+
+{% block content %}
+<main id="moon-tax-app" class="tax-payments-page">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <div class="tax-live-region" data-tax-live-region role="status" aria-live="polite"></div>
+    <section class="tax-page-head mb-3">
+        <div>
+            <div class="tax-kicker"><span></span> DIRECTOR-CONTROLLED EVIDENCE</div>
+            <h1>Payment review</h1>
+            <p>Find a member, review the evidence, and make one-click or carefully selected batch decisions.</p>
+        </div>
+        {% if permissions.review_payments and not member_preview %}
+            <a class="btn btn-tax-ghost" href="{% url 'admin:buh_moon_tax_paymentcandidate_add' %}">
+                <i class="fa-solid fa-plus me-1"></i> Manual credit
+            </a>
+        {% endif %}
+    </section>
+
+    <nav class="tax-filter-pills mb-3" aria-label="Payment status">
+        {% for item in status_links %}
+            <a class="{% if active_status == item.value %}active{% endif %}" href="?{{ item.query }}">
+                {{ item.label }} <span>{{ item.count }}</span>
+            </a>
+        {% endfor %}
+    </nav>
+
+    <section class="tax-payment-filters mb-3" data-payment-filters>
+        <form method="get" action="{% url 'buh_moon_tax:payments' %}">
+            <input type="hidden" name="status" value="{{ active_status }}">
+            <div class="tax-search-row">
+                <label class="tax-search-box">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span class="visually-hidden">Search payments</span>
+                    {{ filter_form.q }}
+                </label>
+                <button class="btn btn-tax-primary" type="submit">
+                    <i class="fa-solid fa-magnifying-glass me-1"></i> Search
+                </button>
+                <button class="btn btn-tax-ghost" type="button" data-toggle-advanced aria-expanded="{% if has_active_filters %}true{% else %}false{% endif %}">
+                    <i class="fa-solid fa-sliders me-1"></i> More filters
+                </button>
+                {% if has_active_filters %}
+                    <a class="btn btn-tax-clear" href="{% url 'buh_moon_tax:payments' %}?status={{ active_status }}">
+                        <i class="fa-solid fa-xmark me-1"></i> Clear
+                    </a>
+                {% endif %}
+            </div>
+
+            <div class="tax-filter-grid {% if has_active_filters %}is-open{% endif %}" data-advanced-filters>
+                <label><span>Source</span>{{ filter_form.source }}</label>
+                <label><span>Recipient</span>{{ filter_form.recipient }}</label>
+                <label><span>Minimum ISK</span>{{ filter_form.min_amount }}</label>
+                <label><span>Maximum ISK</span>{{ filter_form.max_amount }}</label>
+                <label><span>From date</span>{{ filter_form.date_from }}</label>
+                <label><span>Through date</span>{{ filter_form.date_to }}</label>
+                <label><span>Sort</span>{{ filter_form.sort }}</label>
+                <label><span>Rows per page</span>{{ filter_form.per_page }}</label>
+                <div class="tax-filter-submit">
+                    <button class="btn btn-tax-primary" type="submit">Apply filters</button>
+                </div>
+            </div>
+
+            {% if filter_form.errors %}
+                <div class="tax-form-errors" role="alert">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    Check the highlighted filters and try again.
+                    {{ filter_form.non_field_errors }}
+                </div>
+            {% endif %}
+        </form>
+    </section>
+
+    <section class="tax-payment-summary mb-3" aria-label="Filtered payment totals">
+        <article>
+            <i class="fa-solid fa-receipt"></i>
+            <div><small>Matching payments</small><strong>{{ summary.count|intcomma }}</strong></div>
+        </article>
+        <article>
+            <i class="fa-solid fa-coins"></i>
+            <div><small>Matching value</small><strong>{{ summary.total|floatformat:2|intcomma }}</strong><em>ISK</em></div>
+        </article>
+        <article>
+            <i class="fa-solid fa-users"></i>
+            <div><small>Unique members / payers</small><strong>{{ summary.members|intcomma }}</strong></div>
+        </article>
+        <article>
+            <i class="fa-solid fa-list-check"></i>
+            <div><small>Showing now</small><strong>{{ payments|length }}</strong><em>of {{ summary.count|intcomma }}</em></div>
+        </article>
+    </section>
+
+    {% if permissions.review_payments and not member_preview %}
+        <form id="tax-bulk-form" method="post" action="{% url 'buh_moon_tax:bulk_decide_payments' %}">
+            {% csrf_token %}
+            <input type="hidden" name="return_to" value="{{ request.get_full_path }}">
+        </form>
+
+        <section class="tax-bulk-toolbar mb-3" data-bulk-toolbar hidden aria-live="polite">
+            <div class="tax-bulk-count">
+                <strong><span data-selected-count>0</span> selected</strong>
+                <span><span data-selected-total>0.00</span> ISK</span>
+            </div>
+            <label class="tax-bulk-note">
+                <span class="visually-hidden">Batch decision note</span>
+                <input class="form-control" form="tax-bulk-form" name="note" maxlength="2000" placeholder="Batch note (optional)">
+            </label>
+            <div class="tax-bulk-actions" role="group" aria-label="Batch payment decisions">
+                <button class="btn btn-tax-primary" form="tax-bulk-form" name="decision" value="OLDEST_CARRY" type="submit" data-bulk-decision="accept">
+                    <i class="fa-solid fa-check"></i> Accept
+                </button>
+                <button class="btn btn-tax-action" form="tax-bulk-form" name="decision" value="OLDEST_OVERAGE" type="submit" data-bulk-decision="overage">
+                    <i class="fa-solid fa-arrow-trend-up"></i> Overage
+                </button>
+                <button class="btn btn-tax-action" form="tax-bulk-form" name="decision" value="DONATION" type="submit" data-bulk-decision="donation" data-confirm-bulk>
+                    <i class="fa-solid fa-hand-holding-heart"></i> Donation
+                </button>
+                <button class="btn btn-tax-action" form="tax-bulk-form" name="decision" value="IGNORE" type="submit" data-bulk-decision="ignore" data-confirm-bulk>
+                    <i class="fa-solid fa-eye-slash"></i> Ignore
+                </button>
+                <button class="btn btn-tax-danger" form="tax-bulk-form" name="decision" value="REJECT" type="submit" data-bulk-decision="reject" data-confirm-bulk>
+                    <i class="fa-solid fa-ban"></i> Reject
+                </button>
+                {% if active_status != 'PENDING' and active_status != 'EXEMPT' %}
+                    <button class="btn btn-tax-action" form="tax-bulk-form" name="decision" value="RESET_PENDING" type="submit" data-bulk-decision="reset">
+                        <i class="fa-solid fa-rotate-left"></i> Reset
+                    </button>
+                {% endif %}
+                <button class="btn btn-tax-clear" type="button" data-clear-selection>Clear</button>
+            </div>
+        </section>
+
+    {% endif %}
+
+    <section class="tax-panel">
+        <div class="tax-panel-head tax-payment-panel-head">
+            <div>
+                <span>PAYMENT INBOX</span>
+                <h2>{{ active_status|title }}</h2>
+            </div>
+            <div class="tax-panel-tools">
+                {% if permissions.review_payments and not member_preview and payments and active_status != 'EXEMPT' %}
+                    <label class="tax-check-all">
+                        <input type="checkbox" data-select-visible>
+                        <span>Select page</span>
+                    </label>
+                {% endif %}
+                <button class="btn btn-sm btn-tax-ghost" type="button" data-density-toggle title="Switch between comfortable and compact rows">
+                    <i class="fa-solid fa-compress"></i> Compact
+                </button>
+                <small>CCP wallet and contract history is generally limited to roughly 30 days</small>
+            </div>
+        </div>
+
+        <div class="tax-payment-list" data-payment-list>
+            {% for payment in payments %}
+                <article class="tax-payment-card{% if permissions.review_payments and not member_preview %} tax-payment-reviewable{% endif %}" data-payment-card data-member-key="{{ payment.member_key }}">
+                    {% if permissions.review_payments and not member_preview and payment.status != 'EXEMPT' %}
+                        <label class="tax-payment-check" title="Select this payment">
+                            <input
+                                type="checkbox"
+                                class="tax-payment-select"
+                                form="tax-bulk-form"
+                                name="payment_ids"
+                                value="{{ payment.pk }}"
+                                data-amount="{{ payment.amount }}"
+                                data-member-key="{{ payment.member_key }}"
+                                aria-label="Select {{ payment.amount|floatformat:2 }} ISK payment from {{ payment.member_label }}"
+                            >
+                        </label>
+                    {% elif permissions.review_payments and not member_preview %}
+                        <span class="tax-payment-check-placeholder" aria-hidden="true"><i class="fa-solid fa-shield-halved"></i></span>
+                    {% endif %}
+
+                    <div class="tax-payment-main">
+                        <span class="tax-payment-icon">
+                            <i class="fa-solid {% if payment.source == 'CONTRACT' %}fa-file-signature{% elif payment.source == 'MANUAL' %}fa-pen-to-square{% else %}fa-wallet{% endif %}"></i>
+                        </span>
+                        <div class="tax-payment-identity">
+                            <small>{{ payment.get_source_display }} · {{ payment.occurred_at|date:"Y-m-d H:i" }} UTC</small>
+                            <h3>
+                                <button type="button" class="tax-member-search" data-filter-member="{{ payment.member_label }}" title="Show only this member">
+                                    {{ payment.member_label }} <i class="fa-solid fa-magnifying-glass"></i>
+                                </button>
+                            </h3>
+                            <p>
+                                {% if payment.payer_character_name and payment.payer_character_name != payment.member_label %}{{ payment.payer_character_name }} · {% endif %}
+                                {{ payment.member_secondary }}
+                            </p>
+                            <div class="tax-payment-meta">
+                                <span><i class="fa-solid fa-arrow-right"></i> {{ payment.recipient_name }}</span>
+                                {% if payment.reference %}<span><i class="fa-solid fa-comment-dots"></i> {{ payment.reference }}</span>{% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tax-payment-amount">
+                        <strong>{{ payment.amount|floatformat:2|intcomma }}</strong>
+                        <span>ISK</span>
+                        <em class="tax-status {{ payment.status|lower }}">{{ payment.get_status_display }}</em>
+                    </div>
+
+                    {% if permissions.review_payments and not member_preview and payment.status != 'EXEMPT' %}
+                        <div class="tax-row-tools">
+                            <button class="btn btn-sm btn-tax-ghost" type="button" data-select-member="{{ payment.member_key }}" title="Select every visible payment from this member">
+                                <i class="fa-solid fa-user-check"></i> Select member
+                            </button>
+                        </div>
+
+                        <form class="tax-quick-decision" method="post" action="{% url 'buh_moon_tax:decide_payment_direct' payment.pk %}" data-payment-decision-form>
+                            {% csrf_token %}
+                            <input type="hidden" name="return_to" value="{{ request.get_full_path }}">
+                            <label class="tax-decision-note">
+                                <span class="visually-hidden">Decision note for {{ payment.member_label }}</span>
+                                <input class="form-control" name="note" maxlength="2000" placeholder="Decision note (optional)" value="{{ payment.review_note }}">
+                            </label>
+                            <div class="tax-quick-buttons" role="group" aria-label="Decision for {{ payment.member_label }}">
+                                <button class="btn btn-sm btn-tax-primary" name="decision" value="OLDEST_CARRY" type="submit" title="Apply to the oldest eligible unpaid tax and carry any extra forward">
+                                    <i class="fa-solid fa-check"></i> Accept
+                                </button>
+                                <button class="btn btn-sm btn-tax-action" name="decision" value="OLDEST_OVERAGE" type="submit" title="Apply to the oldest eligible unpaid tax and record extra as an overage">
+                                    <i class="fa-solid fa-arrow-trend-up"></i> Overage
+                                </button>
+                                <button class="btn btn-sm btn-tax-action" name="decision" value="DONATION" type="submit" data-confirm-single="donation">
+                                    <i class="fa-solid fa-hand-holding-heart"></i> Donation
+                                </button>
+                                <button class="btn btn-sm btn-tax-action" name="decision" value="IGNORE" type="submit" data-confirm-single="ignore">
+                                    <i class="fa-solid fa-eye-slash"></i> Ignore
+                                </button>
+                                <button class="btn btn-sm btn-tax-danger" name="decision" value="REJECT" type="submit" data-confirm-single="reject">
+                                    <i class="fa-solid fa-ban"></i> Reject
+                                </button>
+                                {% if payment.status != 'PENDING' %}
+                                    <button class="btn btn-sm btn-tax-action" name="decision" value="RESET_PENDING" type="submit">
+                                        <i class="fa-solid fa-rotate-left"></i> Reset
+                                    </button>
+                                {% endif %}
+                            </div>
+                        </form>
+                    {% endif %}
+
+                    {% if permissions.review_payments and not member_preview %}
+                        <details class="tax-payment-details">
+                            <summary><i class="fa-solid fa-circle-info"></i> Evidence{% if payment.status != 'EXEMPT' %} and custom allocation{% endif %}</summary>
+                            <div class="tax-detail-grid">
+                                <div><small>Source key</small><code>{{ payment.source_key }}</code></div>
+                                <div><small>Imported</small><span>{{ payment.imported_at|date:"Y-m-d H:i" }} UTC</span></div>
+                                <div><small>Reviewed by</small><span>{{ payment.reviewed_by|default:"System / not reviewed" }}</span></div>
+                                <div><small>Reviewed</small><span>{{ payment.reviewed_at|date:"Y-m-d H:i"|default:"—" }}{% if payment.reviewed_at %} UTC{% endif %}</span></div>
+                            </div>
+                            {% if payment.review_note %}<p class="tax-review-note"><b>Review note:</b> {{ payment.review_note }}</p>{% endif %}
+                            {% if payment.evidence %}<pre>{{ payment.evidence }}</pre>{% endif %}
+                            <a class="btn btn-sm btn-tax-ghost" href="{% url 'admin:buh_moon_tax_paymentcandidate_change' payment.pk %}">
+                                <i class="fa-solid fa-pen-to-square"></i> Open full record
+                            </a>
+                        </details>
+                    {% endif %}
+
+                    {% if payment.allocations.all %}
+                        <div class="tax-allocation-list">
+                            {% for allocation in payment.allocations.all %}
+                                <span>
+                                    <b>{{ allocation.amount|floatformat:2|intcomma }} ISK</b> · {{ allocation.get_category_display }}
+                                    {% if allocation.assessment_id %} → {{ allocation.assessment.display_name }} / {{ allocation.assessment.period }}{% endif %}
+                                </span>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                </article>
+            {% empty %}
+                <div class="tax-empty">
+                    <i class="fa-solid fa-inbox"></i>
+                    <strong>No matching payments</strong>
+                    <span>Clear the filters or wait for the next scheduled or manual audit.</span>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    {% if page_obj.paginator.num_pages > 1 %}
+        <nav class="tax-pagination mt-3" aria-label="Payment pages">
+            <div>
+                Showing {{ page_obj.start_index|intcomma }}–{{ page_obj.end_index|intcomma }} of {{ page_obj.paginator.count|intcomma }}
+            </div>
+            <div class="tax-pagination-buttons">
+                {% if page_obj.has_previous %}
+                    <a class="btn btn-sm btn-tax-ghost" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page=1" aria-label="First page"><i class="fa-solid fa-angles-left"></i></a>
+                    <a class="btn btn-sm btn-tax-ghost" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">Previous</a>
+                {% endif %}
+                <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+                {% if page_obj.has_next %}
+                    <a class="btn btn-sm btn-tax-ghost" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.next_page_number }}">Next</a>
+                    <a class="btn btn-sm btn-tax-ghost" href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}page={{ page_obj.paginator.num_pages }}" aria-label="Last page"><i class="fa-solid fa-angles-right"></i></a>
+                {% endif %}
+            </div>
+        </nav>
+    {% endif %}
+
+    <div class="tax-selection-help mt-3">
+        <i class="fa-solid fa-lightbulb"></i>
+        Tip: search a member, select the page, then use one batch decision. Hold Shift while clicking checkboxes to select a range.
+    </div>
+</main>
+{% endblock %}

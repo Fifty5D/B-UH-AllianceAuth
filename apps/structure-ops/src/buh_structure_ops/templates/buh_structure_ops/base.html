@@ -1,0 +1,38 @@
+{% extends "allianceauth/base-bs5.html" %}
+{% load static %}
+{% load navactive %}
+{% block page_title %}{{ app_name }}{% endblock %}
+{% block header_nav_brand %}{{ app_name }}{% endblock %}
+{% block header_nav_collapse_left %}
+    <ul class="nav navbar-nav">
+        {% if perms.buh_structure_ops.view_structure_ops or perms.buh_structure_ops.manage_structure_ops or perms.buh_structure_ops.admin_structure_ops %}
+        <li class="nav-item">
+            <a class="nav-link {% navactive request 'buh_structure_ops:dashboard' %}"
+               href="{% url 'buh_structure_ops:dashboard' %}">
+                <i class="fa-solid fa-industry me-1"></i> Operations
+            </a>
+        </li>
+        {% endif %}
+        {% if perms.buh_structure_ops.view_schedule or perms.buh_structure_ops.admin_structure_ops %}
+            <li class="nav-item">
+                <a class="nav-link {% navactive request 'buh_structure_ops:schedule' %}" href="{% url 'buh_structure_ops:schedule' %}">
+                    <i class="fa-solid fa-calendar-days me-1"></i> Schedule
+                </a>
+            </li>
+        {% endif %}
+        {% if perms.structures.basic_access %}
+            <li class="nav-item"><a class="nav-link" href="{% url 'structures:index' %}"><i class="fa-solid fa-building-shield me-1"></i> Source structures</a></li>
+        {% endif %}
+        {% if perms.moonmining.basic_access %}
+            <li class="nav-item"><a class="nav-link" href="{% url 'moonmining:extractions' %}"><i class="fa-solid fa-moon me-1"></i> Source extractions</a></li>
+        {% endif %}
+    </ul>
+{% endblock %}
+{% block extra_css %}
+    {{ block.super }}
+    <link rel="stylesheet" href="{% static 'buh_structure_ops/css/dashboard.css' %}?v={{ app_version }}">
+{% endblock %}
+{% block extra_javascript %}
+    {{ block.super }}
+    <script src="{% static 'buh_structure_ops/js/dashboard.js' %}?v={{ app_version }}" defer></script>
+{% endblock %}

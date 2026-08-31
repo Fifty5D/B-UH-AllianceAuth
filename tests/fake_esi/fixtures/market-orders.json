@@ -1,0 +1,3 @@
+[
+  {"duration": 90, "is_buy_order": true, "issued": "2026-08-31T12:00:00Z", "location_id": 60003760, "min_volume": 1, "order_id": 1, "price": 1760.0, "range": "region", "system_id": 30000142, "type_id": 62454, "volume_remain": 500000, "volume_total": 500000}
+]

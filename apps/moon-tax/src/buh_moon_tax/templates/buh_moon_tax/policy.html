@@ -1,0 +1,53 @@
+{% extends "buh_moon_tax/base.html" %}
+{% load humanize %}
+{% block content %}
+<main id="moon-tax-app" class="tax-policy-page">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <section class="tax-page-head mb-3">
+        <div>
+            <div class="tax-kicker"><span></span> EFFECTIVE-DATED ATHANOR POLICY</div>
+            <h1>Rates & payment destinations</h1>
+            <p>Change the default once, or give an individual Athanor its own rate and member investor. Existing extraction bills keep their original snapshot.</p>
+        </div>
+        <a class="btn btn-tax-ghost" href="{% url 'admin:buh_moon_tax_structuretaxpolicy_changelist' %}"><i class="fa-solid fa-clock-rotate-left"></i> Policy history</a>
+    </section>
+
+    <section class="tax-policy-defaults tax-panel mb-3">
+        <div class="tax-panel-head"><div><span>SITE DEFAULTS</span><h2>Fallback policy</h2></div><small>Used whenever an Athanor inherits</small></div>
+        <form method="post" action="{% url 'buh_moon_tax:save_policy_defaults' %}" data-recipient-picker>
+            {% csrf_token %}
+            <div class="tax-policy-fields">
+                <label><span>Default tax rate</span><div class="tax-input-suffix">{{ defaults_form.default_tax_rate }}<b>%</b></div><small>Applied to new extraction periods without an override.</small></label>
+                <label><span>Quick-waiver threshold</span><div class="tax-input-suffix">{{ defaults_form.small_balance_threshold }}<b>ISK</b></div><small>Shows a shortcut only; balances are never auto-waived.</small></label>
+            </div>
+            <div class="tax-recipient-editor">
+                <div class="tax-recipient-editor-head"><div><strong>Default accepted recipients</strong><small>Characters and corporations discovered from linked Auth data</small></div><label><i class="fa-solid fa-magnifying-glass"></i><input type="search" class="form-control" placeholder="Find a recipient…" data-recipient-search></label></div>
+                <div class="tax-recipient-checks">{{ defaults_form.default_payment_recipients }}</div>
+            </div>
+            <div class="tax-form-footer"><button class="btn btn-tax-primary" type="submit"><i class="fa-solid fa-floppy-disk"></i> Save site defaults</button></div>
+        </form>
+    </section>
+
+    <div class="tax-section-title"><div><span>PER-ATHANOR OVERRIDES</span><h2>{{ structures|length }} known refineries</h2></div><label><i class="fa-solid fa-magnifying-glass"></i><input class="form-control" type="search" placeholder="Find an Athanor…" data-policy-search></label></div>
+    <section class="tax-policy-grid" data-policy-list>
+        {% for structure in structures %}
+        <article class="tax-policy-card" data-policy-card data-policy-name="{{ structure.structure_name|lower }} {{ structure.corporation_name|lower }}">
+            <form method="post" action="{% url 'buh_moon_tax:save_structure_policy' %}" data-recipient-picker>
+                {% csrf_token %}<input type="hidden" name="structure_id" value="{{ structure.structure_id }}">
+                <header><span class="tax-policy-icon"><i class="fa-solid fa-industry"></i></span><div><h3>{{ structure.structure_name }}</h3><p>{{ structure.corporation_name }}</p></div><span class="tax-policy-mode">{% if structure.policy %}Custom{% else %}Default{% endif %}</span></header>
+                <div class="tax-rate-control"><label><span>Tax rate for future pulls</span><div class="tax-input-suffix"><input class="form-control" type="number" name="tax_rate" min="0" max="100" step="0.01" value="{{ structure.tax_rate }}" required><b>%</b></div></label></div>
+                <label class="tax-inherit-toggle"><input type="checkbox" name="inherit_recipients" {% if structure.inherits_recipients %}checked{% endif %} data-inherit-recipients><span><strong>Use site-default recipients</strong><small>Uncheck to pay this Athanor’s tax to an investor or custom set.</small></span></label>
+                <div class="tax-recipient-editor tax-structure-recipients {% if structure.inherits_recipients %}is-disabled{% endif %}" data-recipient-area>
+                    <div class="tax-recipient-editor-head"><strong>Accepted payment destinations</strong><label><i class="fa-solid fa-magnifying-glass"></i><input type="search" class="form-control" placeholder="Find a member, character, or corp…" data-recipient-search></label></div>
+                    <div class="tax-recipient-checks">
+                        {% for recipient in recipients %}<label data-recipient-option="{{ recipient.name|lower }} {{ recipient.get_kind_display|lower }}"><input type="checkbox" name="payment_recipients" value="{{ recipient.pk }}" {% if recipient.pk in structure.recipient_ids %}checked{% endif %}><span>{{ recipient.name }}<small>{{ recipient.get_kind_display }}</small></span></label>{% endfor %}
+                    </div>
+                </div>
+                <label class="tax-policy-note"><span>Change note (optional)</span><input class="form-control" type="text" name="notes" maxlength="2000" value="{% if structure.policy %}{{ structure.policy.notes }}{% endif %}" placeholder="Why this rate or recipient is different"></label>
+                <footer><small>{% if structure.policy %}Effective since {{ structure.policy.effective_from|date:"Y-m-d H:i" }} UTC{% else %}Currently using site defaults{% endif %}</small><button class="btn btn-tax-primary" type="submit"><i class="fa-solid fa-check"></i> Save Athanor</button></footer>
+            </form>
+        </article>
+        {% empty %}<div class="tax-empty"><i class="fa-solid fa-industry"></i><strong>No Athanors discovered yet</strong><span>Run a tax audit after Moon Mining imports an extraction.</span></div>{% endfor %}
+    </section>
+</main>
+{% endblock %}

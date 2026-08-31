@@ -1,0 +1,12 @@
+{% if member_preview %}
+<aside class="tax-preview-banner" role="status">
+    <div>
+        <i class="fa-solid fa-eye"></i>
+        <span><strong>Member POV · read only</strong>You are seeing exactly what {{ display_user.profile.main_character.character_name|default:display_user.username }} can see.</span>
+    </div>
+    <form method="post" action="{% url 'buh_moon_tax:stop_member_preview' %}">
+        {% csrf_token %}
+        <button class="btn btn-sm btn-tax-primary" type="submit"><i class="fa-solid fa-arrow-left"></i> Return to Director view</button>
+    </form>
+</aside>
+{% endif %}

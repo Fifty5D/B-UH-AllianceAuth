@@ -1,0 +1,68 @@
+{% extends "buh_moon_tax/base.html" %}
+{% load humanize l10n %}
+{% block content %}
+<main id="moon-tax-app">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <nav class="tax-breadcrumb"><a href="{% url 'buh_moon_tax:dashboard' %}"><i class="fa-solid fa-arrow-left"></i> Moon Tax</a><span>/</span><span>{{ period.moon_name|default:period.structure_name }}</span></nav>
+    <section class="tax-period-hero mb-3">
+        <div><span class="tax-status {{ period.status|lower }}">{{ period.get_status_display }}</span><h1>{{ period.moon_name|default:period.structure_name }}</h1><p>{{ period.structure_name }} · {{ period.corporation_name }}</p></div>
+        <div class="tax-period-meta"><span><small>Popped</small><strong>{{ period.pop_at|date:"Y-m-d H:i" }} UTC</strong></span><span><small>Closed / due</small><strong>{{ period.closes_at|date:"Y-m-d H:i" }} UTC</strong></span><span><small>Effective tax</small><strong>{{ period.tax_rate|floatformat:2 }}%</strong></span></div>
+    </section>
+    <section class="tax-recipient-strip mb-3"><div><i class="fa-solid fa-building-columns"></i><span><small>Accepted payment destinations for this extraction</small><strong>{% for recipient in period.allowed_recipients %}<span class="tax-recipient-chip">{{ recipient.name }} · {{ recipient.kind|title }}</span>{% empty %}<span class="tax-warning">No destination configured — contact a director before paying.</span>{% endfor %}</strong></span></div><em>Payments remain pending until a director approves and allocates them.</em></section>
+    {% if permissions.view_mining_values %}<section class="tax-kpis mb-3" aria-label="Visible extraction totals"><article><span class="tax-icon blue"><i class="fa-solid fa-gem"></i></span><div><small>Compressed Jita value</small><strong>{{ visible_totals.gross|floatformat:0|intcomma }}</strong><em>ISK in your visible scope</em></div></article><article><span class="tax-icon violet"><i class="fa-solid fa-percent"></i></span><div><small>Effective tax</small><strong>{{ visible_totals.tax|floatformat:0|intcomma }}</strong><em>after Director adjustments</em></div></article><article><span class="tax-icon green"><i class="fa-solid fa-circle-check"></i></span><div><small>Approved paid</small><strong>{{ visible_totals.paid|floatformat:0|intcomma }}</strong><em>ISK in your visible scope</em></div></article><article class="{% if visible_totals.outstanding > 0 %}danger{% endif %}"><span class="tax-icon red"><i class="fa-solid fa-scale-unbalanced"></i></span><div><small>Outstanding</small><strong>{{ visible_totals.outstanding|floatformat:0|intcomma }}</strong><em>ISK in your visible scope</em></div></article></section>{% endif %}
+
+    <section class="tax-panel mb-3">
+        <div class="tax-panel-head"><div><span>BILLING</span><h2>Account balances</h2></div>{% if permissions.manage_bill_adjustments and not member_preview %}<small><i class="fa-solid fa-shield-halved"></i> Director adjustments are reversible and logged</small>{% endif %}</div>
+        <div class="table-responsive"><table class="table tax-table tax-bill-table mb-0" data-sortable-table><thead><tr><th data-sort-type="text">Account / character</th><th data-sort-type="text">Mode</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Mined value</th><th class="text-end" data-sort-type="number">Tax</th><th class="text-end" data-sort-type="number">Paid</th><th class="text-end" data-sort-type="number">Due</th>{% endif %}<th data-sort-type="text">Status</th>{% if permissions.manage_bill_adjustments and not member_preview %}<th class="text-end" data-sort-disabled>Resolve</th>{% endif %}</tr></thead><tbody>
+        {% for bill in assessments %}
+            <tr>
+                <td data-sort-value="{{ bill.display_name }}"><strong>{{ bill.display_name }}</strong>{% if not bill.auth_user_id %}<small class="tax-warning">Unlinked / outside miner</small>{% endif %}</td>
+                <td data-sort-value="{% if bill.combined_characters %}Combined account{% else %}Character{% endif %}">{% if bill.combined_characters %}Combined account{% else %}Character{% endif %}</td>
+                {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ bill.gross_value|unlocalize }}">{{ bill.gross_value|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.tax_due|unlocalize }}">{% if bill.adjustment_total %}<small class="tax-original-tax">Calculated {{ bill.calculated_tax_due|floatformat:0|intcomma }}</small>{% endif %}{{ bill.tax_due|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.approved_paid|unlocalize }}">{{ bill.approved_paid|floatformat:0|intcomma }}</td><td class="text-end {% if bill.outstanding > 0 %}tax-due{% endif %}" data-sort-value="{{ bill.outstanding|unlocalize }}">{{ bill.outstanding|floatformat:0|intcomma }}</td>{% endif %}
+                <td data-sort-value="{{ bill.get_status_display }}"><span class="tax-status {{ bill.status|lower }}">{{ bill.get_status_display }}</span></td>
+                {% if permissions.manage_bill_adjustments and not member_preview %}<td class="text-end"><button class="btn btn-sm {% if bill.can_quick_waive %}btn-tax-primary{% else %}btn-tax-ghost{% endif %}" type="button" data-bill-toggle="bill-actions-{{ bill.pk }}" aria-controls="bill-actions-{{ bill.pk }}" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> {% if bill.can_quick_waive %}Waive {{ bill.outstanding|floatformat:0|intcomma }}{% else %}Adjust{% endif %}</button></td>{% endif %}
+            </tr>
+            {% if permissions.manage_bill_adjustments and not member_preview %}
+            <tr class="tax-bill-action-row" id="bill-actions-{{ bill.pk }}" data-sort-child hidden><td colspan="{% if permissions.view_mining_values %}8{% else %}4{% endif %}">
+                <div class="tax-bill-workspace">
+                    <div class="tax-bill-summary"><span><small>Original calculation</small><strong>{{ bill.calculated_tax_due|floatformat:2|intcomma }} ISK</strong></span><span><small>Active adjustments</small><strong>{{ bill.adjustment_total|floatformat:2|intcomma }} ISK</strong></span><span><small>Remaining</small><strong>{{ bill.outstanding|floatformat:2|intcomma }} ISK</strong></span></div>
+                    {% if bill.outstanding > 0 %}
+                    <form class="tax-adjustment-form" method="post" action="{% url 'buh_moon_tax:adjust_assessment' bill.pk %}">
+                        {% csrf_token %}
+                        <label><span>Reason</span><input class="form-control" name="reason" maxlength="500" required value="{% if bill.can_quick_waive %}Small Jita price variance{% endif %}" placeholder="Required audit note"></label>
+                        <label><span>Custom amount</span><div class="tax-input-suffix"><input class="form-control" type="number" name="amount" min="0.01" step="0.01" placeholder="Optional"><b>ISK</b></div></label>
+                        <div class="tax-adjustment-actions" role="group" aria-label="Resolve bill for {{ bill.display_name }}">
+                            <button class="btn btn-tax-primary" name="action" value="WAIVE_BALANCE" type="submit"><i class="fa-solid fa-eraser"></i> Waive remaining {{ bill.outstanding|floatformat:2|intcomma }}</button>
+                            <button class="btn btn-tax-action" name="action" value="CREDIT" type="submit"><i class="fa-solid fa-minus"></i> Credit amount</button>
+                            <button class="btn btn-tax-action" name="action" value="DEBIT" type="submit"><i class="fa-solid fa-plus"></i> Debit amount</button>
+                            {% if not bill.approved_paid %}<button class="btn btn-tax-danger" name="action" value="VOID_BILL" type="submit" data-confirm-void><i class="fa-solid fa-trash-can"></i> Void bill</button>{% endif %}
+                        </div>
+                    </form>
+                    {% else %}<div class="tax-settled-note"><i class="fa-solid fa-circle-check"></i> This bill has no outstanding balance.</div>{% endif %}
+                    <div class="tax-adjustment-history"><h4>Adjustment history</h4>{% for adjustment in bill.adjustments.all %}<article class="{% if adjustment.reversed_at %}is-reversed{% endif %}"><div><strong>{{ adjustment.get_kind_display }} · {{ adjustment.amount|floatformat:2|intcomma }} ISK</strong><p>{{ adjustment.reason }}</p><small>{{ adjustment.created_at|date:"Y-m-d H:i" }} UTC · {{ adjustment.created_by|default:"System" }}{% if adjustment.reversed_at %} · Reversed {{ adjustment.reversed_at|date:"Y-m-d H:i" }} UTC: {{ adjustment.reversal_reason }}{% endif %}</small></div>{% if not adjustment.reversed_at %}<form method="post" action="{% url 'buh_moon_tax:reverse_adjustment' adjustment.pk %}">{% csrf_token %}<input class="form-control form-control-sm" name="reason" required maxlength="500" placeholder="Why reverse?"><button class="btn btn-sm btn-tax-ghost" type="submit"><i class="fa-solid fa-rotate-left"></i> Reverse</button></form>{% endif %}</article>{% empty %}<p class="tax-muted">No Director adjustments have been made.</p>{% endfor %}</div>
+                </div>
+            </td></tr>
+            {% endif %}
+        {% empty %}<tr><td colspan="{% if permissions.view_mining_values and permissions.manage_bill_adjustments and not member_preview %}8{% elif permissions.view_mining_values %}7{% elif permissions.manage_bill_adjustments and not member_preview %}4{% else %}3{% endif %}"><div class="tax-empty"><strong>No visible bills for this extraction.</strong></div></td></tr>{% endfor %}
+        </tbody></table></div>
+    </section>
+
+    {% if permissions.view_mining_quantities %}
+    <section class="tax-panel">
+        <div class="tax-panel-head"><div><span>SOURCE LEDGER</span><h2>Mining detail</h2></div><small>Click any heading to sort · Observer dates are day-level EVE data</small></div>
+        <div class="table-responsive"><table class="table tax-table mb-0" data-sortable-table>
+            <thead><tr><th data-sort-type="date">Date</th><th data-sort-type="text">Character</th><th data-sort-type="text">Recorded corporation</th><th data-sort-type="text">Raw ore</th><th class="text-end" data-sort-type="number">Quantity</th><th data-sort-type="number">Compressed equivalent</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Jita buy/unit</th><th class="text-end" data-sort-type="number">Value</th><th class="text-end" data-sort-type="number">Tax</th>{% endif %}<th data-sort-type="text">Flags</th></tr></thead>
+            <tbody>{% for line in lines %}<tr>
+                <td data-sort-value="{{ line.ledger_day|date:'Y-m-d' }}">{{ line.ledger_day|date:"Y-m-d" }}</td>
+                <td data-sort-value="{{ line.character_name }}"><strong>{{ line.character_name }}</strong>{% if not line.auth_user_id %}<small class="tax-warning">Unlinked</small>{% endif %}</td>
+                <td data-sort-value="{{ line.recorded_corporation_name }}">{{ line.recorded_corporation_name }}</td><td data-sort-value="{{ line.raw_type_name }}">{{ line.raw_type_name }}</td>
+                <td class="text-end" data-sort-value="{{ line.raw_quantity|unlocalize }}">{{ line.raw_quantity|intcomma }}</td>
+                <td data-sort-value="{{ line.compressed_quantity|unlocalize }}">{{ line.compressed_quantity|floatformat:2|intcomma }} {{ line.compressed_type_name|default:"Unmapped" }}</td>
+                {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ line.compressed_unit_price|unlocalize }}">{{ line.compressed_unit_price|floatformat:2|intcomma }}</td><td class="text-end" data-sort-value="{{ line.gross_value|unlocalize }}">{{ line.gross_value|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ line.tax_due|unlocalize }}">{{ line.tax_due|floatformat:0|intcomma }}</td>{% endif %}
+                <td data-sort-value="{% if line.is_exempt %}Exempt {% endif %}{% if not line.pricing_complete %}Price review{% endif %}">{% if line.is_exempt %}<span class="tax-chip exempt" title="{{ line.exemption_reason }}">Exempt</span>{% endif %}{% if not line.pricing_complete %}<span class="tax-chip warning">Price review</span>{% endif %}</td>
+            </tr>{% empty %}<tr><td colspan="{% if permissions.view_mining_values %}10{% else %}7{% endif %}"><div class="tax-empty"><strong>No mining rows are assigned to this pull.</strong></div></td></tr>{% endfor %}</tbody>
+        </table></div>
+    </section>
+    {% endif %}
+</main>
+{% endblock %}

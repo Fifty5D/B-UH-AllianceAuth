@@ -1,0 +1,108 @@
+{% extends "buh_moon_tax/base.html" %}
+{% load humanize l10n %}
+
+{% block content %}
+<main id="moon-tax-app" class="tax-person-page">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <nav class="tax-breadcrumb"><a href="{% url 'buh_moon_tax:dashboard' %}"><i class="fa-solid fa-arrow-left"></i> Overview</a><span>/</span><span>{{ subject_name }}</span></nav>
+
+    <section class="tax-person-hero mb-3">
+        <div class="tax-person-identity">
+            <span class="tax-person-avatar"><i class="fa-solid {% if profile_kind == 'account' %}fa-user-astronaut{% else %}fa-link-slash{% endif %}"></i></span>
+            <div><div class="tax-kicker"><span></span> PERSON WORKSPACE</div><h1>{{ subject_name }}</h1><p>{{ subject_secondary }}</p></div>
+        </div>
+        <div class="tax-actions">
+            {% if target_user and operator_permissions.preview_member_view and not member_preview %}
+            <form method="post" action="{% url 'buh_moon_tax:start_member_preview' %}">{% csrf_token %}<input type="hidden" name="user_id" value="{{ target_user.pk }}"><button class="btn btn-tax-ghost" type="submit"><i class="fa-solid fa-eye"></i> View as member</button></form>
+            {% endif %}
+            {% if permissions.manage_exemptions and not member_preview %}
+                {% if target_user %}<a class="btn btn-tax-ghost" href="{% url 'admin:buh_moon_tax_taxexemption_add' %}?auth_user={{ target_user.pk }}"><i class="fa-solid fa-user-shield"></i> Add exemption</a>{% else %}<a class="btn btn-tax-ghost" href="{% url 'admin:buh_moon_tax_taxexemption_add' %}?character_id={{ target_character_id }}&amp;character_name={{ subject_name|urlencode }}"><i class="fa-solid fa-user-shield"></i> Add exemption</a>{% endif %}
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="tax-kpis mb-3" aria-label="Person tax summary">
+        <article><span class="tax-icon violet"><i class="fa-solid fa-file-invoice"></i></span><div><small>Extraction bills</small><strong>{{ totals.bills|intcomma }}</strong><em>complete visible history</em></div></article>
+        {% if permissions.view_mining_values %}
+        <article><span class="tax-icon blue"><i class="fa-solid fa-gem"></i></span><div><small>Mined value</small><strong>{{ totals.gross|floatformat:0|intcomma }}</strong><em>compressed Jita value</em></div></article>
+        <article><span class="tax-icon green"><i class="fa-solid fa-circle-check"></i></span><div><small>Approved paid</small><strong>{{ totals.paid|floatformat:0|intcomma }}</strong><em>ISK allocated to bills</em></div></article>
+        <article class="{% if totals.outstanding > 0 %}danger{% endif %}"><span class="tax-icon red"><i class="fa-solid fa-scale-unbalanced"></i></span><div><small>Outstanding</small><strong>{{ totals.outstanding|floatformat:0|intcomma }}</strong><em>sum of open balances</em></div></article>
+        {% endif %}
+    </section>
+
+    <div class="tax-person-grid mb-3">
+        <section class="tax-panel">
+            <div class="tax-panel-head"><div><span>IDENTITY</span><h2>{% if profile_kind == 'account' %}Linked characters{% else %}Character record{% endif %}</h2></div></div>
+            <div class="tax-person-card-body">
+                {% if characters %}<div class="tax-character-list">{% for character in characters %}<span{% if main_character and character.character_id == main_character.character_id %} class="is-main"{% endif %}><i class="fa-solid fa-user-astronaut"></i><b>{{ character.character_name }}</b><small>{{ character.corporation_name }}{% if main_character and character.character_id == main_character.character_id %} · Main{% endif %}</small></span>{% endfor %}</div>{% else %}<p class="tax-muted">This miner is not currently linked to an Auth account.</p>{% endif %}
+            </div>
+        </section>
+
+        <section class="tax-panel">
+            <div class="tax-panel-head"><div><span>ACCOUNT RULES</span><h2>Person-specific settings</h2></div></div>
+            <div class="tax-person-card-body">
+                {% if target_user %}
+                    <div class="tax-setting-state"><span><small>Current billing mode</small><strong>{% if combine_characters %}Combined Auth account{% else %}Separate bill per character{% endif %}</strong></span>{% if billing_preference %}<em>Custom override</em>{% else %}<em>Site default</em>{% endif %}</div>
+                    {% if permissions.manage_tax_policy and not member_preview %}
+                    <form class="tax-billing-mode-form" method="post" action="{% url 'buh_moon_tax:save_billing_preference' target_user.pk %}">
+                        {% csrf_token %}
+                        <div class="tax-mode-buttons" role="radiogroup" aria-label="Billing mode for {{ subject_name }}">
+                            <label><input type="radio" name="mode" value="DEFAULT" {% if billing_mode == 'DEFAULT' %}checked{% endif %}><span><i class="fa-solid fa-globe"></i><b>Site default</b><small>Currently {% if site_default_combine %}combined{% else %}separate{% endif %}; follows future default changes</small></span></label>
+                            <label><input type="radio" name="mode" value="COMBINED" {% if billing_mode == 'COMBINED' %}checked{% endif %}><span><i class="fa-solid fa-people-group"></i><b>Combined</b><small>One bill for every linked character</small></span></label>
+                            <label><input type="radio" name="mode" value="SEPARATE" {% if billing_mode == 'SEPARATE' %}checked{% endif %}><span><i class="fa-solid fa-user-group"></i><b>Separate</b><small>One bill for each character</small></span></label>
+                        </div>
+                        <footer><small>Applies on the next audit. Decided historical bills keep their original mode.</small><button class="btn btn-tax-primary" type="submit"><i class="fa-solid fa-floppy-disk"></i> Save billing mode</button></footer>
+                    </form>
+                    {% endif %}
+                {% else %}<p class="tax-muted">Link this character to an Auth account before using account-level billing rules.</p>{% endif %}
+
+                <div class="tax-exemption-summary">
+                    <h3>Exemption history</h3>
+                    {% for exemption in exemptions %}<article><span class="tax-status {{ exemption.effective_state_class }}">{{ exemption.effective_state_label }}</span><div><strong>{{ exemption.target_label }}</strong><small>{{ exemption.effective_from|date:"Y-m-d" }} → {{ exemption.effective_until|date:"Y-m-d"|default:"Open ended" }} · {{ exemption.reason }}</small></div></article>{% empty %}<p class="tax-muted">No account or character exemptions.</p>{% endfor %}
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <section class="tax-panel mb-3">
+        <div class="tax-panel-head"><div><span>EXTRACTION HISTORY</span><h2>Bills and balances</h2></div>{% if permissions.manage_bill_adjustments and not member_preview %}<small><i class="fa-solid fa-shield-halved"></i> Every waiver is reversible and logged</small>{% endif %}</div>
+        <div class="table-responsive"><table class="table tax-table tax-bill-table mb-0" data-sortable-table>
+            <thead><tr><th data-sort-type="date">Extraction</th><th data-sort-type="text">Billing</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Mined value</th><th class="text-end" data-sort-type="number">Tax</th><th class="text-end" data-sort-type="number">Paid</th><th class="text-end" data-sort-type="number">Due</th>{% endif %}<th data-sort-type="text">Status</th>{% if permissions.manage_bill_adjustments and not member_preview %}<th class="text-end" data-sort-disabled>Resolve</th>{% endif %}</tr></thead>
+            <tbody>{% for bill in assessments %}
+                <tr>
+                    <td data-sort-value="{{ bill.period.pop_at|date:'c' }}"><a class="tax-primary-link" href="{% url 'buh_moon_tax:period' bill.period_id %}">{{ bill.period.moon_name|default:bill.period.structure_name }}</a><small>{{ bill.period.pop_at|date:"Y-m-d H:i" }} UTC</small></td>
+                    <td data-sort-value="{% if bill.combined_characters %}Combined account{% else %}{{ bill.display_name }}{% endif %}">{% if bill.combined_characters %}Combined account{% else %}{{ bill.display_name }}{% endif %}</td>
+                    {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ bill.gross_value|unlocalize }}">{{ bill.gross_value|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.tax_due|unlocalize }}">{% if bill.adjustment_total %}<small class="tax-original-tax">Calculated {{ bill.calculated_tax_due|floatformat:0|intcomma }}</small>{% endif %}{{ bill.tax_due|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.approved_paid|unlocalize }}">{{ bill.approved_paid|floatformat:0|intcomma }}</td><td class="text-end {% if bill.outstanding > 0 %}tax-due{% endif %}" data-sort-value="{{ bill.outstanding|unlocalize }}">{{ bill.outstanding|floatformat:0|intcomma }}</td>{% endif %}
+                    <td data-sort-value="{{ bill.get_status_display }}"><span class="tax-status {{ bill.status|lower }}">{{ bill.get_status_display }}</span></td>
+                    {% if permissions.manage_bill_adjustments and not member_preview %}<td class="text-end"><button class="btn btn-sm {% if bill.can_quick_waive %}btn-tax-primary{% else %}btn-tax-ghost{% endif %}" type="button" data-bill-toggle="profile-bill-actions-{{ bill.pk }}" aria-controls="profile-bill-actions-{{ bill.pk }}" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> {% if bill.outstanding > 0 %}Waive / adjust{% else %}History{% endif %}</button></td>{% endif %}
+                </tr>
+                {% if permissions.manage_bill_adjustments and not member_preview %}<tr class="tax-bill-action-row" id="profile-bill-actions-{{ bill.pk }}" data-sort-child hidden><td colspan="{% if permissions.view_mining_values %}8{% else %}4{% endif %}">{% include "buh_moon_tax/includes/bill_adjustment_workspace.html" with bill=bill return_to=request.path %}</td></tr>{% endif %}
+            {% empty %}<tr><td colspan="{% if permissions.view_mining_values %}{% if permissions.manage_bill_adjustments and not member_preview %}8{% else %}7{% endif %}{% else %}{% if permissions.manage_bill_adjustments and not member_preview %}4{% else %}3{% endif %}{% endif %}"><div class="tax-empty"><strong>No extraction bills are linked to this person.</strong></div></td></tr>{% endfor %}</tbody>
+        </table></div>
+    </section>
+
+    {% if bill_page_obj.paginator.num_pages > 1 %}
+    <nav class="tax-pagination mb-3" aria-label="Bill history pages">
+        <div>Showing {{ bill_page_obj.start_index|intcomma }}–{{ bill_page_obj.end_index|intcomma }} of {{ bill_page_obj.paginator.count|intcomma }} bills</div>
+        <div class="tax-pagination-buttons">
+            {% if bill_page_obj.has_previous %}
+            <a class="btn btn-sm btn-tax-ghost" href="?bills_page=1" aria-label="First bill page"><i class="fa-solid fa-angles-left"></i></a>
+            <a class="btn btn-sm btn-tax-ghost" href="?bills_page={{ bill_page_obj.previous_page_number }}">Previous</a>
+            {% endif %}
+            <span>Page {{ bill_page_obj.number }} of {{ bill_page_obj.paginator.num_pages }}</span>
+            {% if bill_page_obj.has_next %}
+            <a class="btn btn-sm btn-tax-ghost" href="?bills_page={{ bill_page_obj.next_page_number }}">Next</a>
+            <a class="btn btn-sm btn-tax-ghost" href="?bills_page={{ bill_page_obj.paginator.num_pages }}" aria-label="Last bill page"><i class="fa-solid fa-angles-right"></i></a>
+            {% endif %}
+        </div>
+    </nav>
+    {% endif %}
+
+    {% if permissions.view_payment_evidence %}
+    <section class="tax-panel">
+        <div class="tax-panel-head"><div><span>PAYMENT EVIDENCE</span><h2>Recent matched payments</h2></div><a class="btn btn-sm btn-tax-ghost" href="{% url 'buh_moon_tax:payments' %}?q={{ subject_name|urlencode }}"><i class="fa-solid fa-magnifying-glass"></i> Open payment search</a></div>
+        <div class="table-responsive"><table class="table tax-table mb-0" data-sortable-table><thead><tr><th data-sort-type="date">Date</th><th data-sort-type="text">Source</th><th data-sort-type="text">Recipient</th><th class="text-end" data-sort-type="number">Amount</th><th data-sort-type="text">Status</th></tr></thead><tbody>{% for payment in recent_payments %}<tr><td data-sort-value="{{ payment.occurred_at|date:'c' }}">{{ payment.occurred_at|date:"Y-m-d H:i" }} UTC</td><td data-sort-value="{{ payment.get_source_display }}">{{ payment.get_source_display }}</td><td data-sort-value="{{ payment.recipient_name }}">{{ payment.recipient_name }}</td><td class="text-end" data-sort-value="{{ payment.amount|unlocalize }}">{{ payment.amount|floatformat:2|intcomma }}</td><td data-sort-value="{{ payment.get_status_display }}"><span class="tax-status {{ payment.status|lower }}">{{ payment.get_status_display }}</span></td></tr>{% empty %}<tr><td colspan="5"><div class="tax-empty"><strong>No payment evidence is linked to this person.</strong></div></td></tr>{% endfor %}</tbody></table></div>
+    </section>
+    {% endif %}
+</main>
+{% endblock %}

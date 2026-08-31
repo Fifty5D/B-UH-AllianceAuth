@@ -1,0 +1,38 @@
+{% extends "buh_moon_tax/base.html" %}
+{% block content %}
+<main id="moon-tax-app">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <section class="tax-page-head mb-3">
+        <div>
+            <div class="tax-kicker"><span></span> SAFE PERMISSION TESTING</div>
+            <h1>Preview a member’s view</h1>
+            <p>Search by main character or Auth username. Preview is read-only and uses that account’s real Moon Tax permissions.</p>
+        </div>
+    </section>
+    <section class="tax-panel tax-preview-picker">
+        <form class="tax-preview-search" method="get">
+            <label>
+                <span class="visually-hidden">Search members</span>
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input class="form-control" type="search" name="q" value="{{ query }}" placeholder="Search main character or Auth username…" autofocus>
+            </label>
+            <button class="btn btn-tax-primary" type="submit">Search</button>
+        </form>
+        <div class="tax-preview-results">
+            {% for user in results %}
+            <article>
+                <span class="tax-avatar"><i class="fa-solid fa-user"></i></span>
+                <div><strong>{{ user.preview_label }}</strong><small>{{ user.preview_secondary }}</small></div>
+                <span class="tax-access-state {% if user.preview_has_access %}has-access{% endif %}">{% if user.preview_has_access %}Moon Tax access{% else %}No Moon Tax access{% endif %}</span>
+                <form method="post" action="{% url 'buh_moon_tax:start_member_preview' %}">
+                    {% csrf_token %}<input type="hidden" name="user_id" value="{{ user.pk }}">
+                    <button class="btn btn-sm btn-tax-ghost" type="submit"><i class="fa-solid fa-eye"></i> Preview</button>
+                </form>
+            </article>
+            {% empty %}
+            <div class="tax-empty"><i class="fa-solid fa-users-viewfinder"></i><strong>{% if query %}No matching active accounts{% else %}Search for a member to begin{% endif %}</strong><span>No login or impersonation occurs.</span></div>
+            {% endfor %}
+        </div>
+    </section>
+</main>
+{% endblock %}
