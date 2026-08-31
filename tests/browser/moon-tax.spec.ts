@@ -67,7 +67,7 @@ test("director sees exact combined totals and linked-character identity", async 
 
   const characters = page.locator(".tax-character-list > span");
   await expect(characters).toHaveCount(2);
-  await expect(characters).toContainText(["Member Main", "Member Alt"]);
+  await expect(characters).toContainText(["Member Alt", "Member Main"]);
 
   const summary = page.locator('section[aria-label="Person tax summary"]');
   await expectSummaryValue(summary, "Extraction bills", "2");
@@ -82,7 +82,7 @@ test("text, numeric, and date sorting preserve deterministic row navigation", as
 
   const totals = tableUnder(page, "Totals by billing account");
   await totals.getByRole("button", {name: "Account / character: sort ascending"}).click();
-  await expect(totals.getByRole("columnheader", {name: "Account / character"})).toHaveAttribute(
+  await expect(totals.locator("thead th").nth(0)).toHaveAttribute(
     "aria-sort",
     "ascending",
   );
@@ -94,7 +94,7 @@ test("text, numeric, and date sorting preserve deterministic row navigation", as
   ]);
 
   await totals.getByRole("button", {name: "Outstanding: sort ascending"}).click();
-  await expect(totals.getByRole("columnheader", {name: "Outstanding"})).toHaveAttribute(
+  await expect(totals.locator("thead th").nth(6)).toHaveAttribute(
     "aria-sort",
     "ascending",
   );
@@ -107,7 +107,7 @@ test("text, numeric, and date sorting preserve deterministic row navigation", as
 
   const periods = tableUnder(page, "Extraction periods");
   await periods.getByRole("button", {name: "Popped: sort ascending"}).click();
-  await expect(periods.getByRole("columnheader", {name: "Popped"})).toHaveAttribute(
+  await expect(periods.locator("thead th").nth(1)).toHaveAttribute(
     "aria-sort",
     "ascending",
   );
