@@ -1,0 +1,16 @@
+.buh-account-search {
+    box-sizing: border-box;
+    display: block;
+    margin-bottom: 0.5rem;
+    max-width: 44rem;
+    width: 100%;
+}
+
+select[data-buh-account-select] {
+    min-width: min(44rem, 100%);
+}
+
+.buh-account-search-status {
+    display: block;
+    margin-top: 0.35rem;
+}

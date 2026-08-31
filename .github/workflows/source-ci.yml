@@ -1,0 +1,23 @@
+name: Source CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-tests:
+    name: Source test suite
+    uses: ./.github/workflows/reusable-source-tests.yml
+    with:
+      cache_scope: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'merge_group' && format('merge-{0}', github.run_id) || 'main' }}
+    permissions:
+      contents: read

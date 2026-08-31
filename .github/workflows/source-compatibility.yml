@@ -1,0 +1,22 @@
+name: Scheduled source compatibility
+
+on:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: Full pinned compatibility suite
+    uses: ./.github/workflows/reusable-source-tests.yml
+    with:
+      cache_scope: ${{ github.event_name == 'schedule' && 'compatibility-main' || format('compatibility-{0}', github.run_id) }}
+    permissions:
+      contents: read

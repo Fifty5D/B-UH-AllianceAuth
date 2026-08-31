@@ -1,0 +1,21 @@
+{% with id=widget.attrs.id %}
+<div class="buh-recipient-picker" data-buh-recipient-picker{% if id %} id="{{ id }}"{% endif %}>
+  <div class="buh-recipient-tools">
+    <input type="search" class="vTextField" data-buh-recipient-search placeholder="Filter characters or corporations…" aria-label="Filter payment recipients">
+    <button type="button" class="button" data-buh-recipient-select-visible>Select visible</button>
+    <button type="button" class="button" data-buh-recipient-clear>Clear all</button>
+    <span data-buh-recipient-count aria-live="polite"></span>
+  </div>
+  <div class="buh-recipient-options">
+    {% for group, options, index in widget.optgroups %}
+      {% if group %}<div class="buh-recipient-group"><strong>{{ group }}</strong>{% endif %}
+      {% for option in options %}
+        <div class="buh-recipient-option" data-buh-recipient-option data-search="{{ option.label|lower }}">
+          {% include option.template_name with widget=option %}
+        </div>
+      {% endfor %}
+      {% if group %}</div>{% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endwith %}

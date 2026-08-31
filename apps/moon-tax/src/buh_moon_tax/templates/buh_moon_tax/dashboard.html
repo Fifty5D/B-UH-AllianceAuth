@@ -1,0 +1,119 @@
+{% extends "buh_moon_tax/base.html" %}
+{% load humanize l10n %}
+{% block content %}
+<main id="moon-tax-app">
+    {% include "buh_moon_tax/includes/member_preview_banner.html" %}
+    <section class="tax-hero mb-3">
+        <div>
+            <div class="tax-kicker"><span></span> EXTRACTION-BASED LEDGER</div>
+            <h1>Moon Tax</h1>
+            <p>Observer-ledger mining, compressed Jita buy value, director-approved payments, and a permanent decision trail.</p>
+        </div>
+        <div class="tax-actions">
+            {% if permissions.run_tax_audit and not member_preview %}
+            <form method="post" action="{% url 'buh_moon_tax:run_audit' %}">{% csrf_token %}<button class="btn btn-tax-primary" type="submit" {% if latest_audit and latest_audit.status == 'RUNNING' %}disabled{% endif %}><i class="fa-solid fa-arrows-rotate me-1"></i> Run tax audit</button></form>
+            {% endif %}
+            {% if permissions.export_tax_data %}<a class="btn btn-tax-ghost" href="{% url 'buh_moon_tax:export_csv' %}"><i class="fa-solid fa-file-csv me-1"></i> Export</a>{% endif %}
+        </div>
+        <div class="tax-source-strip">
+            <span><i class="fa-solid fa-moon"></i> One bill per extraction</span>
+            <span><i class="fa-solid fa-clock"></i> Mining closes {{ config.mining_window_days|default:3 }} days after pop</span>
+            <span><i class="fa-solid fa-chart-line"></i> Compressed Jita 4-4 buy depth</span>
+            <span><i class="fa-solid fa-user-check"></i> Payments require director approval</span>
+        </div>
+    </section>
+
+    <section class="tax-kpis mb-3" aria-label="Tax summary">
+        <article><span class="tax-icon violet"><i class="fa-solid fa-receipt"></i></span><div><small>Visible bills</small><strong>{{ totals.bills|default:0|intcomma }}</strong><em>linked to your permission scope</em></div></article>
+        {% if permissions.view_mining_values %}
+        <article><span class="tax-icon blue"><i class="fa-solid fa-gem"></i></span><div><small>Calculated tax</small><strong>{{ totals.tax|floatformat:0|intcomma }}</strong><em>ISK across visible bills</em></div></article>
+        <article><span class="tax-icon green"><i class="fa-solid fa-circle-check"></i></span><div><small>Approved payments</small><strong>{{ totals.paid|floatformat:0|intcomma }}</strong><em>ISK after director review</em></div></article>
+        <article class="{% if totals.outstanding > 0 %}danger{% endif %}"><span class="tax-icon red"><i class="fa-solid fa-scale-unbalanced-flip"></i></span><div><small>Outstanding</small><strong>{{ totals.outstanding|floatformat:0|intcomma }}</strong><em>ISK currently due</em></div></article>
+        {% endif %}
+        {% if permissions.review_payments %}<article><span class="tax-icon gold"><i class="fa-solid fa-inbox"></i></span><div><small>Payment review</small><strong>{{ pending_payment_count|intcomma }}</strong><em>candidate payments waiting</em></div></article>{% endif %}
+    </section>
+
+    {% if latest_audit %}
+    <section class="tax-audit-state {{ latest_audit.status|lower }} mb-3" {% if latest_audit.status == 'QUEUED' or latest_audit.status == 'REFRESHING' or latest_audit.status == 'RUNNING' %}data-audit-url="{% url 'buh_moon_tax:audit_status' latest_audit.pk %}"{% endif %}>
+        <div class="tax-audit-pulse"><i class="fa-solid {% if latest_audit.status == 'COMPLETE' %}fa-circle-check{% elif latest_audit.status == 'FAILED' %}fa-circle-xmark{% else %}fa-arrows-rotate{% endif %}"></i></div>
+        <div><small>LATEST AUDIT #{{ latest_audit.pk }}</small><strong data-audit-label>{{ latest_audit.get_status_display }}</strong><span>{% if latest_audit.finished_at %}Finished {{ latest_audit.finished_at|timesince }} ago{% else %}Queued {{ latest_audit.queued_at|timesince }} ago{% endif %}</span></div>
+        <div class="tax-audit-counts" data-audit-summary>{% if latest_audit.summary %}<span>{{ latest_audit.summary.periods|default:0 }} pulls</span><span>{{ latest_audit.summary.mining_lines_processed|default:0 }} ledger rows</span><span>{{ latest_audit.summary.new_payment_candidates|default:0 }} new payments</span>{% else %}<span>Refreshing source data before reconciliation</span>{% endif %}</div>
+    </section>
+    {% endif %}
+
+    <div class="tax-grid mb-3">
+        <section class="tax-panel tax-periods">
+            <div class="tax-panel-head"><div><span>MOON PULLS</span><h2>Extraction periods</h2></div><small>Newest first · EVE/UTC</small></div>
+            <div class="table-responsive">
+                <table class="table tax-table align-middle mb-0" data-sortable-table>
+                    <thead><tr><th data-sort-type="text">Moon / refinery</th><th data-sort-type="date">Popped</th><th data-sort-type="date">Collection closes</th><th data-sort-type="number">Rate</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Tax</th><th class="text-end" data-sort-type="number">Due</th>{% endif %}<th data-sort-type="text">Status</th></tr></thead>
+                    <tbody>{% for period in periods %}<tr class="tax-clickable-row" data-row-url="{% url 'buh_moon_tax:period' period.pk %}" tabindex="0" aria-keyshortcuts="Enter Space" aria-label="View extraction records for {{ period.moon_name|default:period.structure_name }}">
+                        <td data-sort-value="{{ period.moon_name|default:period.structure_name }}"><a class="tax-primary-link tax-row-primary-link" href="{% url 'buh_moon_tax:period' period.pk %}">{{ period.moon_name|default:period.structure_name }}</a><small>{{ period.structure_name }} · {{ period.corporation_name }}</small></td>
+                        <td data-sort-value="{{ period.pop_at|date:'c' }}">{{ period.pop_at|date:"Y-m-d H:i" }}</td><td data-sort-value="{{ period.closes_at|date:'c' }}">{{ period.closes_at|date:"Y-m-d H:i" }}</td><td data-sort-value="{{ period.tax_rate|unlocalize }}">{{ period.tax_rate|floatformat:2 }}%</td>
+                        {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ period.visible_tax|unlocalize }}">{{ period.visible_tax|floatformat:0|intcomma }}</td><td class="text-end {% if period.visible_outstanding > 0 %}tax-due{% endif %}" data-sort-value="{{ period.visible_outstanding|unlocalize }}">{{ period.visible_outstanding|floatformat:0|intcomma }}</td>{% endif %}
+                        <td data-sort-value="{{ period.get_status_display }}"><span class="tax-status {{ period.status|lower }}">{{ period.get_status_display }}</span></td>
+                    </tr>{% empty %}<tr><td colspan="{% if permissions.view_mining_values %}7{% else %}5{% endif %}"><div class="tax-empty"><i class="fa-solid fa-moon"></i><strong>No eligible extraction periods yet</strong><span>Run an audit after Moon Mining has imported a refinery and extraction.</span></div></td></tr>{% endfor %}</tbody>
+                </table>
+            </div>
+        </section>
+
+        <aside class="tax-panel tax-guide">
+            <div class="tax-panel-head"><div><span>HOW IT WORKS</span><h2>Audit trail</h2></div></div>
+            <ol>
+                <li><b>1</b><div><strong>Observe</strong><span>Corporation observer ledgers identify every character and ore unit at owned refineries.</span></div></li>
+                <li><b>2</b><div><strong>Value</strong><span>Editable compression mappings convert ore to compressed equivalents and fill current Jita buy orders.</span></div></li>
+                <li><b>3</b><div><strong>Bill</strong><span>Mining is grouped by Auth account by default and locked to the extraction’s effective tax rate.</span></div></li>
+                <li><b>4</b><div><strong>Review</strong><span>Wallet and pure-ISK contract payments remain pending until a director allocates or classifies them.</span></div></li>
+            </ol>
+            <div class="tax-limit"><i class="fa-solid fa-circle-info"></i><p><strong>CCP history limit</strong><span>ESI exposes roughly 30 days for observer ledgers, wallet journals, and contracts. Imported rows are kept permanently here.</span></p></div>
+        </aside>
+    </div>
+
+    <section class="tax-panel mb-3">
+        <div class="tax-panel-head"><div><span>COMBINED TOTALS</span><h2>Totals by billing account</h2></div><small>Every visible extraction bill, grouped by billing mode</small></div>
+        <div class="table-responsive"><table class="table tax-table align-middle mb-0" data-sortable-table>
+            <thead><tr><th data-sort-type="text">Account / character</th><th data-sort-type="text">Billing</th><th class="text-end" data-sort-type="number">Extractions</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Mined value</th><th class="text-end" data-sort-type="number">Tax</th><th class="text-end" data-sort-type="number">Paid</th><th class="text-end" data-sort-type="number">Outstanding</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for account in billing_accounts %}
+                <tr{% if account.profile_url %} class="tax-clickable-row" data-row-url="{{ account.profile_url }}" tabindex="0" aria-keyshortcuts="Enter Space" aria-label="Open combined totals for {{ account.display_name }}"{% endif %}>
+                    <td data-sort-value="{{ account.display_name }}">
+                        {% if account.profile_url %}<a class="tax-row-primary-link" href="{{ account.profile_url }}"><strong>{{ account.display_name }}</strong></a>{% else %}<strong>{{ account.display_name }}</strong>{% endif %}
+                        {% if not account.auth_user_id %}<small class="tax-warning"><i class="fa-solid fa-link-slash"></i> Unlinked / outside miner</small>{% endif %}
+                    </td>
+                    <td data-sort-value="{{ account.billing_label }}">{{ account.billing_label }}</td>
+                    <td class="text-end" data-sort-value="{{ account.bills }}">{{ account.bills|intcomma }}</td>
+                    {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ account.gross|unlocalize }}">{{ account.gross|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ account.tax|unlocalize }}">{{ account.tax|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ account.paid|unlocalize }}">{{ account.paid|floatformat:0|intcomma }}</td><td class="text-end {% if account.outstanding > 0 %}tax-due{% endif %}" data-sort-value="{{ account.outstanding|unlocalize }}">{{ account.outstanding|floatformat:0|intcomma }}</td>{% endif %}
+                </tr>
+            {% empty %}<tr><td colspan="{% if permissions.view_mining_values %}7{% else %}3{% endif %}"><div class="tax-empty"><i class="fa-solid fa-users"></i><strong>No visible billing accounts</strong></div></td></tr>{% endfor %}
+            </tbody>
+        </table></div>
+    </section>
+
+    <section class="tax-panel">
+        <div class="tax-panel-head"><div><span>{% if permissions.view_all_tax %}ACCOUNT LEDGER{% else %}YOUR LEDGER{% endif %}</span><h2>Balances by extraction</h2></div><small>Open any row for the person workspace</small></div>
+        <div class="table-responsive"><table class="table tax-table align-middle mb-0" data-sortable-table>
+            <thead><tr><th data-sort-type="text">Account / character</th><th data-sort-type="date">Extraction</th><th data-sort-type="text">Billing</th>{% if permissions.view_mining_values %}<th class="text-end" data-sort-type="number">Mined value</th><th class="text-end" data-sort-type="number">Tax</th><th class="text-end" data-sort-type="number">Paid</th><th class="text-end" data-sort-type="number">Outstanding</th>{% endif %}<th data-sort-type="text">Status</th>{% if permissions.manage_bill_adjustments and not member_preview %}<th class="text-end" data-sort-disabled>Resolve</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for bill in assessments %}
+                <tr{% if bill.profile_url %} class="tax-clickable-row" data-row-url="{{ bill.profile_url }}" tabindex="0" aria-keyshortcuts="Enter Space" aria-label="Open person workspace for {{ bill.display_name }}"{% endif %}>
+                    <td data-sort-value="{{ bill.display_name }}">
+                        {% if bill.profile_url %}<a class="tax-row-primary-link" href="{{ bill.profile_url }}"><strong>{{ bill.display_name }}</strong></a>{% else %}<strong>{{ bill.display_name }}</strong>{% endif %}
+                        {% if not bill.auth_user_id %}<small class="tax-warning"><i class="fa-solid fa-link-slash"></i> Unlinked / outside miner</small>{% endif %}
+                    </td>
+                    <td data-sort-value="{{ bill.period.pop_at|date:'c' }}"><a href="{% url 'buh_moon_tax:period' bill.period_id %}">{{ bill.period.moon_name|default:bill.period.structure_name }}</a><small>{{ bill.period.pop_at|date:"Y-m-d" }}</small></td>
+                    <td data-sort-value="{% if bill.combined_characters %}Combined account{% else %}Individual character{% endif %}">{% if bill.combined_characters %}Combined account{% else %}Individual character{% endif %}</td>
+                    {% if permissions.view_mining_values %}<td class="text-end" data-sort-value="{{ bill.gross_value|unlocalize }}">{{ bill.gross_value|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.tax_due|unlocalize }}">{{ bill.tax_due|floatformat:0|intcomma }}</td><td class="text-end" data-sort-value="{{ bill.approved_paid|unlocalize }}">{{ bill.approved_paid|floatformat:0|intcomma }}</td><td class="text-end {% if bill.outstanding > 0 %}tax-due{% endif %}" data-sort-value="{{ bill.outstanding|unlocalize }}">{{ bill.outstanding|floatformat:0|intcomma }}</td>{% endif %}
+                    <td data-sort-value="{{ bill.get_status_display }}"><span class="tax-status {{ bill.status|lower }}">{{ bill.get_status_display }}</span></td>
+                    {% if permissions.manage_bill_adjustments and not member_preview %}<td class="text-end"><button class="btn btn-sm {% if bill.can_quick_waive %}btn-tax-primary{% else %}btn-tax-ghost{% endif %}" type="button" data-bill-toggle="overview-bill-actions-{{ bill.pk }}" aria-controls="overview-bill-actions-{{ bill.pk }}" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> {% if bill.outstanding > 0 %}Waive / adjust{% else %}History{% endif %}</button></td>{% endif %}
+                </tr>
+                {% if permissions.manage_bill_adjustments and not member_preview %}
+                <tr class="tax-bill-action-row" id="overview-bill-actions-{{ bill.pk }}" data-sort-child hidden><td colspan="{% if permissions.view_mining_values %}9{% else %}5{% endif %}">
+                    {% include "buh_moon_tax/includes/bill_adjustment_workspace.html" with bill=bill return_to=request.path %}
+                </td></tr>
+                {% endif %}
+            {% empty %}<tr><td colspan="{% if permissions.view_mining_values and permissions.manage_bill_adjustments and not member_preview %}9{% elif permissions.view_mining_values %}8{% elif permissions.manage_bill_adjustments and not member_preview %}5{% else %}4{% endif %}"><div class="tax-empty"><i class="fa-solid fa-receipt"></i><strong>No visible tax bills</strong></div></td></tr>{% endfor %}
+            </tbody>
+        </table></div>
+    </section>
+</main>
+{% endblock %}

@@ -1,0 +1,133 @@
+name: Source supply-chain drift
+
+on:
+  schedule:
+    - cron: "41 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  configuration:
+    name: Read lock target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.contract.outputs.python }}
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read exact Python from the compatibility contract
+        id: contract
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          contract = tomllib.loads(
+              Path("platform/compatibility.toml").read_text(encoding="utf-8")
+          )
+          python = str(contract["supply_chain"]["lock_python"])
+          if python != str(contract["runtime"]["python"]):
+              raise SystemExit("Runtime and lock-target Python versions differ")
+          if not re.fullmatch(
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)",
+              python,
+          ):
+              raise SystemExit("Unsafe lock-target Python version")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"python={python}", file=output)
+          PY
+
+  drift:
+    name: Resolve immutable input drift (read only)
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up exact lock-target Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ needs.configuration.outputs.python }}
+          cache: pip
+          cache-dependency-path: |
+            platform/requirements/build.lock
+
+      - name: Install only checksum-locked tooling
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --require-hashes \
+            -r platform/requirements/build.lock
+          python ops/supply_chain.py verify
+
+      - name: Resolve current PyPI and registry metadata
+        id: refresh
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifacts/supply-chain
+          python ops/supply_chain.py refresh-locks
+          python ops/supply_chain.py refresh-images
+          python ops/supply_chain.py verify
+
+          mapfile -t changed < <(git diff --name-only --)
+          allowed='^(platform/requirements/(build|production|test)\.lock|platform/testenv/(Dockerfile|Dockerfile\.playwright|compose\.yml|env\.example))$'
+          for path in "${changed[@]}"; do
+            if [[ ! "${path}" =~ ${allowed} ]]; then
+              echo "Updater changed a non-allowlisted path: ${path}" >&2
+              exit 1
+            fi
+          done
+
+          if ((${#changed[@]} == 0)); then
+            echo "drift=false" >>"${GITHUB_OUTPUT}"
+            printf 'No dependency or image drift detected.\n' \
+              >artifacts/supply-chain/summary.txt
+            exit 0
+          fi
+
+          echo "drift=true" >>"${GITHUB_OUTPUT}"
+          printf '%s\n' "${changed[@]}" >artifacts/supply-chain/changed-files.txt
+          git diff --binary -- "${changed[@]}" >artifacts/supply-chain/review.patch
+          patch_size="$(wc -c <artifacts/supply-chain/review.patch)"
+          if ((patch_size == 0 || patch_size > 2097152)); then
+            echo "Supply-chain patch is empty or exceeds 2 MiB" >&2
+            exit 1
+          fi
+
+      - name: Upload bounded review patch
+        if: steps.refresh.outputs.drift == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supply-chain-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/supply-chain/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require reviewed source update when drift exists
+        if: steps.refresh.outputs.drift == 'true'
+        run: |
+          echo "Immutable supply-chain inputs changed; review the attached patch." >&2
+          exit 1

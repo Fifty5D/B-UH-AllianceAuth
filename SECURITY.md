@@ -1,11 +1,10 @@
-# Security
+# Security policy
 
-Do not commit Alliance Auth `.env` files, database dumps, ESI tokens, Discord
-webhooks, SSH private keys, GitHub secrets, or unredacted diagnostic bundles.
+This is a private operational repository. Report suspected vulnerabilities to the
+repository owner through the existing private channel; do not include credentials,
+tokens, production data, or unredacted logs in an issue or pull request.
 
-The VPS observer uses a dedicated key forced to a fixed read-only entry point.
-It cannot open a shell, deploy code, restart containers, or read `.env`.
-
-Deployment credentials and observer credentials must remain separate. Production
-deployments will use a protected GitHub Environment, pre-deployment tests,
-timestamped backups, health checks, and automatic rollback.
+Test and preview workflows are intentionally secret-free. Production credentials
+belong only in the protected GitHub environment and the VPS configuration. Existing
+signed/checksummed release bundles are immutable; security corrections receive new
+application and platform versions.

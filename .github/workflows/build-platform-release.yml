@@ -1,0 +1,1757 @@
+name: Build platform release
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact full main commit SHA (40 or 64 lowercase hex characters)
+        required: true
+        type: string
+      publish_release_branch:
+        description: Publish the verified candidate to a new release branch
+        required: false
+        type: boolean
+        default: false
+      publish_confirmation:
+        description: Type PUBLISH RELEASE BRANCH when publication is enabled
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-release-${{ inputs.expected_source_sha }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  source_gate:
+    name: Require exact-SHA Source CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run_attempt: ${{ steps.source_ci.outputs.run_attempt }}
+      run_id: ${{ steps.source_ci.outputs.run_id }}
+      run_url: ${{ steps.source_ci.outputs.run_url }}
+    steps:
+      - name: Find the newest exact-SHA main Source CI run
+        id: source_ci
+        env:
+          API_URL: ${{ github.api_url }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "${EXPECTED_SOURCE_SHA}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "expected_source_sha must be a full lowercase Git ID." >&2
+            exit 1
+          fi
+          [[ "${DISPATCH_REF}" == "refs/heads/main" ]]
+          [[ "${DISPATCH_SHA}" == "${EXPECTED_SOURCE_SHA}" ]]
+
+          mkdir -p build/source-ci-pages
+          page=1
+          while :; do
+            response="build/source-ci-pages/page-${page}.json"
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${API_URL}/repos/${REPOSITORY}/actions/workflows/source-ci.yml/runs?branch=main&event=push&head_sha=${EXPECTED_SOURCE_SHA}&per_page=100&page=${page}" \
+              >"${response}"
+            page_count="$(jq -er '.workflow_runs | length' "${response}")"
+            [[ "${page_count}" =~ ^[0-9]+$ ]]
+            if [[ "${page_count}" -lt 100 ]]; then
+              break
+            fi
+            page=$((page + 1))
+            if [[ "${page}" -gt 100 ]]; then
+              echo "Too many Source CI result pages; refusing an incomplete decision." >&2
+              exit 1
+            fi
+          done
+
+          jq -s '{workflow_runs: [.[].workflow_runs[]]}' \
+            build/source-ci-pages/page-*.json >build/source-ci-runs.json
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("build/source-ci-runs.json").read_text(encoding="utf-8")
+          )
+          expected = os.environ["EXPECTED_SOURCE_SHA"]
+          repository = os.environ["REPOSITORY"]
+          runs = [
+              run
+              for run in payload.get("workflow_runs", [])
+              if run.get("head_sha") == expected
+              and run.get("head_branch") == "main"
+              and run.get("event") == "push"
+              and isinstance(run.get("path"), str)
+              and run["path"].split("@", 1)[0] == ".github/workflows/source-ci.yml"
+              and (run.get("head_repository") or {}).get("full_name") == repository
+              and isinstance(run.get("id"), int)
+          ]
+          if not runs:
+              raise SystemExit(
+                  "No Source CI push run exists for expected_source_sha"
+              )
+          selected = max(
+              runs,
+              key=lambda run: (
+                  int(run.get("run_number", 0)),
+                  int(run.get("run_attempt", 0)),
+                  run["id"],
+              ),
+          )
+          if (
+              selected.get("status") != "completed"
+              or selected.get("conclusion") != "success"
+          ):
+              raise SystemExit(
+                  "The newest exact-SHA Source CI run did not complete successfully"
+              )
+          run_id = selected["id"]
+          run_attempt = int(selected.get("run_attempt", 0))
+          if run_attempt < 1:
+              raise SystemExit("Newest Source CI run has an invalid attempt number")
+          run_url = (
+              f"{os.environ['SERVER_URL']}/{repository}/actions/runs/{run_id}"
+              f"/attempts/{run_attempt}"
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"run_attempt={run_attempt}", file=output)
+              print(f"run_id={run_id}", file=output)
+              print(f"run_url={run_url}", file=output)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
+              "a", encoding="utf-8"
+          ) as summary:
+              print("### Verified Source CI provenance", file=summary)
+              print(file=summary)
+              print(f"- Source: `{expected}`", file=summary)
+              print(f"- Run: `{run_id}`", file=summary)
+              print(f"- Attempt: `{run_attempt}`", file=summary)
+          print(f"Using successful Source CI run {run_id}, attempt {run_attempt}")
+          PY
+
+  candidate:
+    name: Build and verify candidate
+    needs: source_gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      artifact_name: ${{ steps.plan.outputs.artifact_name }}
+      platform_version: ${{ steps.plan.outputs.platform_version }}
+      python: ${{ steps.source.outputs.python }}
+      source_ci_run_attempt: ${{ needs.source_gate.outputs.run_attempt }}
+      source_ci_run_id: ${{ needs.source_gate.outputs.run_id }}
+      test_run_url: ${{ needs.source_gate.outputs.run_url }}
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate the dispatch and compatibility contract
+        id: source
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "${EXPECTED_SOURCE_SHA}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "expected_source_sha must be a full 40- or 64-character lowercase Git ID." >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_REF}" != "refs/heads/main" ]]; then
+            echo "Release candidates may only be dispatched from main." >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_SHA}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "The selected workflow revision is not expected_source_sha." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "The checked-out commit is not expected_source_sha." >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          contract = tomllib.loads(
+              Path("platform/compatibility.toml").read_text(encoding="utf-8")
+          )
+          python_version = str(contract["runtime"]["python"])
+          if not re.fullmatch(
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)",
+              python_version,
+          ):
+              raise SystemExit("Compatibility contract has an unsafe Python version")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"python={python_version}", file=output)
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ steps.source.outputs.python }}
+          cache: pip
+          cache-dependency-path: |
+            platform/requirements/build.lock
+            platform/requirements/production.lock
+            platform/requirements/test.lock
+            platform/requirements/production.txt
+            platform/requirements/test.txt
+            apps/*/pyproject.toml
+
+      - name: Install bounded native build prerequisites
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            default-libmysqlclient-dev \
+            pkg-config
+
+      - name: Install checksum-locked release tools
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --require-hashes \
+            -r platform/requirements/build.lock
+          python -m pip install \
+            --require-hashes \
+            --no-build-isolation \
+            --only-binary=:all: \
+            --no-binary=celery-once,django-bootstrap-form,mysqlclient \
+            -r platform/requirements/test.lock
+          python ops/supply_chain.py verify
+
+      - name: Select and verify the previous immutable release
+        id: previous
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from ops.release.buh_release import SemVer, verify_release_dir
+
+          release_root = Path("releases/platform")
+          candidates = []
+          if release_root.exists():
+              if not release_root.is_dir() or release_root.is_symlink():
+                  raise SystemExit("releases/platform is not a regular directory")
+              for entry in sorted(release_root.iterdir(), key=lambda item: item.name):
+                  if entry.name.startswith("."):
+                      continue
+                  if not entry.is_dir() or entry.is_symlink() or not entry.name.startswith("v"):
+                      raise SystemExit(f"Unexpected platform release entry: {entry}")
+                  version = SemVer.parse(entry.name[1:])
+                  manifest = verify_release_dir(entry)
+                  if manifest["platform_version"] != str(version):
+                      raise SystemExit(f"Release directory and manifest disagree: {entry}")
+                  candidates.append((version, entry))
+
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as output:
+              if not candidates:
+                  print("has_previous=false", file=output)
+              else:
+                  _, latest = max(candidates)
+                  print("has_previous=true", file=output)
+                  print(f"previous_dir={latest.as_posix()}", file=output)
+                  print(
+                      f"previous_manifest={(latest / 'RELEASE.json').as_posix()}",
+                      file=output,
+                  )
+          PY
+
+      - name: Plan changed applications and versions
+        id: plan
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          HAS_PREVIOUS: ${{ steps.previous.outputs.has_previous }}
+          PREVIOUS_MANIFEST: ${{ steps.previous.outputs.previous_manifest }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          TEST_RUN_URL: ${{ needs.source_gate.outputs.run_url }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p build
+          command=(
+            python ops/release/buh_release.py plan
+            --root .
+            --source-sha "${EXPECTED_SOURCE_SHA}"
+            --test-run "${TEST_RUN_URL}"
+            --output build/release-plan.json
+          )
+          if [[ "${HAS_PREVIOUS}" == "true" ]]; then
+            command+=(--previous "${PREVIOUS_MANIFEST}")
+          fi
+          "${command[@]}"
+
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          plan = json.loads(Path("build/release-plan.json").read_text(encoding="utf-8"))
+          expected = os.environ["EXPECTED_SOURCE_SHA"]
+          if plan.get("source_commit") != expected:
+              raise SystemExit("Release plan source does not match expected_source_sha")
+          if plan.get("release_required") is not True:
+              raise SystemExit("No release is required for this source commit")
+          version = plan.get("platform_version")
+          if not isinstance(version, str) or not re.fullmatch(
+              r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+              version,
+          ):
+              raise SystemExit("Planner returned an unsafe platform version")
+          matrix = plan.get("build_matrix")
+          if not isinstance(matrix, list):
+              raise SystemExit("Planner returned an invalid build matrix")
+          app_ids = [item.get("id") for item in matrix]
+          if any(
+              not isinstance(app_id, str)
+              or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", app_id)
+              for app_id in app_ids
+          ):
+              raise SystemExit("Planner returned an unsafe application ID")
+          if len(app_ids) != len(set(app_ids)):
+              raise SystemExit("Planner repeated an application build")
+
+          artifact = (
+              f"platform-release-v{version}-{expected[:12]}-"
+              f"{os.environ['RUN_ID']}-{os.environ['RUN_ATTEMPT']}"
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"platform_version={version}", file=output)
+              print(f"artifact_name={artifact}", file=output)
+          Path("build/apps-to-build.txt").write_text(
+              "".join(f"{app_id}\n" for app_id in app_ids),
+              encoding="utf-8",
+          )
+          print("Changed applications:", ", ".join(app_ids) if app_ids else "(none)")
+          PY
+
+      - name: Build only changed application wheels
+        run: |
+          set -Eeuo pipefail
+          mkdir -p build/wheels
+          while IFS= read -r app_id; do
+            [[ -n "${app_id}" ]] || continue
+            python ops/release/buh_release.py build \
+              --root . \
+              --plan build/release-plan.json \
+              --app "${app_id}" \
+              --output-dir build/wheels
+          done <build/apps-to-build.txt
+
+      - name: Assemble with verified unchanged artifacts
+        env:
+          HAS_PREVIOUS: ${{ steps.previous.outputs.has_previous }}
+          PREVIOUS_DIR: ${{ steps.previous.outputs.previous_dir }}
+        run: |
+          set -Eeuo pipefail
+          command=(
+            python ops/release/buh_release.py assemble
+            --root .
+            --plan build/release-plan.json
+            --wheel-dir build/wheels
+            --output-dir build/release
+          )
+          if [[ "${HAS_PREVIOUS}" == "true" ]]; then
+            command+=(--previous-dir "${PREVIOUS_DIR}")
+          fi
+          "${command[@]}"
+
+      - name: Verify checksums, wheel metadata, and isolated installation
+        run: |
+          set -Eeuo pipefail
+          python ops/release/buh_release.py verify --release-dir build/release
+          python -m twine check build/release/*.whl
+          python ops/release/buh_release.py validate-install \
+            --release-dir build/release
+
+      - name: Prove the assembled wheels in a fresh locked runtime
+        env:
+          EXPECTED_PYTHON: ${{ steps.source.outputs.python }}
+        run: |
+          set -Eeuo pipefail
+          runtime_root="${RUNNER_TEMP}/buh-candidate-runtime"
+          work_root="${RUNNER_TEMP}/buh-candidate-runtime-work"
+          mkdir -p "${work_root}"
+          python -m venv "${runtime_root}"
+          runtime_python="${runtime_root}/bin/python"
+
+          [[ "$("${runtime_python}" -c 'import platform; print(platform.python_version())')" == \
+            "${EXPECTED_PYTHON}" ]]
+          "${runtime_python}" -m pip install \
+            --require-hashes \
+            -r "${GITHUB_WORKSPACE}/platform/requirements/build.lock"
+          "${runtime_python}" -m pip install \
+            --require-hashes \
+            --no-build-isolation \
+            --only-binary=:all: \
+            --no-binary=celery-once,django-bootstrap-form,mysqlclient \
+            -r "${GITHUB_WORKSPACE}/platform/requirements/production.lock"
+
+          mapfile -t release_wheels < <(
+            find "${GITHUB_WORKSPACE}/build/release" \
+              -maxdepth 1 -type f -name '*.whl' -print |
+              LC_ALL=C sort
+          )
+          [[ "${#release_wheels[@]}" -gt 0 ]]
+          "${runtime_python}" -m pip install \
+            --no-index --no-deps "${release_wheels[@]}"
+          "${runtime_python}" -m pip check
+
+          (
+            cd "${work_root}"
+            env -u PYTHONPATH \
+              PLAN_PATH="${GITHUB_WORKSPACE}/build/release-plan.json" \
+              WORKSPACE="${GITHUB_WORKSPACE}" \
+              "${runtime_python}" -P - <<'PY'
+          import importlib
+          import importlib.metadata
+          import json
+          import os
+          import site
+          import sys
+          from pathlib import Path
+
+          workspace = Path(os.environ["WORKSPACE"]).resolve()
+          plan = json.loads(
+              Path(os.environ["PLAN_PATH"]).read_text(encoding="utf-8")
+          )
+          source_roots = [
+              (workspace / app["path"] / "src").resolve()
+              for app in plan["apps"]
+          ]
+          site_roots = [Path(value).resolve() for value in site.getsitepackages()]
+
+          def below(path, roots):
+              return any(path == root or path.is_relative_to(root) for root in roots)
+
+          for entry in sys.path:
+              if not entry:
+                  raise SystemExit("Unsafe current-directory entry in runtime sys.path")
+              resolved = Path(entry).resolve()
+              if below(resolved, source_roots):
+                  raise SystemExit(f"Source application path leaked into sys.path: {resolved}")
+
+          for app in plan["apps"]:
+              installed_version = importlib.metadata.version(app["distribution"])
+              if installed_version != app["version"]:
+                  raise SystemExit(
+                      f"Installed {app['distribution']} version differs from the plan"
+                  )
+              module = importlib.import_module(app["import_name"])
+              if getattr(module, "__version__", None) != app["version"]:
+                  raise SystemExit(
+                      f"Imported {app['import_name']} version differs from the plan"
+                  )
+              module_file = getattr(module, "__file__", None)
+              if not module_file:
+                  raise SystemExit(f"Imported module has no file: {app['import_name']}")
+              module_path = Path(module_file).resolve()
+              if below(module_path, source_roots) or not below(module_path, site_roots):
+                  raise SystemExit(
+                      f"Imported {app['import_name']} outside the fresh runtime: {module_path}"
+                  )
+          PY
+
+            django_command=(
+              env -u PYTHONPATH
+              "PYTHONPATH=${GITHUB_WORKSPACE}/platform/testauth"
+              "PYTHONSAFEPATH=1"
+              "BUH_TEST_SETTINGS=testauth.settings.unit"
+              "${runtime_python}" -P
+              "${GITHUB_WORKSPACE}/platform/testauth/manage.py"
+            )
+            "${django_command[@]}" check --no-color
+            "${django_command[@]}" makemigrations \
+              --check --dry-run --noinput --no-color
+          )
+
+      - name: Stage the delta candidate metadata
+        run: |
+          set -Eeuo pipefail
+          metadata_dir="build/candidate-metadata"
+          mkdir -p "${metadata_dir}"
+          for name in RELEASE.json INSTALL_PLAN.json README.md SHA256SUMS; do
+            source="build/release/${name}"
+            [[ -f "${source}" && ! -L "${source}" ]]
+            cp --no-preserve=mode,ownership,timestamps \
+              "${source}" "${metadata_dir}/${name}"
+            chmod 0644 "${metadata_dir}/${name}"
+          done
+
+      - name: Upload the verified candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.plan.outputs.artifact_name }}
+          path: |
+            build/candidate-metadata/
+            build/release-plan.json
+            build/wheels/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload release-builder failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-release-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release-plan.json
+            build/apps-to-build.txt
+            build/candidate-metadata/
+            build/wheels/
+          if-no-files-found: warn
+          retention-days: 7
+  publication_gate:
+    name: Fail-closed publication gate
+    if: ${{ inputs.publish_release_branch }}
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require first-attempt repository-owner confirmation
+        env:
+          ACTOR: ${{ github.actor }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          OWNER: ${{ github.repository_owner }}
+          PUBLISH_CONFIRMATION: ${{ inputs.publish_confirmation }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SELECTED_REF: ${{ github.ref }}
+          SELECTED_SHA: ${{ github.sha }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${PUBLISH_CONFIRMATION}" == "PUBLISH RELEASE BRANCH" ]] || {
+            echo "Publication requires the exact confirmation phrase." >&2
+            exit 1
+          }
+          [[ "${ACTOR}" == "${OWNER}" ]] || {
+            echo "Publication is restricted to the repository owner." >&2
+            exit 1
+          }
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]] || {
+            echo "The triggering actor must also be the repository owner." >&2
+            exit 1
+          }
+          [[ "${RUN_ATTEMPT}" == "1" ]] || {
+            echo "Publication is forbidden on workflow reruns." >&2
+            exit 1
+          }
+          [[ "${SELECTED_REF}" == "refs/heads/main" ]] || {
+            echo "Publication may only start from main." >&2
+            exit 1
+          }
+          [[ "${SELECTED_SHA}" == "${EXPECTED_SOURCE_SHA}" ]] || {
+            echo "The dispatch source differs from expected_source_sha." >&2
+            exit 1
+          }
+
+  prepare_publication:
+    name: Prepare publication payload
+    if: ${{ inputs.publish_release_branch }}
+    needs: [candidate, publication_gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+    steps:
+      - name: Check out the exact source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download this run's verified candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.candidate.outputs.artifact_name }}
+          path: build
+
+      - name: Reconstruct and verify the delta candidate
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          TEST_RUN_URL: ${{ needs.candidate.outputs.test_run_url }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_SOURCE_SHA}" ]]
+          [[ -f build/release-plan.json && ! -L build/release-plan.json ]]
+          [[ ! -e build/release && ! -L build/release ]]
+          mkdir -p build/wheels
+
+          previous_manifest=""
+          if [[ -d releases/platform ]]; then
+            previous_manifest="$(
+              python - <<'PY'
+          from pathlib import Path
+          from ops.release.buh_release import SemVer, verify_release_dir
+
+          candidates = []
+          for entry in sorted(Path("releases/platform").iterdir(), key=lambda item: item.name):
+              if entry.name.startswith("."):
+                  continue
+              if not entry.is_dir() or entry.is_symlink() or not entry.name.startswith("v"):
+                  raise SystemExit(f"Unexpected platform release entry: {entry}")
+              version = SemVer.parse(entry.name[1:])
+              manifest = verify_release_dir(entry)
+              if manifest["platform_version"] != str(version):
+                  raise SystemExit(f"Release directory and manifest disagree: {entry}")
+              candidates.append((version, entry))
+          if candidates:
+              print((max(candidates)[1] / "RELEASE.json").as_posix())
+          PY
+            )"
+          fi
+          previous_dir=""
+          if [[ -n "${previous_manifest}" ]]; then
+            previous_dir="${previous_manifest%/RELEASE.json}"
+          fi
+          export PREVIOUS_DIR="${previous_dir}"
+
+          command=(
+            python ops/release/buh_release.py plan
+            --root .
+            --source-sha "${EXPECTED_SOURCE_SHA}"
+            --test-run "${TEST_RUN_URL}"
+            --output build/publish-plan.json
+          )
+          if [[ -n "${previous_manifest}" ]]; then
+            command+=(--previous "${previous_manifest}")
+          fi
+          "${command[@]}"
+
+          assemble=(
+            python ops/release/buh_release.py assemble
+            --root .
+            --plan build/publish-plan.json
+            --wheel-dir build/wheels
+            --output-dir build/release
+          )
+          if [[ -n "${previous_dir}" ]]; then
+            assemble+=(--previous-dir "${previous_dir}")
+          fi
+          "${assemble[@]}"
+          python ops/release/buh_release.py verify --release-dir build/release
+          python ops/release/buh_release.py validate-install \
+            --release-dir build/release
+
+          mapfile -t candidate_metadata < <(
+            find build/candidate-metadata -mindepth 1 -maxdepth 1 \
+              -printf '%f\n' | LC_ALL=C sort
+          )
+          expected_metadata=(INSTALL_PLAN.json README.md RELEASE.json SHA256SUMS)
+          [[ "${#candidate_metadata[@]}" -eq "${#expected_metadata[@]}" ]]
+          for index in "${!expected_metadata[@]}"; do
+            name="${expected_metadata[index]}"
+            [[ "${candidate_metadata[index]}" == "${name}" ]]
+            [[ -f "build/candidate-metadata/${name}" ]]
+            [[ ! -L "build/candidate-metadata/${name}" ]]
+            cmp --silent \
+              "build/candidate-metadata/${name}" "build/release/${name}"
+          done
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          candidate = json.loads(
+              Path("build/release-plan.json").read_text(encoding="utf-8")
+          )
+          recomputed = json.loads(
+              Path("build/publish-plan.json").read_text(encoding="utf-8")
+          )
+          for plan in (candidate, recomputed):
+              previous = plan.get("previous_manifest")
+              if previous is not None:
+                  previous.pop("path", None)
+          if candidate != recomputed:
+              raise SystemExit("Downloaded and recomputed release plans differ")
+
+          manifest = json.loads(
+              Path("build/release/RELEASE.json").read_text(encoding="utf-8")
+          )
+          if manifest.get("source_commit") != os.environ["EXPECTED_SOURCE_SHA"]:
+              raise SystemExit("Candidate manifest is for another source commit")
+          if manifest.get("platform_version") != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit("Candidate manifest has an unexpected platform version")
+          if recomputed.get("platform_version") != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit("Recomputed plan has an unexpected platform version")
+          if manifest.get("platform_id") != recomputed["platform_id"]:
+              raise SystemExit("Candidate and plan have different platform identities")
+
+          expected_build = {
+              **recomputed["build"],
+              "test_run": recomputed.get("test_run"),
+          }
+          if manifest.get("build") != expected_build:
+              raise SystemExit("Candidate build provenance differs from the plan")
+          if manifest.get("changes") != recomputed["changes"]:
+              raise SystemExit("Candidate change history differs from the plan")
+          if manifest.get("compatibility") != {
+              "sha256": recomputed["build"]["compatibility_sha256"],
+              "values": recomputed["compatibility"],
+          }:
+              raise SystemExit("Candidate compatibility contract differs from the plan")
+
+          previous = recomputed.get("previous_manifest")
+          expected_previous = None
+          if previous is not None:
+              expected_previous = {
+                  "platform_version": recomputed["previous_platform_version"],
+                  "source_commit": previous["source_commit"],
+                  "manifest_sha256": previous["sha256"],
+              }
+          if manifest.get("previous_release") != expected_previous:
+              raise SystemExit("Candidate previous-release identity differs from the plan")
+
+          artifacts = {item["component"]: item for item in manifest["artifacts"]}
+          expected_components = {
+              *(app["id"] for app in recomputed["apps"]),
+              *(item["component"] for item in recomputed["dependency_artifacts"]),
+          }
+          if set(artifacts) != expected_components:
+              raise SystemExit("Candidate artifact components differ from the plan")
+          for app in recomputed["apps"]:
+              artifact = artifacts[app["id"]]
+              expected = {
+                  "kind": "owned",
+                  "distribution": app["distribution"],
+                  "version": app["version"],
+                  "input_sha256": app["input_sha256"],
+                  "import_name": app["import_name"],
+                  "origin": "built" if app["build"] else "reused",
+              }
+              for key, value in expected.items():
+                  if artifact.get(key) != value:
+                      raise SystemExit(
+                          f"Candidate artifact {app['id']} has unexpected {key}"
+                      )
+          for dependency in recomputed["dependency_artifacts"]:
+              artifact = artifacts[dependency["component"]]
+              expected = {
+                  "kind": "third-party",
+                  "distribution": dependency["distribution"],
+                  "version": dependency["version"],
+                  "filename": dependency["filename"],
+                  "sha256": dependency["sha256"],
+                  "origin": "reused" if dependency["action"] == "reuse" else "provided",
+              }
+              for key, value in expected.items():
+                  if artifact.get(key) != value:
+                      raise SystemExit(
+                          f"Candidate dependency {dependency['component']} has unexpected {key}"
+                      )
+
+          wheel_name = re.compile(
+              r"[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\.whl"
+          )
+          expected_built = {
+              artifacts[app["id"]]["filename"]
+              for app in recomputed["apps"]
+              if app["build"]
+          }
+          actual_built = set()
+          for wheel in Path("build/wheels").iterdir():
+              if (
+                  not wheel.is_file()
+                  or wheel.is_symlink()
+                  or not wheel_name.fullmatch(wheel.name)
+              ):
+                  raise SystemExit(f"Unsafe delta wheel entry: {wheel}")
+              actual_built.add(wheel.name)
+          if actual_built != expected_built:
+              raise SystemExit(
+                  "Delta transport does not contain exactly the newly built wheels"
+              )
+
+          previous_dir = Path(os.environ["PREVIOUS_DIR"]) if os.environ["PREVIOUS_DIR"] else None
+          prior_artifacts = {}
+          if previous_dir is not None:
+              prior_manifest = json.loads(
+                  (previous_dir / "RELEASE.json").read_text(encoding="utf-8")
+              )
+              prior_artifacts = {
+                  item["component"]: item for item in prior_manifest["artifacts"]
+              }
+
+          release_path = (
+              Path(recomputed["release_root"])
+              / f"v{recomputed['platform_version']}"
+          ).as_posix()
+          reusable = []
+
+          def record_existing_blob(component, artifact, source_path, origin):
+              source = Path(source_path)
+              if (
+                  source.is_absolute()
+                  or not source.is_file()
+                  or source.is_symlink()
+                  or source.as_posix().startswith("../")
+              ):
+                  raise SystemExit(f"Unsafe existing artifact source: {source}")
+              raw = subprocess.run(
+                  [
+                      "git",
+                      "ls-tree",
+                      "-z",
+                      os.environ["EXPECTED_SOURCE_SHA"],
+                      "--",
+                      source.as_posix(),
+                  ],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+              if not raw.endswith(b"\0") or raw.count(b"\0") != 1:
+                  raise SystemExit(f"Artifact is not one exact Git blob: {source}")
+              header, tracked_path = raw[:-1].split(b"\t", 1)
+              mode, kind, blob_sha = header.decode("ascii").split()
+              if (
+                  mode != "100644"
+                  or kind != "blob"
+                  or tracked_path.decode("utf-8") != source.as_posix()
+                  or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_sha)
+              ):
+                  raise SystemExit(f"Artifact has an unsafe Git identity: {source}")
+              hashed_blob = subprocess.run(
+                  ["git", "hash-object", "--no-filters", "--", source.as_posix()],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              ).stdout.strip()
+              digest = hashlib.sha256(source.read_bytes()).hexdigest()
+              if hashed_blob != blob_sha or digest != artifact["sha256"]:
+                  raise SystemExit(f"Artifact bytes differ from their identities: {source}")
+              target = f"{release_path}/{artifact['filename']}"
+              reusable.append(
+                  {
+                      "blob_sha": blob_sha,
+                      "component": component,
+                      "filename": artifact["filename"],
+                      "origin": origin,
+                      "sha256": digest,
+                      "source_path": source.as_posix(),
+                      "target_path": target,
+                  }
+              )
+
+          for app in recomputed["apps"]:
+              if app["build"]:
+                  continue
+              if previous_dir is None:
+                  raise SystemExit(f"Reused app has no previous release: {app['id']}")
+              artifact = artifacts[app["id"]]
+              prior = prior_artifacts.get(app["id"])
+              if prior is None or any(
+                  prior.get(key) != artifact.get(key)
+                  for key in ("distribution", "version", "filename", "sha256")
+              ):
+                  raise SystemExit(f"Reused app identity changed: {app['id']}")
+              record_existing_blob(
+                  app["id"], artifact, previous_dir / artifact["filename"], "reused"
+              )
+
+          for dependency in recomputed["dependency_artifacts"]:
+              component = dependency["component"]
+              artifact = artifacts[component]
+              if dependency["action"] == "reuse":
+                  if previous_dir is None:
+                      raise SystemExit(
+                          f"Reused dependency has no previous release: {component}"
+                      )
+                  prior = prior_artifacts.get(component)
+                  if prior is None or any(
+                      prior.get(key) != artifact.get(key)
+                      for key in ("distribution", "version", "filename", "sha256")
+                  ):
+                      raise SystemExit(
+                          f"Reused dependency identity changed: {component}"
+                      )
+                  source = previous_dir / artifact["filename"]
+                  origin = "reused"
+              elif dependency["action"] == "provide":
+                  source = Path(dependency["source"])
+                  origin = "provided"
+              else:
+                  raise SystemExit(f"Unsafe dependency action: {component}")
+              record_existing_blob(component, artifact, source, origin)
+              expected_blob = dependency.get("git_blob_sha")
+              if expected_blob and reusable[-1]["blob_sha"] != expected_blob:
+                  raise SystemExit(f"Dependency Git blob changed: {component}")
+
+          targets = [item["target_path"] for item in reusable]
+          if len(targets) != len(set(targets)):
+              raise SystemExit("Existing Git blob targets collide")
+          Path("build/reused-git-blobs.json").write_text(
+              json.dumps(
+                  sorted(reusable, key=lambda item: item["component"]),
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Construct and validate the append-only release tree
+        env:
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import re
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          from ops.release.buh_release import (
+              load_plan,
+              validate_append_only_changes,
+              version_updates,
+          )
+
+          plan = load_plan(Path("build/publish-plan.json"))
+          release_path = Path(plan["release_root"]) / f"v{plan['platform_version']}"
+          if release_path.exists() or release_path.is_symlink():
+              raise SystemExit(f"Release path already exists: {release_path}")
+          release_path.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copytree("build/release", release_path)
+
+          version_paths = set()
+          assignment = re.compile(
+              r"(?m)^(?P<prefix>__version__\s*=\s*[\"'])"
+              r"(?P<version>[^\"'\r\n]+)(?P<suffix>[\"']\s*)$"
+          )
+          for update in version_updates(plan):
+              path = Path(update["path"])
+              content = path.read_text(encoding="utf-8")
+              matches = list(assignment.finditer(content))
+              if len(matches) != 1 or matches[0].group("version") != update["from"]:
+                  raise SystemExit(f"Version source changed unexpectedly: {path}")
+              replacement = (
+                  matches[0].group("prefix")
+                  + update["to"]
+                  + matches[0].group("suffix")
+              )
+              path.write_text(
+                  content[: matches[0].start()]
+                  + replacement
+                  + content[matches[0].end() :],
+                  encoding="utf-8",
+              )
+              version_paths.add(path.as_posix())
+
+          fragment_paths = set()
+          for fragment in plan["consumed_fragments"]:
+              path = Path("changes") / fragment
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"Change fragment is missing or unsafe: {path}")
+              path.unlink()
+              fragment_paths.add(path.as_posix())
+
+          subprocess.run(
+              [
+                  "git",
+                  "add",
+                  "-A",
+                  "--",
+                  release_path.as_posix(),
+                  *sorted(version_paths),
+                  *sorted(fragment_paths),
+              ],
+              check=True,
+          )
+          raw = subprocess.run(
+              ["git", "diff", "--cached", "--name-status", "-z", "--no-renames"],
+              check=True,
+              stdout=subprocess.PIPE,
+          ).stdout
+          fields = raw.split(b"\0")
+          if fields and fields[-1] == b"":
+              fields.pop()
+          if len(fields) % 2:
+              raise SystemExit("Unexpected staged name-status encoding")
+
+          changes = []
+          release_prefix = release_path.as_posix() + "/"
+          for index in range(0, len(fields), 2):
+              status = fields[index].decode("ascii")
+              path = fields[index + 1].decode("utf-8")
+              if status == "A" and path.startswith(release_prefix):
+                  pass
+              elif status == "M" and path in version_paths:
+                  pass
+              elif status == "D" and path in fragment_paths:
+                  pass
+              else:
+                  raise SystemExit(f"Unexpected release-tree change: {status} {path}")
+              changes.append((status, path))
+
+          if not changes:
+              raise SystemExit("Release tree would be empty")
+          if {path for status, path in changes if status == "M"} != version_paths:
+              raise SystemExit("Release tree has incomplete version updates")
+          if {path for status, path in changes if status == "D"} != fragment_paths:
+              raise SystemExit("Release tree has incomplete fragment consumption")
+          validate_append_only_changes(
+              changes,
+              new_release_path=release_path.as_posix(),
+          )
+          PY
+
+      - name: Create deterministic commit, binary patch, and strict metadata
+        id: package
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_CI_RUN_ATTEMPT: ${{ needs.candidate.outputs.source_ci_run_attempt }}
+          SOURCE_CI_RUN_ID: ${{ needs.candidate.outputs.source_ci_run_id }}
+          SOURCE_CI_URL: ${{ needs.candidate.outputs.test_run_url }}
+        run: |
+          set -Eeuo pipefail
+          publication_dir="build/publication"
+          mkdir -p "${publication_dir}"
+
+          source_epoch="$(git show -s --format=%ct "${EXPECTED_SOURCE_SHA}")"
+          [[ "${source_epoch}" =~ ^[0-9]+$ ]]
+          tree_sha="$(git write-tree)"
+          message="release: platform v${EXPECTED_VERSION}"
+          release_commit="$(
+            printf '%s\n' "${message}" |
+              env \
+                GIT_AUTHOR_NAME="github-actions[bot]" \
+                GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+                GIT_AUTHOR_DATE="${source_epoch} +0000" \
+                GIT_COMMITTER_NAME="github-actions[bot]" \
+                GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+                GIT_COMMITTER_DATE="${source_epoch} +0000" \
+                git commit-tree "${tree_sha}" -p "${EXPECTED_SOURCE_SHA}"
+          )"
+          [[ "$(git rev-list --parents -n 1 "${release_commit}")" == \
+            "${release_commit} ${EXPECTED_SOURCE_SHA}" ]]
+
+          export RELEASE_COMMIT="${release_commit}"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          publication_dir = Path("build/publication")
+          reused = json.loads(
+              Path("build/reused-git-blobs.json").read_text(encoding="utf-8")
+          )
+          base = [
+              "git",
+              "diff",
+              "--binary",
+              "--full-index",
+              "--no-color",
+              "--no-ext-diff",
+              "--no-textconv",
+          ]
+          source = os.environ["EXPECTED_SOURCE_SHA"]
+          release = os.environ["RELEASE_COMMIT"]
+          normal = subprocess.run(
+              [
+                  *base,
+                  "--no-renames",
+                  source,
+                  release,
+                  "--",
+                  ".",
+                  *(f":(exclude,top){item['target_path']}" for item in reused),
+              ],
+              check=True,
+              stdout=subprocess.PIPE,
+          ).stdout
+          chunks = [normal]
+          for item in sorted(reused, key=lambda value: value["target_path"]):
+              source_path = item["source_path"]
+              target_path = item["target_path"]
+              copy_patch = subprocess.run(
+                  [
+                      *base,
+                      "--find-copies-harder",
+                      "--find-copies=100%",
+                      source,
+                      release,
+                      "--",
+                      source_path,
+                      target_path,
+                  ],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+              expected = (
+                  f"diff --git a/{source_path} b/{target_path}\n"
+                  "similarity index 100%\n"
+                  f"copy from {source_path}\n"
+                  f"copy to {target_path}\n"
+              ).encode("utf-8")
+              if copy_patch != expected:
+                  raise SystemExit(
+                      f"Git did not encode exact blob reuse for {target_path}"
+                  )
+              chunks.append(copy_patch)
+          patch = b"".join(chunks)
+          if not patch:
+              raise SystemExit("Publication patch is empty")
+          (publication_dir / "release.patch").write_bytes(patch)
+          PY
+          [[ -s "${publication_dir}/release.patch" ]]
+
+          verification_index="${RUNNER_TEMP}/prepared-publication.index"
+          GIT_INDEX_FILE="${verification_index}" git read-tree \
+            "${EXPECTED_SOURCE_SHA}^{tree}"
+          GIT_INDEX_FILE="${verification_index}" git apply \
+            --check --cached --binary "${publication_dir}/release.patch"
+          GIT_INDEX_FILE="${verification_index}" git apply \
+            --cached --binary "${publication_dir}/release.patch"
+          [[ "$(GIT_INDEX_FILE="${verification_index}" git write-tree)" == \
+            "${tree_sha}" ]]
+
+          export SOURCE_EPOCH="${source_epoch}"
+          export TREE_SHA="${tree_sha}"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          publication_dir = Path("build/publication")
+          raw = subprocess.run(
+              [
+                  "git",
+                  "diff",
+                  "--name-status",
+                  "-z",
+                  "--no-renames",
+                  os.environ["EXPECTED_SOURCE_SHA"],
+                  os.environ["RELEASE_COMMIT"],
+                  "--",
+              ],
+              check=True,
+              stdout=subprocess.PIPE,
+          ).stdout
+          fields = raw.split(b"\0")
+          if fields and fields[-1] == b"":
+              fields.pop()
+          if len(fields) % 2:
+              raise SystemExit("Unexpected release diff encoding")
+          changes = [
+              {
+                  "status": fields[index].decode("ascii"),
+                  "path": fields[index + 1].decode("utf-8"),
+              }
+              for index in range(0, len(fields), 2)
+          ]
+          patch = publication_dir / "release.patch"
+          metadata = {
+              "branch": f"release/platform-v{os.environ['EXPECTED_VERSION']}",
+              "changes": changes,
+              "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+              "platform_version": os.environ["EXPECTED_VERSION"],
+              "release_commit": os.environ["RELEASE_COMMIT"],
+              "release_path": f"releases/platform/v{os.environ['EXPECTED_VERSION']}",
+              "reused_git_blobs": json.loads(
+                  Path("build/reused-git-blobs.json").read_text(encoding="utf-8")
+              ),
+              "schema_version": 1,
+              "source_ci_run_attempt": int(os.environ["SOURCE_CI_RUN_ATTEMPT"]),
+              "source_ci_run_id": int(os.environ["SOURCE_CI_RUN_ID"]),
+              "source_ci_url": os.environ["SOURCE_CI_URL"],
+              "source_epoch": int(os.environ["SOURCE_EPOCH"]),
+              "source_sha": os.environ["EXPECTED_SOURCE_SHA"],
+              "tree_sha": os.environ["TREE_SHA"],
+          }
+          (publication_dir / "metadata.json").write_text(
+              json.dumps(
+                  metadata,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=False,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          (
+            cd "${publication_dir}"
+            sha256sum metadata.json release.patch >SHA256SUMS
+          )
+          artifact_name="platform-publication-v${EXPECTED_VERSION}-${RUN_ID}-${RUN_ATTEMPT}"
+          echo "artifact_name=${artifact_name}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Publication payload prepared"
+            echo
+            echo "- Source CI run: ${SOURCE_CI_RUN_ID}"
+            echo "- Source CI attempt: ${SOURCE_CI_RUN_ATTEMPT}"
+            echo "- Release commit: ${release_commit}"
+            echo "- Payload: ${artifact_name}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload immutable publication payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: build/publication/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish preverified release branch
+    if: ${{ inputs.publish_release_branch }}
+    needs: [candidate, publication_gate, prepare_publication]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release-publication
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download preverified publication payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare_publication.outputs.artifact_name }}
+          path: ${{ runner.temp }}/platform-publication
+
+      - name: Validate payload and reconstruct the exact release commit
+        id: verify
+        env:
+          EXPECTED_SOURCE_CI_ATTEMPT: ${{ needs.candidate.outputs.source_ci_run_attempt }}
+          EXPECTED_SOURCE_CI_RUN_ID: ${{ needs.candidate.outputs.source_ci_run_id }}
+          EXPECTED_SOURCE_CI_URL: ${{ needs.candidate.outputs.test_run_url }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          PUBLICATION_DIR: ${{ runner.temp }}/platform-publication
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${RUN_ATTEMPT}" == "1" ]] || {
+            echo "Publication is forbidden on workflow reruns." >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_SOURCE_SHA}" ]]
+          [[ "${EXPECTED_SOURCE_SHA}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "${EXPECTED_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${EXPECTED_SOURCE_CI_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${EXPECTED_SOURCE_CI_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+
+          mapfile -t payload_files < <(
+            find "${PUBLICATION_DIR}" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )
+          expected_files=(SHA256SUMS metadata.json release.patch)
+          [[ "${#payload_files[@]}" -eq "${#expected_files[@]}" ]]
+          for index in "${!expected_files[@]}"; do
+            [[ "${payload_files[index]}" == "${expected_files[index]}" ]]
+            [[ -f "${PUBLICATION_DIR}/${payload_files[index]}" ]]
+            [[ ! -L "${PUBLICATION_DIR}/${payload_files[index]}" ]]
+          done
+
+          declare -A checksum_names=()
+          checksum_count=0
+          while IFS= read -r line; do
+            [[ "${line}" =~ ^([0-9a-f]{64})\ \ (metadata\.json|release\.patch)$ ]]
+            checksum_names["${BASH_REMATCH[2]}"]=1
+            checksum_count=$((checksum_count + 1))
+          done <"${PUBLICATION_DIR}/SHA256SUMS"
+          [[ "${checksum_count}" -eq 2 ]]
+          [[ "${#checksum_names[@]}" -eq 2 ]]
+          (
+            cd "${PUBLICATION_DIR}"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          canonical_metadata="${RUNNER_TEMP}/platform-publication-canonical.json"
+          jq -cS . "${PUBLICATION_DIR}/metadata.json" >"${canonical_metadata}"
+          cmp --silent "${canonical_metadata}" "${PUBLICATION_DIR}/metadata.json"
+
+          jq -e '
+            type == "object"
+            and (keys == [
+              "branch",
+              "changes",
+              "patch_sha256",
+              "platform_version",
+              "release_commit",
+              "release_path",
+              "reused_git_blobs",
+              "schema_version",
+              "source_ci_run_attempt",
+              "source_ci_run_id",
+              "source_ci_url",
+              "source_epoch",
+              "source_sha",
+              "tree_sha"
+            ])
+            and .schema_version == 1
+            and (.branch | type == "string")
+            and (.platform_version | type == "string")
+            and (.release_commit | type == "string")
+            and (.release_path | type == "string")
+            and (.patch_sha256 | type == "string")
+            and (.source_sha | type == "string")
+            and (.source_epoch | type == "number" and floor == . and . >= 0)
+            and (.source_ci_run_id | type == "number" and floor == . and . >= 1)
+            and (.source_ci_run_attempt | type == "number" and floor == . and . >= 1)
+            and (.source_ci_url | type == "string")
+            and (.tree_sha | type == "string")
+            and (.changes | type == "array" and length > 0)
+            and (.reused_git_blobs | type == "array")
+            and all(
+              .changes[];
+              type == "object"
+              and (keys == ["path", "status"])
+              and (.path | type == "string")
+              and (.status | type == "string")
+            )
+            and all(
+              .reused_git_blobs[];
+              type == "object"
+              and (keys == [
+                "blob_sha",
+                "component",
+                "filename",
+                "origin",
+                "sha256",
+                "source_path",
+                "target_path"
+              ])
+              and (.blob_sha | type == "string")
+              and (.component | type == "string")
+              and (.filename | type == "string")
+              and (.origin | type == "string")
+              and (.sha256 | type == "string")
+              and (.source_path | type == "string")
+              and (.target_path | type == "string")
+            )
+          ' "${PUBLICATION_DIR}/metadata.json" >/dev/null
+
+          source_sha="$(jq -r '.source_sha' "${PUBLICATION_DIR}/metadata.json")"
+          version="$(jq -r '.platform_version' "${PUBLICATION_DIR}/metadata.json")"
+          branch="$(jq -r '.branch' "${PUBLICATION_DIR}/metadata.json")"
+          release_path="$(jq -r '.release_path' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_patch_sha="$(jq -r '.patch_sha256' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_commit="$(jq -r '.release_commit' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_tree="$(jq -r '.tree_sha' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_epoch="$(jq -r '.source_epoch' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_ci_id="$(jq -r '.source_ci_run_id' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_ci_attempt="$(jq -r '.source_ci_run_attempt' "${PUBLICATION_DIR}/metadata.json")"
+          metadata_ci_url="$(jq -r '.source_ci_url' "${PUBLICATION_DIR}/metadata.json")"
+
+          [[ "${source_sha}" == "${EXPECTED_SOURCE_SHA}" ]]
+          [[ "${version}" == "${EXPECTED_VERSION}" ]]
+          [[ "${branch}" == "release/platform-v${EXPECTED_VERSION}" ]]
+          [[ "${release_path}" == "releases/platform/v${EXPECTED_VERSION}" ]]
+          [[ "${metadata_ci_id}" == "${EXPECTED_SOURCE_CI_RUN_ID}" ]]
+          [[ "${metadata_ci_attempt}" == "${EXPECTED_SOURCE_CI_ATTEMPT}" ]]
+          [[ "${metadata_ci_url}" == "${EXPECTED_SOURCE_CI_URL}" ]]
+          [[ "${metadata_patch_sha}" == \
+            "$(sha256sum "${PUBLICATION_DIR}/release.patch" | awk '{print $1}')" ]]
+          [[ "${metadata_commit}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "${metadata_tree}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "${metadata_epoch}" =~ ^[0-9]+$ ]]
+
+          source_epoch="$(git show -s --format=%ct "${EXPECTED_SOURCE_SHA}")"
+          [[ "${metadata_epoch}" == "${source_epoch}" ]]
+
+          declare -A reused_components=()
+          declare -A reused_targets=()
+          reused_count=0
+          reused_tsv="${RUNNER_TEMP}/platform-publication-reused.tsv"
+          jq -r '
+            .reused_git_blobs[] |
+            [
+              .blob_sha,
+              .component,
+              .filename,
+              .origin,
+              .sha256,
+              .source_path,
+              .target_path
+            ] | @tsv
+          ' "${PUBLICATION_DIR}/metadata.json" >"${reused_tsv}"
+          while IFS=$'\t' read -r \
+            blob_sha component filename origin artifact_sha source_path target_path trailing; do
+            [[ -n "${blob_sha}" ]]
+            [[ -z "${trailing:-}" ]]
+            [[ "${blob_sha}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+            [[ "${component}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+            [[ "${filename}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\.whl$ ]]
+            [[ "${origin}" == "reused" || "${origin}" == "provided" ]]
+            [[ "${artifact_sha}" =~ ^[0-9a-f]{64}$ ]]
+            [[ "${source_path}" =~ ^releases/([A-Za-z0-9][A-Za-z0-9._+-]{0,63}/)*v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)/[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\.whl$ ]]
+            [[ "${source_path##*/}" == "${filename}" ]]
+            [[ "${target_path}" == "${release_path}/${filename}" ]]
+            [[ "${source_path}" != "${target_path}" ]]
+            [[ -z "${reused_components[${component}]+present}" ]]
+            [[ -z "${reused_targets[${target_path}]+present}" ]]
+            [[ -f "${source_path}" && ! -L "${source_path}" ]]
+
+            source_entry="$(git ls-tree "${EXPECTED_SOURCE_SHA}" -- "${source_path}")"
+            [[ "${source_entry}" == *$'\t'"${source_path}" ]]
+            source_header="${source_entry%%$'\t'*}"
+            read -r source_mode source_type source_blob source_trailing \
+              <<<"${source_header}"
+            [[ "${source_mode}" == "100644" ]]
+            [[ "${source_type}" == "blob" ]]
+            [[ "${source_blob}" == "${blob_sha}" ]]
+            [[ -z "${source_trailing:-}" ]]
+            [[ "$(git hash-object --no-filters -- "${source_path}")" == \
+              "${blob_sha}" ]]
+            [[ "$(sha256sum "${source_path}" | awk '{print $1}')" == \
+              "${artifact_sha}" ]]
+            [[ "$(grep -Fxc -- "copy from ${source_path}" \
+              "${PUBLICATION_DIR}/release.patch" || true)" -eq 1 ]]
+            [[ "$(grep -Fxc -- "copy to ${target_path}" \
+              "${PUBLICATION_DIR}/release.patch" || true)" -eq 1 ]]
+
+            reused_components["${component}"]="${filename}:${artifact_sha}:${origin}"
+            reused_targets["${target_path}"]="${blob_sha}"
+            reused_count=$((reused_count + 1))
+          done <"${reused_tsv}"
+          [[ "${reused_count}" -eq \
+            "$(jq '.reused_git_blobs | length' "${PUBLICATION_DIR}/metadata.json")" ]]
+
+          temporary_index="${RUNNER_TEMP}/platform-publication.index"
+          cp .git/index "${temporary_index}"
+          GIT_INDEX_FILE="${temporary_index}" git apply \
+            --check --cached --binary "${PUBLICATION_DIR}/release.patch"
+          GIT_INDEX_FILE="${temporary_index}" git apply \
+            --cached --binary "${PUBLICATION_DIR}/release.patch"
+
+          actual_changes="${RUNNER_TEMP}/platform-publication-actual.tsv"
+          : >"${actual_changes}"
+          additions=0
+          change_count=0
+          require_regular_index_blob() {
+            local entry entry_path mode object_id stage trailing
+            entry="$(
+              GIT_INDEX_FILE="${temporary_index}" git ls-files --stage -- "$1"
+            )"
+            [[ "${entry}" == *$'\t'* ]]
+            entry_path="${entry#*$'\t'}"
+            entry="${entry%%$'\t'*}"
+            read -r mode object_id stage trailing <<<"${entry}"
+            [[ "${entry_path}" == "$1" ]]
+            [[ "${mode}" == "100644" ]]
+            [[ "${object_id}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+            [[ "${stage}" == "0" ]]
+            [[ -z "${trailing:-}" ]]
+          }
+          require_regular_source_blob() {
+            local entry entry_path mode object_id object_type trailing
+            entry="$(git ls-tree "${EXPECTED_SOURCE_SHA}" -- "$1")"
+            [[ "${entry}" == *$'\t'* ]]
+            entry_path="${entry#*$'\t'}"
+            entry="${entry%%$'\t'*}"
+            read -r mode object_type object_id trailing <<<"${entry}"
+            [[ "${entry_path}" == "$1" ]]
+            [[ "${mode}" == "100644" ]]
+            [[ "${object_type}" == "blob" ]]
+            [[ "${object_id}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+            [[ -z "${trailing:-}" ]]
+          }
+          while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+            case "${status}" in
+              A)
+                [[ "${path}" == "${release_path}/"* ]]
+                release_filename="${path#${release_path}/}"
+                [[ "${release_filename}" != */* ]]
+                [[ "${release_filename}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$ ]]
+                require_regular_index_blob "${path}"
+                additions=$((additions + 1))
+                ;;
+              M)
+                [[ "${path}" =~ ^apps/[a-z0-9][a-z0-9-]{0,63}/src/[A-Za-z_][A-Za-z0-9_]*/__init__\.py$ ]]
+                require_regular_source_blob "${path}"
+                require_regular_index_blob "${path}"
+                ;;
+              D)
+                [[ "${path}" =~ ^changes/[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\.toml$ ]]
+                require_regular_source_blob "${path}"
+                ;;
+              *)
+                echo "Forbidden patch status: ${status} ${path}" >&2
+                exit 1
+                ;;
+            esac
+            printf '%s\t%s\n' "${status}" "${path}" >>"${actual_changes}"
+            change_count=$((change_count + 1))
+          done < <(
+            GIT_INDEX_FILE="${temporary_index}" git diff \
+              --cached --name-status -z --no-renames
+          )
+          [[ "${change_count}" -gt 0 ]]
+          [[ "${additions}" -gt 0 ]]
+
+          metadata_changes="${RUNNER_TEMP}/platform-publication-metadata.tsv"
+          jq -r '.changes[] | [.status, .path] | @tsv' \
+            "${PUBLICATION_DIR}/metadata.json" >"${metadata_changes}"
+          LC_ALL=C sort "${actual_changes}" >"${actual_changes}.sorted"
+          LC_ALL=C sort "${metadata_changes}" >"${metadata_changes}.sorted"
+          cmp --silent "${actual_changes}.sorted" "${metadata_changes}.sorted"
+
+          for target_path in "${!reused_targets[@]}"; do
+            [[ "$(awk -F '\t' -v target="${target_path}" \
+              '$1 == "A" && $2 == target { count += 1 } END { print count + 0 }' \
+              "${actual_changes}")" -eq 1 ]]
+            target_entry="$(
+              GIT_INDEX_FILE="${temporary_index}" git ls-files \
+                --stage -- "${target_path}"
+            )"
+            target_header="${target_entry%%$'\t'*}"
+            read -r target_mode target_blob target_stage target_trailing \
+              <<<"${target_header}"
+            [[ "${target_mode}" == "100644" ]]
+            [[ "${target_blob}" == "${reused_targets[${target_path}]}" ]]
+            [[ "${target_stage}" == "0" ]]
+            [[ -z "${target_trailing:-}" ]]
+          done
+
+          tree_sha="$(GIT_INDEX_FILE="${temporary_index}" git write-tree)"
+          [[ "${tree_sha}" == "${metadata_tree}" ]]
+          for required in RELEASE.json INSTALL_PLAN.json README.md SHA256SUMS; do
+            [[ "$(git cat-file -t "${tree_sha}:${release_path}/${required}")" == "blob" ]]
+          done
+
+          release_manifest="${RUNNER_TEMP}/platform-publication-release.json"
+          git cat-file blob "${tree_sha}:${release_path}/RELEASE.json" \
+            >"${release_manifest}"
+          jq -e \
+            --arg source "${EXPECTED_SOURCE_SHA}" \
+            --arg version "${EXPECTED_VERSION}" '
+              type == "object"
+              and .source_commit == $source
+              and .platform_version == $version
+              and (.artifacts | type == "array" and length > 0)
+            ' "${release_manifest}" >/dev/null
+
+          expected_release_files="${RUNNER_TEMP}/platform-release-files.expected"
+          actual_release_files="${RUNNER_TEMP}/platform-release-files.actual"
+          manifest_reused="${RUNNER_TEMP}/platform-manifest-reused.tsv"
+          : >"${expected_release_files}"
+          : >"${manifest_reused}"
+          printf '%s\n' INSTALL_PLAN.json README.md RELEASE.json SHA256SUMS \
+            >>"${expected_release_files}"
+          declare -A manifest_components=()
+          declare -A manifest_filenames=()
+          artifact_count=0
+          while IFS=$'\t' read -r \
+            component filename origin artifact_sha trailing; do
+            [[ -n "${component}" && -z "${trailing:-}" ]]
+            [[ "${component}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+            [[ "${filename}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\.whl$ ]]
+            [[ "${origin}" == "built" || "${origin}" == "reused" || \
+              "${origin}" == "provided" ]]
+            [[ "${artifact_sha}" =~ ^[0-9a-f]{64}$ ]]
+            [[ -z "${manifest_components[${component}]+present}" ]]
+            [[ -z "${manifest_filenames[${filename}]+present}" ]]
+            manifest_components["${component}"]=1
+            manifest_filenames["${filename}"]=1
+
+            artifact_path="${release_path}/${filename}"
+            require_regular_index_blob "${artifact_path}"
+            [[ "$(git cat-file blob "${tree_sha}:${artifact_path}" | \
+              sha256sum | awk '{print $1}')" == "${artifact_sha}" ]]
+            if [[ "${origin}" == "built" ]]; then
+              [[ -z "${reused_components[${component}]+present}" ]]
+            else
+              [[ "${reused_components[${component}]}" == \
+                "${filename}:${artifact_sha}:${origin}" ]]
+              printf '%s\t%s\t%s\t%s\n' \
+                "${component}" "${filename}" "${artifact_sha}" "${origin}" \
+                >>"${manifest_reused}"
+            fi
+            printf '%s\n' "${filename}" >>"${expected_release_files}"
+            artifact_count=$((artifact_count + 1))
+          done < <(
+            jq -r '.artifacts[] | [.component, .filename, .origin, .sha256] | @tsv' \
+              "${release_manifest}"
+          )
+          [[ "${artifact_count}" -eq \
+            "$(jq '.artifacts | length' "${release_manifest}")" ]]
+          [[ "${artifact_count}" -eq \
+            "$(( ${#manifest_components[@]} ))" ]]
+
+          awk -F '\t' -v prefix="${release_path}/" \
+            '$1 == "A" && index($2, prefix) == 1 { print substr($2, length(prefix) + 1) }' \
+            "${actual_changes}" | LC_ALL=C sort >"${actual_release_files}"
+          LC_ALL=C sort "${expected_release_files}" \
+            >"${expected_release_files}.sorted"
+          cmp --silent "${actual_release_files}" "${expected_release_files}.sorted"
+
+          metadata_reused="${RUNNER_TEMP}/platform-metadata-reused.tsv"
+          jq -r '
+            .reused_git_blobs[] |
+            [.component, .filename, .sha256, .origin] | @tsv
+          ' "${PUBLICATION_DIR}/metadata.json" | LC_ALL=C sort \
+            >"${metadata_reused}"
+          LC_ALL=C sort "${manifest_reused}" >"${manifest_reused}.sorted"
+          cmp --silent "${metadata_reused}" "${manifest_reused}.sorted"
+
+          message="release: platform v${EXPECTED_VERSION}"
+          release_commit="$(
+            printf '%s\n' "${message}" |
+              env \
+                GIT_AUTHOR_NAME="github-actions[bot]" \
+                GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+                GIT_AUTHOR_DATE="${source_epoch} +0000" \
+                GIT_COMMITTER_NAME="github-actions[bot]" \
+                GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+                GIT_COMMITTER_DATE="${source_epoch} +0000" \
+                git commit-tree "${tree_sha}" -p "${EXPECTED_SOURCE_SHA}"
+          )"
+          [[ "${release_commit}" == "${metadata_commit}" ]]
+          [[ "$(git rev-list --parents -n 1 "${release_commit}")" == \
+            "${release_commit} ${EXPECTED_SOURCE_SHA}" ]]
+
+          echo "branch=${branch}" >>"${GITHUB_OUTPUT}"
+          echo "release_commit=${release_commit}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Publication payload independently verified"
+            echo
+            echo "- Source CI run: ${metadata_ci_id}"
+            echo "- Source CI attempt: ${metadata_ci_attempt}"
+            echo "- Release commit: ${release_commit}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Atomically create the absent release branch
+        env:
+          ACTOR: ${{ github.actor }}
+          BRANCH: ${{ steps.verify.outputs.branch }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ACTOR}" == "${OWNER}" ]]
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          [[ "${RUN_ATTEMPT}" == "1" ]]
+          [[ "${BRANCH}" =~ ^release/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$(git rev-list --parents -n 1 "${RELEASE_COMMIT}")" == \
+            "${RELEASE_COMMIT} ${EXPECTED_SOURCE_SHA}" ]]
+
+          auth_header="$(
+            printf 'x-access-token:%s' "${GITHUB_TOKEN}" |
+              base64 |
+              tr -d '\n'
+          )"
+          git_auth=(-c "http.extraheader=AUTHORIZATION: basic ${auth_header}")
+
+          remote_main="$(
+            git "${git_auth[@]}" ls-remote --refs origin refs/heads/main |
+              awk '{print $1}'
+          )"
+          if [[ "${remote_main}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "main moved before publication; refusing to push." >&2
+            exit 1
+          fi
+
+          set +e
+          git "${git_auth[@]}" ls-remote \
+            --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null
+          branch_status=$?
+          set -e
+          if [[ "${branch_status}" -eq 0 ]]; then
+            echo "Release branch already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          if [[ "${branch_status}" -ne 2 ]]; then
+            echo "Could not establish that the release branch is absent." >&2
+            exit 1
+          fi
+
+          set +e
+          push_output="$(
+            git "${git_auth[@]}" push --porcelain \
+              --force-with-lease="refs/heads/${BRANCH}:" \
+              origin "${RELEASE_COMMIT}:refs/heads/${BRANCH}" 2>&1
+          )"
+          push_status=$?
+          set -e
+          printf '%s\n' "${push_output}"
+          [[ "${push_status}" -eq 0 ]] || {
+            echo "Atomic release-branch creation failed." >&2
+            exit 1
+          }
+          expected_update=$'*\t'"${RELEASE_COMMIT}:refs/heads/${BRANCH}"$'\t[new branch]'
+          actual_update="$(
+            printf '%s\n' "${push_output}" |
+              awk -F '\t' '$1 == "*" { print }'
+          )"
+          [[ "${actual_update}" == "${expected_update}" ]] || {
+            echo "Push did not exclusively create the expected absent branch." >&2
+            exit 1
+          }
+          published_commit="$(
+            git "${git_auth[@]}" ls-remote --refs \
+              origin "refs/heads/${BRANCH}" |
+              awk '{print $1}'
+          )"
+          [[ "${published_commit}" == "${RELEASE_COMMIT}" ]]
+          {
+            echo "### Platform release branch published"
+            echo
+            echo "- Branch: ${BRANCH}"
+            echo "- Parent source: ${EXPECTED_SOURCE_SHA}"
+            echo "- Release commit: ${RELEASE_COMMIT}"
+            echo
+            echo "Production was not deployed and main was not modified."
+          } >>"${GITHUB_STEP_SUMMARY}"

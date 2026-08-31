@@ -1,0 +1,143 @@
+{% extends "buh_structure_ops/base.html" %}
+{% load humanize %}
+{% block content %}
+<main id="buh-structure-ops">
+    <section class="ops-hero mb-3">
+        <div class="ops-hero-main">
+            <div>
+                <div class="ops-eyebrow"><span></span> LIVE CORPORATION INFRASTRUCTURE</div>
+                <h1>Structure Operations</h1>
+                <p>Fuel forecasts, moon pulls, fittings, timers, wars, and synchronization health in one command center.</p>
+            </div>
+            <div class="ops-hero-actions">
+                {% if can_manage %}
+                    <form method="post" action="{% url 'buh_structure_ops:refresh_now' %}">
+                        {% csrf_token %}
+                        <button class="btn btn-ops-ghost" type="submit"><i class="fa-solid fa-rotate me-1"></i> Sync now</button>
+                    </form>
+                    <a class="btn btn-ops-primary" href="{% url 'buh_structure_ops:export_csv' %}?{{ request.GET.urlencode }}"><i class="fa-solid fa-file-arrow-down me-1"></i> Export</a>
+                {% endif %}
+            </div>
+        </div>
+        <div class="ops-hero-strip">
+            <span><i class="fa-solid fa-building"></i> <strong>{{ summary.structures }}</strong> structures</span>
+            <span><i class="fa-solid fa-satellite-dish"></i> 30m structures · 10m extractions · 5m alerts</span>
+            <span><i class="fa-solid fa-shield-halved"></i> Admin-only visibility</span>
+            <span><i class="fa-regular fa-clock"></i> All times UTC</span>
+        </div>
+    </section>
+
+    {% if not readiness.is_ready %}
+        <section class="alert ops-setup-alert mb-3" role="alert">
+            <div class="d-flex gap-3 align-items-start">
+                <i class="fa-solid fa-triangle-exclamation fa-xl mt-2"></i>
+                <div class="flex-grow-1">
+                    <h2>Launch checklist incomplete</h2>
+                    <p class="mb-2">Every required corporation needs both a Structures director authorization and a Moon Mining director authorization. The dashboard will keep showing what is available, but it is not considered fully operational yet.</p>
+                    <a href="#setup" class="btn btn-sm btn-warning">Open authorization checklist</a>
+                </div>
+            </div>
+        </section>
+    {% endif %}
+
+    <section class="ops-kpi-grid mb-3" aria-label="Operational summary">
+        <article class="ops-kpi"><span class="ops-kpi-icon teal"><i class="fa-solid fa-industry"></i></span><div><small>Tracked structures</small><strong>{{ summary.structures }}</strong><em>{{ readiness.ready_count }}/{{ readiness.required_count }} corporations ready</em></div></article>
+        <article class="ops-kpi {% if summary.fuel_critical %}danger{% endif %}"><span class="ops-kpi-icon red"><i class="fa-solid fa-gas-pump"></i></span><div><small>Fuel critical</small><strong>{{ summary.fuel_critical }}</strong><em>{{ summary.fuel_warning }} warning under 14 days</em></div></article>
+        <article class="ops-kpi"><span class="ops-kpi-icon gold"><i class="fa-solid fa-moon"></i></span><div><small>Next extraction</small><strong class="ops-kpi-time">{% if summary.next_extraction %}{{ summary.next_extraction|timeuntil }}{% else %}—{% endif %}</strong><em>{% if summary.next_extraction %}{{ summary.next_extraction|date:"Y-m-d H:i" }}{% else %}No active pull{% endif %}</em></div></article>
+        <article class="ops-kpi {% if summary.reinforced or summary.active_wars %}danger{% endif %}"><span class="ops-kpi-icon red"><i class="fa-solid fa-shield-halved"></i></span><div><small>Threat state</small><strong>{{ summary.reinforced }} / {{ summary.active_wars }}</strong><em>reinforced / active wars</em></div></article>
+        <article class="ops-kpi"><span class="ops-kpi-icon blue"><i class="fa-solid fa-bell"></i></span><div><small>Open alerts</small><strong>{{ summary.active_alerts }}</strong><em>{{ summary.unacknowledged }} unacknowledged</em></div></article>
+    </section>
+
+    <nav class="ops-jump-nav mb-3" aria-label="Dashboard sections">
+        <a href="#structures"><i class="fa-solid fa-building"></i> Structures</a>
+        <a href="#alerts"><i class="fa-solid fa-bell"></i> Alerts <span>{{ summary.active_alerts }}</span></a>
+        <a href="#wars"><i class="fa-solid fa-shield-halved"></i> Wars <span>{{ summary.active_wars }}</span></a>
+        {% if can_admin %}<a href="#setup"><i class="fa-solid fa-key"></i> Setup & access</a>{% endif %}
+    </nav>
+
+    <section id="structures" class="ops-panel mb-3">
+        <div class="ops-panel-heading">
+            <div><span class="ops-section-kicker">FLEET-WIDE VIEW</span><h2>Structure board</h2></div>
+            <span class="text-body-secondary">30-day refill target by default</span>
+        </div>
+        <form class="ops-filter-grid" method="get">
+            <div><label for="corp-filter">Corporation</label><select class="form-select" id="corp-filter" name="corporation"><option value="">All corporations</option>{% for corporation in corporations %}<option value="{{ corporation.corporation_id }}" {% if filters.corporation == corporation.corporation_id %}selected{% endif %}>{{ corporation.corporation_name }}</option>{% endfor %}</select></div>
+            <div><label for="fuel-filter">Fuel state</label><select class="form-select" id="fuel-filter" name="fuel"><option value="">All fuel states</option><option value="critical" {% if filters.fuel == 'critical' %}selected{% endif %}>Critical (&lt;7d)</option><option value="warning" {% if filters.fuel == 'warning' %}selected{% endif %}>Warning (7–14d)</option><option value="healthy" {% if filters.fuel == 'healthy' %}selected{% endif %}>Healthy</option><option value="unknown" {% if filters.fuel == 'unknown' %}selected{% endif %}>Unknown</option></select></div>
+            <div class="ops-search"><label for="structure-search">Search</label><input class="form-control" id="structure-search" name="search" value="{{ filters.search }}" placeholder="Structure, system, or corporation"></div>
+            <label class="ops-check"><input class="form-check-input" type="checkbox" name="attention" value="1" {% if filters.attention %}checked{% endif %}> Attention only</label>
+            <button class="btn btn-outline-secondary" type="submit"><i class="fa-solid fa-filter me-1"></i> Apply</button>
+            <a class="btn btn-link" href="{% url 'buh_structure_ops:dashboard' %}#structures">Clear</a>
+        </form>
+        <div class="table-responsive">
+            <table class="table ops-table align-middle mb-0">
+                <thead><tr><th>Structure</th><th>Fuel forecast</th><th>30-day refill</th><th>Extraction / timer</th><th>Threat</th><th>Sync</th><th></th></tr></thead>
+                <tbody>
+                {% for row in rows %}
+                    <tr class="ops-structure-row fuel-{{ row.fuel_status }}">
+                        <td><div class="ops-structure-name"><i class="fa-solid fa-building-shield"></i><div><strong>{{ row.name }}</strong><small>{{ row.corporation }} · {{ row.system }} · {{ row.type }}</small><span class="badge text-bg-secondary">{{ row.power|default:row.state }}</span>{% if row.is_reinforced %}<span class="badge text-bg-danger">Reinforced</span>{% endif %}</div></div></td>
+                        <td>
+                            <div class="ops-fuel-top"><strong>{% if row.fuel_days is not None %}{{ row.fuel_days|floatformat:1 }} days{% else %}Unknown{% endif %}</strong><span class="ops-status-pill {{ row.fuel_status }}">{{ row.fuel_status }}</span></div>
+                            <div class="progress ops-fuel-progress" role="progressbar"><div class="progress-bar" style="width:{% if row.fuel_days is None %}0{% elif row.fuel_days >= row.target_days %}100{% else %}{% widthratio row.fuel_days row.target_days 100 %}{% endif %}%"></div></div>
+                            <small>{% if row.fuel_quantity is not None %}{{ row.fuel_quantity|intcomma }} blocks{% endif %}{% if row.fuel_blocks_per_day %} · {{ row.fuel_blocks_per_day|intcomma }}/day{% endif %}</small>
+                        </td>
+                        <td><strong>{% if row.refill_blocks is not None %}{{ row.refill_blocks|intcomma }} blocks{% else %}Calculating…{% endif %}</strong><small>to {{ row.target_days }} days</small></td>
+                        <td>
+                            {% if row.extraction %}<div class="ops-deadline"><i class="fa-solid fa-moon"></i><strong data-countdown="{{ row.extraction.chunk_arrival_at|date:'c' }}">{{ row.extraction.chunk_arrival_at|timeuntil }}</strong><small>{{ row.extraction.get_status_display|title }} · {{ row.extraction.chunk_arrival_at|date:"M d H:i" }}</small></div>
+                            {% elif row.timer_at %}<div class="ops-deadline danger"><i class="fa-solid fa-stopwatch"></i><strong data-countdown="{{ row.timer_at|date:'c' }}">{{ row.timer_at|timeuntil }}</strong><small>{{ row.state }} · {{ row.timer_at|date:"M d H:i" }}</small></div>
+                            {% else %}<span class="text-body-secondary">No extraction or timer</span>{% endif %}
+                        </td>
+                        <td>{% if row.active_wars %}<span class="ops-threat danger"><i class="fa-solid fa-triangle-exclamation"></i> Active war</span>{% elif row.is_reinforced %}<span class="ops-threat danger">Reinforced</span>{% else %}<span class="ops-threat clear"><i class="fa-solid fa-shield"></i> Clear</span>{% endif %}</td>
+                        <td><small>{% if row.last_updated_at %}{{ row.last_updated_at|timesince }} ago{% else %}Never{% endif %}</small></td>
+                        <td><button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#structure-{{ row.id }}" aria-expanded="false"><i class="fa-solid fa-chevron-down"></i></button></td>
+                    </tr>
+                    <tr class="ops-detail-row"><td colspan="7"><div class="collapse" id="structure-{{ row.id }}"><div class="ops-detail-grid">
+                        <article><h3>Fuel history</h3><canvas class="ops-sparkline" width="420" height="120" data-history="{{ row.history_json|escape }}"></canvas><div class="ops-detail-stats"><span>Expires <strong>{% if row.fuel_expires_at %}{{ row.fuel_expires_at|date:"Y-m-d H:i" }}{% else %}Unknown{% endif %}</strong></span><span>Observed use <strong>{% if row.fuel_blocks_per_day %}{{ row.fuel_blocks_per_day|intcomma }}/day{% else %}Waiting for assets{% endif %}</strong></span></div></article>
+                        <article><h3>Services & rigs</h3><div class="ops-tag-list">{% for service in row.services %}<span class="service"><i class="fa-solid fa-bolt"></i> {{ service }}</span>{% empty %}<span class="muted">No online services reported</span>{% endfor %}</div><div class="ops-tag-list mt-2">{% for rig in row.rigs %}<span class="rig"><i class="fa-solid fa-gears"></i> {{ rig }}</span>{% empty %}<span class="muted">No fitted rigs reported</span>{% endfor %}</div></article>
+                        <article><h3>Operations links</h3><div class="d-grid gap-2"><a class="btn btn-sm btn-outline-info" href="{% url 'structures:structure_details' row.id %}"><i class="fa-solid fa-magnifying-glass me-1"></i> Full fitting & assets</a>{% if row.extraction %}<a class="btn btn-sm btn-outline-info" href="{% url 'moonmining:extraction_details' row.extraction.pk %}"><i class="fa-solid fa-moon me-1"></i> Extraction details</a>{% endif %}</div></article>
+                        {% if can_manage %}<article><h3>Manager notes & target</h3><form method="post" action="{% url 'buh_structure_ops:update_preference' row.id %}">{% csrf_token %}<label>Fuel target days</label><input class="form-control form-control-sm mb-2" type="number" min="7" max="180" name="target_fuel_days" value="{{ row.target_days }}"><label>Notes</label><textarea class="form-control form-control-sm mb-2" rows="2" name="notes">{{ row.notes }}</textarea><button class="btn btn-sm btn-ops-primary" type="submit">Save</button></form></article>{% endif %}
+                    </div></div></td></tr>
+                {% empty %}
+                    <tr><td colspan="7"><div class="ops-empty"><i class="fa-solid fa-satellite-dish"></i><strong>No structures match this view.</strong><span>Check the launch checklist, clear filters, or queue a refresh.</span></div></td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <div class="ops-two-column mb-3">
+        <section id="alerts" class="ops-panel">
+            <div class="ops-panel-heading"><div><span class="ops-section-kicker">ACTION QUEUE</span><h2>Alerts</h2></div><span class="badge text-bg-danger">{{ summary.unacknowledged }} new</span></div>
+            <div class="ops-alert-list">
+                {% for alert in alerts %}
+                    <article class="ops-alert {{ alert.severity }} {% if alert.acknowledged_at %}acknowledged{% endif %}"><span class="ops-alert-icon"><i class="fa-solid {% if alert.kind == 'fuel' %}fa-gas-pump{% elif alert.kind == 'extraction' %}fa-moon{% elif alert.kind == 'war' %}fa-shield-halved{% elif alert.kind == 'sync' %}fa-plug-circle-xmark{% else %}fa-burst{% endif %}"></i></span><div><strong>{{ alert.title }}</strong><p>{{ alert.message }}</p><small>{{ alert.occurred_at|date:"Y-m-d H:i" }} UTC · {{ alert.get_kind_display }}</small></div>{% if can_manage and not alert.acknowledged_at %}<form method="post" action="{% url 'buh_structure_ops:acknowledge_alert' alert.id %}">{% csrf_token %}<button class="btn btn-sm btn-outline-secondary" type="submit">Acknowledge</button></form>{% elif alert.acknowledged_at %}<span class="ops-ack"><i class="fa-solid fa-check"></i> {{ alert.acknowledged_by|default:"Acknowledged" }}</span>{% endif %}</article>
+                {% empty %}<div class="ops-empty compact"><i class="fa-solid fa-circle-check"></i><strong>No active alerts</strong></div>{% endfor %}
+            </div>
+        </section>
+        <section id="wars" class="ops-panel">
+            <div class="ops-panel-heading"><div><span class="ops-section-kicker">CONCORD & COMBAT</span><h2>War and timer watch</h2></div></div>
+            {% for war in active_wars %}<article class="ops-war"><div class="ops-war-mark"><i class="fa-solid fa-shield-halved"></i></div><div><strong>Active war — corporation {{ war.corporation_id }}</strong><p>{% if war.war_hq_name %}War HQ: {{ war.war_hq_name }}{% else %}No war HQ was included in the latest notification.{% endif %}</p><small>Declared {% if war.declared_at %}{{ war.declared_at|date:"Y-m-d H:i" }} UTC{% else %}date unknown{% endif %} · {{ war.last_event_type }}</small></div></article>{% empty %}<div class="ops-empty compact"><i class="fa-solid fa-shield"></i><strong>No active wars found</strong><span>War declarations and end events are derived from the dedicated directors’ EVE notifications.</span></div>{% endfor %}
+            {% if summary.next_timer %}<div class="ops-next-timer"><span>Next structure timer</span><strong data-countdown="{{ summary.next_timer|date:'c' }}">{{ summary.next_timer|timeuntil }}</strong><small>{{ summary.next_timer|date:"Y-m-d H:i" }} UTC</small></div>{% endif %}
+        </section>
+    </div>
+
+    {% if can_admin %}
+    <section id="setup" class="ops-panel mb-4">
+        <div class="ops-panel-heading"><div><span class="ops-section-kicker">FULL ADMINISTRATORS</span><h2>Authorization and access</h2></div><a class="btn btn-sm btn-outline-secondary" href="{% url 'admin:buh_structure_ops_structureopsaccessgroup_changelist' %}"><i class="fa-solid fa-users-gear me-1"></i> Manage access groups</a></div>
+        <div class="ops-setup-grid">
+            <div>
+                <h3>Required corporations</h3>
+                <p class="text-body-secondary">A character can authorize only the corporation it currently belongs to. Repeat both authorizations for B-UH and every holding corporation.</p>
+                <div class="table-responsive"><table class="table table-sm ops-setup-table"><thead><tr><th>Corporation</th><th>Structures director</th><th>Refinery director</th><th>Ready</th><th></th></tr></thead><tbody>{% for row in readiness.rows %}<tr><td><strong>{{ row.corporation_name }}</strong><small>{{ row.corporation_id }}</small></td><td>{% if row.structure_owner %}<span class="text-success"><i class="fa-solid fa-check"></i> {{ row.structure_character|default:"Connected" }}</span>{% else %}<span class="text-danger"><i class="fa-solid fa-xmark"></i> Missing</span>{% endif %}</td><td>{% if row.refinery_owner %}<span class="text-success"><i class="fa-solid fa-check"></i> {{ row.refinery_character|default:"Connected" }}</span>{% else %}<span class="text-danger"><i class="fa-solid fa-xmark"></i> Missing</span>{% endif %}</td><td>{% if row.ready %}<span class="badge text-bg-success">Ready</span>{% else %}<span class="badge text-bg-warning">Action required</span>{% endif %}</td><td><form method="post" action="{% url 'buh_structure_ops:remove_tracked_corporation' row.corporation_id %}" onsubmit="return confirm('Stop tracking this corporation? Stored history will remain.');">{% csrf_token %}<button class="btn btn-sm btn-link text-danger" type="submit" title="Stop tracking"><i class="fa-solid fa-xmark"></i></button></form></td></tr>{% empty %}<tr><td colspan="5">Add B-UH and every holding corporation below.</td></tr>{% endfor %}</tbody></table></div>
+                <div class="ops-auth-buttons"><a class="btn btn-outline-info" href="{{ structure_owner_url }}"><i class="fa-solid fa-building-circle-check me-1"></i> Authorize Structures director</a><a class="btn btn-outline-info" href="{{ refinery_owner_url }}"><i class="fa-solid fa-moon me-1"></i> Authorize Moon Mining director</a></div>
+            </div>
+            <div>
+                <h3>Add required corporation</h3>
+                <form class="ops-add-corp" method="post" action="{% url 'buh_structure_ops:add_tracked_corporation' %}">{% csrf_token %}<label>Corporation ID</label>{{ corporation_form.corporation_id }}<label>Corporation name</label>{{ corporation_form.corporation_name }}<label>Note (optional)</label>{{ corporation_form.notes }}<button class="btn btn-ops-primary mt-2" type="submit">Add corporation</button></form>
+                <div class="ops-access-levels mt-3"><h3>Access levels</h3><div><strong>Viewers</strong><span>Read-only full dashboard</span></div><div><strong>Managers</strong><span>Refresh, acknowledge, notes, targets, export</span></div><div><strong>Full administrators</strong><span>Owner setup and access control</span></div></div>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+</main>
+{% endblock %}
+

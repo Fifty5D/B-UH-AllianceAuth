@@ -1,0 +1,3 @@
+[
+  {"acceptor_id": 99000001, "assignee_id": 99000001, "availability": "personal", "buyout": 0.0, "contract_id": 71000001, "date_completed": "2026-08-31T12:00:00Z", "date_expired": "2026-09-06T12:00:00Z", "date_issued": "2026-08-30T12:00:00Z", "for_corporation": false, "issuer_corporation_id": 98000001, "issuer_id": 99000002, "price": 4000000.0, "status": "finished", "title": "Synthetic Moon Tax contract", "type": "item_exchange", "volume": 0.0}
+]

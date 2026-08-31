@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auth.b-uh.com/schemas/release-manifest-v1.json",
+  "title": "B-UH platform release manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "platform_id",
+    "platform_version",
+    "source_commit",
+    "previous_release",
+    "build",
+    "compatibility",
+    "artifacts",
+    "install_plan",
+    "changes"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "platform_id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "platform_version": {"$ref": "#/$defs/semver"},
+    "source_commit": {"$ref": "#/$defs/gitObject"},
+    "previous_release": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["platform_version", "source_commit", "manifest_sha256"],
+          "properties": {
+            "platform_version": {"$ref": "#/$defs/semver"},
+            "source_commit": {"$ref": "#/$defs/gitObject"},
+            "manifest_sha256": {"$ref": "#/$defs/sha256"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "build": {
+      "type": "object",
+      "required": ["registry_sha256", "compatibility_sha256", "tool_sha256", "platform_sha256", "test_run"],
+      "properties": {
+        "registry_sha256": {"$ref": "#/$defs/sha256"},
+        "compatibility_sha256": {"$ref": "#/$defs/sha256"},
+        "tool_sha256": {"$ref": "#/$defs/sha256"},
+        "platform_sha256": {"$ref": "#/$defs/sha256"},
+        "test_run": {"type": ["string", "null"], "maxLength": 200}
+      },
+      "additionalProperties": false
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["sha256", "values"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "values": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "install_plan": {
+      "type": "object",
+      "required": ["filename", "sha256"],
+      "properties": {
+        "filename": {"const": "INSTALL_PLAN.json"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "changes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/change"}
+    }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitObject": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+    "component": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "filename": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$"},
+    "artifact": {
+      "type": "object",
+      "required": ["component", "kind", "distribution", "version", "filename", "size", "sha256", "origin"],
+      "properties": {
+        "component": {"$ref": "#/$defs/component"},
+        "kind": {"enum": ["owned", "third-party"]},
+        "distribution": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "filename": {"$ref": "#/$defs/filename"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "input_sha256": {"$ref": "#/$defs/sha256"},
+        "import_name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]*$"},
+        "git_blob_sha": {"$ref": "#/$defs/gitObject"},
+        "origin": {"enum": ["built", "provided", "reused"]},
+        "reused_from": {"$ref": "#/$defs/semver"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "owned"}}},
+          "then": {
+            "required": ["input_sha256", "import_name"],
+            "properties": {"origin": {"enum": ["built", "reused"]}}
+          },
+          "else": {
+            "properties": {"origin": {"enum": ["provided", "reused"]}},
+            "not": {
+              "anyOf": [
+                {"required": ["input_sha256"]},
+                {"required": ["import_name"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {"properties": {"origin": {"const": "reused"}}},
+          "then": {"required": ["reused_from"]},
+          "else": {"not": {"required": ["reused_from"]}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "change": {
+      "type": "object",
+      "required": ["fragment", "app_id", "kind", "bump", "summary"],
+      "properties": {
+        "fragment": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,249}\\.toml$"},
+        "app_id": {"$ref": "#/$defs/component"},
+        "kind": {"enum": ["fix", "security", "performance", "internal", "feature", "breaking"]},
+        "bump": {"enum": ["patch", "minor", "major"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 300}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,73 @@
+schema_version = 1
+
+[production_baseline]
+platform_version = "0.3.3"
+release_commit = "e70a8ee713d358e2f0e3c1dc5b23305c863aa628"
+release_path = "releases/moon-tax/v0.3.3"
+deployment_generation = "legacy-v1"
+
+[runtime]
+python = "3.12.13"
+allianceauth = "5.2.0"
+django = "5.2.17"
+django_esi = "9.6.0"
+memberaudit = "5.0.4"
+eveuniverse = "2.1.0"
+mariadb = "11.8"
+redis = "8"
+celery = "5.6.3"
+django_redis = "7.0.0"
+redis_python = "8.1.0"
+pyyaml = "6.0.3"
+requests = "2.34.2"
+packaging = "25.0"
+node = "24.19.0"
+playwright = "1.55.0"
+
+[tooling]
+pip = "26.2.1"
+setuptools = "84.0.0"
+wheel = "0.48.0"
+build = "1.3.0"
+pytest = "8.4.2"
+ruff = "0.16.5"
+twine = "6.2.0"
+uv = "0.11.33"
+
+[supply_chain]
+lock_python = "3.12.13"
+lock_platform = "x86_64-manylinux_2_36"
+allowed_source_distributions = [
+  "celery-once",
+  "django-bootstrap-form",
+  "mysqlclient",
+]
+
+[third_party]
+aa_structures = "4.0.3"
+aa_moonmining = "3.1.0.post1"
+
+[applications.moon-tax]
+distribution = "aa-buh-moon-tax"
+module = "buh_moon_tax"
+path = "apps/moon-tax"
+depends_on = ["structure-ops"]
+
+[applications.structure-ops]
+distribution = "aa-buh-structure-ops"
+module = "buh_structure_ops"
+path = "apps/structure-ops"
+depends_on = []
+
+[applications.mining-analytics]
+distribution = "aa-buh-mining-analytics"
+module = "buh_mining_analytics"
+path = "apps/mining-analytics"
+depends_on = []
+
+[policy]
+production_requires_full_commit_sha = true
+production_requires_image_digests = true
+release_bundles_are_append_only = true
+real_network_calls_in_tests = false
+database_migrations_must_be_rollback_compatible = true

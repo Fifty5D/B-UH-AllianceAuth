@@ -1,0 +1,334 @@
+{% extends "buh_mining_analytics/base.html" %}
+{% block content %}
+    {{ initial_options|json_script:"mining-initial-options" }}
+    <div id="buh-mining-app"
+         data-options-url="{% url 'buh_mining_analytics:options_api' %}"
+         data-data-url="{% url 'buh_mining_analytics:data_api' %}"
+         data-refresh-url="{% url 'buh_mining_analytics:refresh_api' %}"
+         data-export-url="{% url 'buh_mining_analytics:export_csv' %}"
+         data-initial-scope="{{ initial_scope }}"
+         data-can-export="{{ can_export|yesno:'true,false' }}"
+         data-can-refresh="{{ can_refresh|yesno:'true,false' }}">
+        <form class="d-none" aria-hidden="true">
+            {% csrf_token %}
+        </form>
+        <section class="mining-hero mb-3" aria-labelledby="mining-page-title">
+            <div class="mining-hero__content">
+                <div>
+                    <div class="mining-eyebrow">
+                        <span class="mining-pulse-dot"></span>
+                        MEMBER AUDIT MINING LEDGER
+                    </div>
+                    <h1 id="mining-page-title">{{ app_name }}</h1>
+                    <p class="mb-0">See what your lasers have been doing—across one character, a whole mining wing, or the corp.</p>
+                </div>
+                <div class="mining-hero__actions">
+                    {% if can_refresh %}
+                        <button class="btn btn-mining-ghost" id="mining-refresh" type="button">
+                            <i class="fa-solid fa-rotate me-1"></i> Queue refresh
+                        </button>
+                    {% endif %}
+                    {% if can_export %}
+                        <button class="btn btn-mining-primary" id="mining-export" type="button">
+                            <i class="fa-solid fa-file-arrow-down me-1"></i> Export CSV
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="mining-hero__status">
+                <span><i class="fa-solid fa-shield-halved"></i> <strong id="hero-scope">My characters</strong></span>
+                <span><i class="fa-solid fa-user-astronaut"></i> <strong id="hero-character-count">0</strong> selected</span>
+                <span><i class="fa-regular fa-clock"></i> <strong id="hero-freshness">Waiting for data</strong></span>
+            </div>
+        </section>
+        <section class="card mining-control-card mb-3"
+                 aria-label="Mining dashboard controls">
+            <div class="card-body">
+                <div class="mining-controls-grid">
+                    <div>
+                        <label class="form-label" for="mining-scope">Visibility</label>
+                        <select class="form-select" id="mining-scope">
+                            {% for scope in scopes %}
+                                <option value="{{ scope.value }}"
+                                        {% if scope.value == initial_scope %}selected{% endif %}
+                                        title="{{ scope.description }}">{{ scope.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label" for="mining-preset">Date range</label>
+                        <select class="form-select" id="mining-preset">
+                            <option value="7d">Last 7 days</option>
+                            <option value="30d" selected>Last 30 days</option>
+                            <option value="90d">Last 90 days</option>
+                            <option value="month">This month</option>
+                            <option value="all">All stored history</option>
+                            <option value="custom">Custom range</option>
+                        </select>
+                    </div>
+                    <div class="mining-custom-date d-none" id="mining-custom-start-wrap">
+                        <label class="form-label" for="mining-start">Start</label>
+                        <input class="form-control" id="mining-start" type="date">
+                    </div>
+                    <div class="mining-custom-date d-none" id="mining-custom-end-wrap">
+                        <label class="form-label" for="mining-end">End</label>
+                        <input class="form-control" id="mining-end" type="date">
+                    </div>
+                    <div>
+                        <label class="form-label" for="mining-comparison">Trend lines</label>
+                        <select class="form-select" id="mining-comparison">
+                            <option value="combined">Combined total</option>
+                            <option value="character">Compare characters</option>
+                            <option value="account">Compare Auth accounts</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label d-block">Chart metric</label>
+                        <div class="mining-segmented" role="group" aria-label="Chart metric">
+                            <button class="active" type="button" data-metric="isk">ISK</button>
+                            <button type="button" data-metric="volume">m³</button>
+                            <button type="button" data-metric="units">Units</button>
+                        </div>
+                    </div>
+                    <div class="mining-filter-trigger">
+                        <label class="form-label d-block">Pilots</label>
+                        <button class="btn btn-outline-secondary w-100"
+                                type="button"
+                                data-bs-toggle="collapse"
+                                data-bs-target="#mining-selection-panel"
+                                aria-expanded="false"
+                                aria-controls="mining-selection-panel">
+                            <i class="fa-solid fa-filter me-1"></i>
+                            <span id="mining-selection-summary">All characters</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="collapse mt-3" id="mining-selection-panel">
+                    <div class="mining-selection-panel">
+                        <div class="mining-selector-column">
+                            <div class="mining-selector-heading">
+                                <div>
+                                    <span class="mining-selector-title">Auth accounts</span>
+                                    <small>Select one or several member accounts</small>
+                                </div>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button class="btn btn-outline-secondary" id="accounts-all" type="button">All</button>
+                                    <button class="btn btn-outline-secondary" id="accounts-none" type="button">None</button>
+                                </div>
+                            </div>
+                            <input class="form-control form-control-sm mb-2"
+                                   id="account-search"
+                                   type="search"
+                                   placeholder="Search accounts"
+                                   autocomplete="off">
+                            <div class="mining-check-list" id="account-list"></div>
+                        </div>
+                        <div class="mining-selector-column">
+                            <div class="mining-selector-heading">
+                                <div>
+                                    <span class="mining-selector-title">Characters</span>
+                                    <small>Mix and match individual miners</small>
+                                </div>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button class="btn btn-outline-secondary" id="characters-all" type="button">All</button>
+                                    <button class="btn btn-outline-secondary" id="characters-none" type="button">None</button>
+                                </div>
+                            </div>
+                            <input class="form-control form-control-sm mb-2"
+                                   id="character-search"
+                                   type="search"
+                                   placeholder="Search characters or corporations"
+                                   autocomplete="off">
+                            <div class="mining-check-list" id="character-list"></div>
+                        </div>
+                        <div class="mining-selection-footer">
+                            <span id="mining-selection-detail">All available characters are selected.</span>
+                            <button class="btn btn-mining-primary" id="apply-selection" type="button">Apply selection</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <div class="mining-alert d-none" id="mining-alert" role="alert"></div>
+        <section class="mining-kpi-grid mb-3" aria-label="Mining totals">
+            <article class="mining-kpi mining-kpi--primary">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-coins"></i>
+                </div>
+                <div class="mining-kpi__label">Estimated value</div>
+                <div class="mining-kpi__value" id="kpi-value">—</div>
+                <div class="mining-kpi__sub" id="kpi-value-change">Current EVE average prices</div>
+            </article>
+            <article class="mining-kpi">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-cubes-stacked"></i>
+                </div>
+                <div class="mining-kpi__label">Raw volume</div>
+                <div class="mining-kpi__value" id="kpi-volume">—</div>
+                <div class="mining-kpi__sub" id="kpi-volume-change">Before compression</div>
+            </article>
+            <article class="mining-kpi">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-hashtag"></i>
+                </div>
+                <div class="mining-kpi__label">Ore units</div>
+                <div class="mining-kpi__value" id="kpi-units">—</div>
+                <div class="mining-kpi__sub" id="kpi-unit-change">Across all ore types</div>
+            </article>
+            <article class="mining-kpi">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-calendar-day"></i>
+                </div>
+                <div class="mining-kpi__label">Active mining days</div>
+                <div class="mining-kpi__value" id="kpi-active-days">—</div>
+                <div class="mining-kpi__sub" id="kpi-active-days-sub">—</div>
+            </article>
+            <article class="mining-kpi">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-gauge-high"></i>
+                </div>
+                <div class="mining-kpi__label">30-day pace</div>
+                <div class="mining-kpi__value" id="kpi-pace">—</div>
+                <div class="mining-kpi__sub">Calendar-day projection</div>
+            </article>
+            <article class="mining-kpi">
+                <div class="mining-kpi__icon">
+                    <i class="fa-solid fa-fire-flame-curved"></i>
+                </div>
+                <div class="mining-kpi__label">Longest streak</div>
+                <div class="mining-kpi__value" id="kpi-streak">—</div>
+                <div class="mining-kpi__sub" id="kpi-streak-sub">Consecutive mining days</div>
+            </article>
+        </section>
+        <section class="mining-dashboard-grid mb-3">
+            <article class="card mining-chart-card mining-chart-card--wide">
+                <div class="card-header mining-card-header">
+                    <div>
+                        <h2>Mining trend</h2>
+                        <p id="trend-caption">Daily production for the selected pilots</p>
+                    </div>
+                    <span class="mining-chip" id="trend-granularity">Daily</span>
+                </div>
+                <div class="card-body">
+                    <div class="mining-canvas-wrap mining-canvas-wrap--trend">
+                        <canvas id="trend-chart" role="img" aria-label="Mining trend chart"></canvas>
+                        <div class="mining-empty d-none" id="trend-empty">No mining rows in this range.</div>
+                    </div>
+                    <div class="mining-legend" id="trend-legend"></div>
+                </div>
+            </article>
+            <article class="card mining-chart-card">
+                <div class="card-header mining-card-header">
+                    <div>
+                        <h2>Ore mix</h2>
+                        <p>What filled the holds</p>
+                    </div>
+                </div>
+                <div class="card-body mining-donut-layout">
+                    <div class="mining-canvas-wrap mining-canvas-wrap--donut">
+                        <canvas id="ore-chart" role="img" aria-label="Ore composition chart"></canvas>
+                        <div class="mining-donut-center">
+                            <span id="ore-center-value">—</span>
+                            <small id="ore-center-label">total</small>
+                        </div>
+                    </div>
+                    <div class="mining-ranked-list" id="ore-list"></div>
+                </div>
+            </article>
+        </section>
+        <section class="mining-dashboard-grid mining-dashboard-grid--equal mb-3">
+            <article class="card mining-chart-card">
+                <div class="card-header mining-card-header">
+                    <div>
+                        <h2>Top systems</h2>
+                        <p>Where the lasers stayed busiest</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="mining-bars" id="system-bars"></div>
+                </div>
+            </article>
+            <article class="card mining-chart-card">
+                <div class="card-header mining-card-header">
+                    <div>
+                        <h2>Character leaderboard</h2>
+                        <p>Click a pilot to isolate them</p>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive mining-table-wrap">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Character</th>
+                                    <th class="text-end" id="leaderboard-metric">Estimated ISK</th>
+                                </tr>
+                            </thead>
+                            <tbody id="character-leaderboard">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </article>
+        </section>
+        <section class="mining-dashboard-grid mining-dashboard-grid--activity mb-3">
+            <article class="card mining-chart-card mining-chart-card--wide">
+                <div class="card-header mining-card-header">
+                    <div>
+                        <h2>Mining activity</h2>
+                        <p>Up to the last sixteen weeks in the selected range</p>
+                    </div>
+                    <span class="mining-chip" id="heatmap-range">—</span>
+                </div>
+                <div class="card-body">
+                    <div class="mining-heatmap-scroll">
+                        <div class="mining-heatmap" id="mining-heatmap"></div>
+                    </div>
+                    <div class="mining-heatmap-key">
+                        <span>Quiet</span>
+                        <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i>
+                        <span>Busy</span>
+                    </div>
+                </div>
+            </article>
+            <article class="card mining-personality-card">
+                <div class="mining-personality-glow"></div>
+                <div class="card-body">
+                    <div class="mining-eyebrow">MINING FINGERPRINT</div>
+                    <div class="mining-personality-icon">
+                        <i id="personality-icon" class="fa-solid fa-compass"></i>
+                    </div>
+                    <h2 id="personality-name">Waiting for rocks</h2>
+                    <p id="personality-description">Your mining style will appear once the dashboard loads.</p>
+                    <div class="mining-record-grid">
+                        <div><span>Best day</span><strong id="record-day">—</strong></div>
+                        <div><span>Average active day</span><strong id="record-average">—</strong></div>
+                        <div><span>Ores</span><strong id="record-ores">—</strong></div>
+                        <div><span>Systems</span><strong id="record-systems">—</strong></div>
+                    </div>
+                </div>
+            </article>
+        </section>
+        <section class="card mining-data-card mb-3">
+            <div class="card-body">
+                <div class="mining-data-grid">
+                    <div>
+                        <h2><i class="fa-solid fa-circle-info me-2"></i>Data coverage</h2>
+                        <p id="source-note">Mining data comes from Member Audit and CCP ESI.</p>
+                    </div>
+                    <div class="mining-data-stat"><span>Stored range</span><strong id="stored-range">—</strong></div>
+                    <div class="mining-data-stat"><span>Price coverage</span><strong id="price-coverage">—</strong></div>
+                    <div class="mining-data-stat"><span>Update health</span><strong id="update-health">—</strong></div>
+                </div>
+            </div>
+        </section>
+        <div class="mining-loading"
+             id="mining-loading"
+             aria-live="polite"
+             aria-label="Loading mining data">
+            <div class="spinner-border" role="status"></div>
+            <span>Crunching rocks…</span>
+        </div>
+    </div>
+{% endblock %}

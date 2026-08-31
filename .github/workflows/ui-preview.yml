@@ -1,0 +1,215 @@
+name: Temporary synthetic UI preview
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preview:
+    name: Fake-data desktop and mobile preview
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ui-preview')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUILDX_BAKE_FILE_RELATIVE_PATHS: "1"
+      BUH_COMPOSE_PROJECT: buh-${{ github.run_id }}-${{ github.run_attempt }}-preview
+      BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-preview
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read the reviewed test-image contract
+        env:
+          PREVIEW_CACHE_SCOPE: ui-preview-${{ github.event.pull_request.number || github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          import os
+
+          values = {}
+          for raw_line in Path("platform/testenv/env.example").read_text(
+              encoding="utf-8"
+          ).splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              key, separator, value = line.partition("=")
+              if not separator or not key or not value:
+                  raise SystemExit(f"Malformed test environment entry: {raw_line!r}")
+              values[key] = value
+
+          required = {
+              "BUH_PYTHON_IMAGE",
+              "BUH_MARIADB_IMAGE",
+              "BUH_REDIS_IMAGE",
+              "BUH_FAKE_ESI_IMAGE",
+              "BUH_PLAYWRIGHT_IMAGE",
+          }
+          if not required.issubset(values):
+              missing = ", ".join(sorted(required - values.keys()))
+              raise SystemExit(f"Missing test image settings: {missing}")
+
+          safe_image = re.compile(r"[A-Za-z0-9][A-Za-z0-9./:_@+-]{1,255}")
+          cache_scope = os.environ["PREVIEW_CACHE_SCOPE"]
+          if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", cache_scope):
+              raise SystemExit("Unsafe preview cache scope")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              for key in sorted(required):
+                  value = values[key]
+                  if not safe_image.fullmatch(value):
+                      raise SystemExit(f"Unsafe image value for {key}")
+                  print(f"{key}={value}", file=output)
+              print(f"BUH_CACHE_SCOPE={cache_scope}", file=output)
+              print("BUH_CACHE_LANE=preview", file=output)
+          PY
+
+      - name: Prepare the synthetic artifact directory
+        env:
+          PREVIEW_REF: ${{ github.sha }}
+          PREVIEW_EVENT: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifacts/ui-preview/screenshots artifacts/ui-preview/playwright-report
+          {
+            printf 'source_commit=%s\n' "${PREVIEW_REF}"
+            printf 'event=%s\n' "${PREVIEW_EVENT}"
+            printf 'data=synthetic-only\n'
+            printf 'network=compose-internal-only\n'
+          } >artifacts/ui-preview/manifest.txt
+          : >artifacts/ui-preview/run.log
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build cached Auth and browser images
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          source: .
+          files: platform/testenv/docker-bake.hcl
+          targets: |
+            testauth
+            browser
+          set: |
+            testauth.args.PYTHON_IMAGE=${{ env.BUH_PYTHON_IMAGE }}
+            browser.args.PLAYWRIGHT_IMAGE=${{ env.BUH_PLAYWRIGHT_IMAGE }}
+
+      - name: Capture fake-data previews on an isolated network
+        env:
+          PREVIEW_CONTAINER: buh-ui-preview-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          COMPOSE=(
+            docker compose
+            --project-name "${BUH_COMPOSE_PROJECT}"
+            -f platform/testenv/compose.yml
+          )
+          REPORT_DIR="artifacts/ui-preview"
+
+          collect_and_teardown() {
+            result=$?
+            trap - EXIT
+            "${COMPOSE[@]}" ps -a >"${REPORT_DIR}/compose-ps.txt" 2>&1 || true
+            "${COMPOSE[@]}" logs --no-color \
+              db redis fake-esi web >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
+            if docker container inspect "${PREVIEW_CONTAINER}" >/dev/null 2>&1; then
+              docker cp \
+                "${PREVIEW_CONTAINER}:/browser/preview-output/." \
+                "${REPORT_DIR}/screenshots/" 2>>"${REPORT_DIR}/run.log" || true
+              docker cp \
+                "${PREVIEW_CONTAINER}:/browser/playwright-report/." \
+                "${REPORT_DIR}/playwright-report/" 2>>"${REPORT_DIR}/run.log" || true
+              docker rm --force "${PREVIEW_CONTAINER}" \
+                >>"${REPORT_DIR}/run.log" 2>&1 || true
+            fi
+            "${COMPOSE[@]}" down --volumes --remove-orphans \
+              >"${REPORT_DIR}/teardown.log" 2>&1 || true
+            exit "${result}"
+          }
+          trap collect_and_teardown EXIT
+
+          run_logged() {
+            "$@" 2>&1 | tee -a "${REPORT_DIR}/run.log"
+          }
+
+          run_logged "${COMPOSE[@]}" up -d --wait db redis fake-esi
+          run_logged "${COMPOSE[@]}" run --rm \
+            -e BUH_TEST_SETTINGS=testauth.settings.browser test \
+            python manage.py migrate --noinput --no-color
+          run_logged "${COMPOSE[@]}" run --rm \
+            -e BUH_TEST_SETTINGS=testauth.settings.browser test \
+            python manage.py buh_seed_test_platform --reset --no-color
+          run_logged "${COMPOSE[@]}" up -d --wait web
+          run_logged "${COMPOSE[@]}" run --name "${PREVIEW_CONTAINER}" \
+            -e BUH_PREVIEW_OUTPUT_DIR=/browser/preview-output \
+            -e PLAYWRIGHT_HTML_OUTPUT_DIR=/browser/playwright-report \
+            browser npx --no-install playwright test preview.spec.ts
+
+      - name: Enforce teardown even after cancellation or setup failure
+        if: always()
+        env:
+          PREVIEW_CONTAINER: buh-ui-preview-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set +e
+          mkdir -p artifacts/ui-preview
+          docker rm --force "${PREVIEW_CONTAINER}" \
+            >>artifacts/ui-preview/teardown.log 2>&1
+          docker compose --project-name "${BUH_COMPOSE_PROJECT}" \
+            -f platform/testenv/compose.yml \
+            down --volumes --remove-orphans \
+            >>artifacts/ui-preview/teardown.log 2>&1
+
+      - name: Reject unsafe preview artifact entries
+        id: artifact_guard
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import stat
+          from pathlib import Path
+
+          root = Path("artifacts/ui-preview")
+          total = 0
+          for path in root.rglob("*"):
+              mode = path.lstat().st_mode
+              if stat.S_ISLNK(mode):
+                  raise SystemExit(f"Artifact tree contains a symlink: {path}")
+              if stat.S_ISDIR(mode):
+                  continue
+              if not stat.S_ISREG(mode):
+                  raise SystemExit(f"Artifact tree contains a special file: {path}")
+              size = path.stat().st_size
+              if size > 64 * 1024 * 1024:
+                  raise SystemExit(f"Artifact file exceeds 64 MiB: {path}")
+              total += size
+          if total > 256 * 1024 * 1024:
+              raise SystemExit("Preview artifact tree exceeds 256 MiB")
+          PY
+
+      - name: Upload the short-lived synthetic preview
+        if: ${{ always() && steps.artifact_guard.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-preview-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ui-preview/
+          if-no-files-found: error
+          retention-days: 3

@@ -1,0 +1,132 @@
+{% extends "buh_structure_ops/base.html" %}
+{% load static %}
+{% block content %}
+<main id="buh-ops-schedule"
+      data-feed-url="{% url 'buh_structure_ops:schedule_feed' %}"
+      data-add-url="{% url 'buh_structure_ops:schedule_event_add' %}"
+      data-can-add="{{ can_add_event|yesno:'true,false' }}">
+    <section class="schedule-hero mb-3">
+        <div>
+            <div class="schedule-eyebrow"><span></span> SHARED EVE / UTC OPERATIONS</div>
+            <h1>Operations Schedule</h1>
+            <p>Moon pops, fuel deadlines, reinforcement windows, wars, and your own events—one permission-aware calendar.</p>
+        </div>
+        <div class="schedule-hero-actions">
+            <button class="btn btn-schedule-ghost" id="schedule-refresh" type="button"><i class="fa-solid fa-rotate me-1"></i> Refresh</button>
+            {% if can_add_event %}
+                <button class="btn btn-schedule-primary" id="schedule-add-event" type="button"><i class="fa-solid fa-plus me-1"></i> Add event</button>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="schedule-toolbar mb-3" aria-label="Calendar controls">
+        <div class="schedule-navigation">
+            <div class="btn-group" role="group" aria-label="Move calendar">
+                <button class="btn btn-outline-secondary" id="calendar-previous" type="button" title="Previous"><i class="fa-solid fa-chevron-left"></i></button>
+                <button class="btn btn-outline-secondary" id="calendar-today" type="button">Today</button>
+                <button class="btn btn-outline-secondary" id="calendar-next" type="button" title="Next"><i class="fa-solid fa-chevron-right"></i></button>
+            </div>
+            <h2 id="calendar-title" aria-live="polite">Loading schedule…</h2>
+        </div>
+        <div class="btn-group schedule-view-switch" role="group" aria-label="Calendar view">
+            <button class="btn active" type="button" data-calendar-view="month"><i class="fa-regular fa-calendar me-1"></i> Month</button>
+            <button class="btn" type="button" data-calendar-view="week"><i class="fa-solid fa-table-columns me-1"></i> Week</button>
+            <button class="btn" type="button" data-calendar-view="agenda"><i class="fa-solid fa-list-ul me-1"></i> Agenda</button>
+        </div>
+    </section>
+
+    <section class="schedule-filter-panel mb-3" aria-label="Visible event types">
+        <div class="schedule-filter-heading"><i class="fa-solid fa-sliders"></i><span>Visible on my calendar</span></div>
+        <div class="schedule-filter-chips">
+            {% for item in event_types %}
+                <label class="schedule-filter-chip active" style="--event-color: {{ item.color }}">
+                    <input type="checkbox" value="{{ item.key }}" checked>
+                    <span class="schedule-filter-dot"></span>
+                    <i class="fa-solid {{ item.icon }}"></i> {{ item.label }}
+                </label>
+            {% empty %}
+                <span class="text-body-secondary">Your group can open the schedule but has no event feeds enabled.</span>
+            {% endfor %}
+        </div>
+        <span class="schedule-sync-state" id="schedule-sync-state"><i class="fa-solid fa-circle-notch fa-spin"></i> Syncing</span>
+    </section>
+
+    <div class="schedule-layout">
+        <section class="schedule-calendar-panel" aria-label="Operations calendar">
+            <div id="schedule-calendar" class="schedule-calendar" aria-live="polite">
+                <div class="schedule-loading"><i class="fa-solid fa-circle-notch fa-spin"></i><strong>Building your permission-aware calendar</strong><span>Times are displayed in EVE / UTC.</span></div>
+            </div>
+        </section>
+        <aside class="schedule-sidebar">
+            <section class="schedule-next-panel">
+                <div class="schedule-panel-heading"><div><span>NEXT UP</span><h2>Upcoming</h2></div><i class="fa-regular fa-clock"></i></div>
+                <div id="schedule-next-events" class="schedule-next-events"></div>
+            </section>
+            <section class="schedule-tip-panel">
+                <i class="fa-solid fa-lock"></i>
+                <div><strong>Permission-aware by design</strong><p>You receive only the timer categories your Alliance Auth groups allow. Hidden categories are never sent to your browser.</p></div>
+            </section>
+        </aside>
+    </div>
+
+    <div class="modal fade" id="schedule-event-details" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content schedule-modal-content">
+                <div class="modal-header">
+                    <div><span class="schedule-modal-kind" id="event-detail-kind"></span><h2 class="modal-title" id="event-detail-title"></h2></div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="schedule-event-time"><i class="fa-regular fa-clock"></i><div><strong id="event-detail-time"></strong><span>EVE / UTC</span></div></div>
+                    <div class="schedule-event-location d-none" id="event-detail-location-wrap"><i class="fa-solid fa-location-dot"></i><span id="event-detail-location"></span></div>
+                    <p id="event-detail-description" class="schedule-event-description"></p>
+                    <small id="event-detail-author" class="text-body-secondary"></small>
+                </div>
+                <div class="modal-footer">
+                    <a class="btn btn-outline-info d-none" id="event-detail-link" href="#" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square me-1"></i> Open details</a>
+                    {% if can_change_event %}<button class="btn btn-outline-secondary d-none" id="event-detail-edit" type="button"><i class="fa-solid fa-pen me-1"></i> Edit</button>{% endif %}
+                    {% if can_delete_event %}<button class="btn btn-outline-danger d-none" id="event-detail-delete" type="button"><i class="fa-solid fa-trash me-1"></i> Delete</button>{% endif %}
+                    <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if can_add_event or can_change_event %}
+    <div class="modal fade" id="schedule-event-editor" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content schedule-modal-content">
+                <form id="schedule-event-form" method="post" action="{% url 'buh_structure_ops:schedule_event_add' %}" data-add-action="{% url 'buh_structure_ops:schedule_event_add' %}">
+                    {% csrf_token %}
+                    <div class="modal-header"><div><span class="schedule-modal-kind">CUSTOM EVENT</span><h2 class="modal-title" id="schedule-editor-title">Add to the schedule</h2></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+                    <div class="modal-body">
+                        <div class="row g-3">
+                            <div class="col-12"><label class="form-label" for="id_title">Title</label>{{ event_form.title }}</div>
+                            <div class="col-md-6"><label class="form-label" for="id_starts_at">Starts (EVE / UTC)</label>{{ event_form.starts_at }}</div>
+                            <div class="col-md-6"><label class="form-label" for="id_ends_at">Ends (optional)</label>{{ event_form.ends_at }}</div>
+                            <div class="col-md-7"><label class="form-label" for="id_location">Location</label>{{ event_form.location }}</div>
+                            <div class="col-md-5"><label class="form-label" for="id_color">Color</label>{{ event_form.color }}</div>
+                            <div class="col-12"><label class="form-label" for="id_description">Description</label>{{ event_form.description }}</div>
+                            <div class="col-md-9"><label class="form-label" for="id_link">Optional link</label>{{ event_form.link }}</div>
+                            <div class="col-md-3 d-flex align-items-end"><div class="form-check mb-2">{{ event_form.all_day }}<label class="form-check-label" for="id_all_day">All-day event</label></div></div>
+                        </div>
+                    </div>
+                    <div class="modal-footer"><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button><button class="btn btn-schedule-primary" type="submit"><i class="fa-solid fa-floppy-disk me-1"></i> Save event</button></div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <form class="d-none" id="schedule-delete-form" method="post">{% csrf_token %}</form>
+</main>
+{% endblock %}
+
+{% block extra_css %}
+    {{ block.super }}
+    <link rel="stylesheet" href="{% static 'buh_structure_ops/css/schedule.css' %}?v={{ app_version }}">
+{% endblock %}
+{% block extra_javascript %}
+    {{ block.super }}
+    <script src="{% static 'buh_structure_ops/js/schedule.js' %}?v={{ app_version }}" defer></script>
+{% endblock %}

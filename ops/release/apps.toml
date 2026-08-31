@@ -1,0 +1,77 @@
+schema_version = 1
+
+[platform]
+id = "buh-allianceauth"
+initial_version = "0.4.0"
+release_root = "releases/platform"
+compatibility_file = "platform/compatibility.toml"
+shared_build_inputs = []
+platform_build_inputs = [
+  ".dockerignore",
+  ".github/CODEOWNERS",
+  "pyproject.toml",
+  ".github/dependabot.yml",
+  ".github/workflows/source-*",
+  ".github/workflows/reusable-source-*",
+  ".github/workflows/build-platform-release.yml",
+  ".github/workflows/ui-preview.yml",
+  "platform/requirements/*.txt",
+  "platform/requirements/*.lock",
+  "ops/supply_chain.py",
+  "platform/testauth/**/*",
+  "platform/testenv/**/*",
+  "tests/browser/**/*",
+  "tests/contracts/**/*",
+  "tests/fake_esi/**/*",
+  "tests/integration/**/*",
+  "tests/platform/**/*",
+  "tests/release/**/*",
+]
+
+[[dependencies]]
+id = "aa-structures"
+distribution = "aa-structures"
+version = "4.0.3"
+filename = "aa_structures-4.0.3-py3-none-any.whl"
+sha256 = "ba8493ef10a450198fa5ba3d8995e1ea661b74dca20d770beaa91bf005f558e3"
+git_blob_sha = "95854c4ac5bc74d6acda97c08653d02e0cee75be"
+source = "releases/moon-tax/v0.3.3/aa_structures-4.0.3-py3-none-any.whl"
+
+[[dependencies]]
+id = "aa-moonmining"
+distribution = "aa-moonmining"
+version = "3.1.0.post1"
+filename = "aa_moonmining-3.1.0.post1-py3-none-any.whl"
+sha256 = "aa4ddbc7da64151cd6d988d971d59462360e35a5111d47a3bf56d577f454bc13"
+git_blob_sha = "381062cce2aa1d38dfc56123dff132198d0fd50e"
+source = "releases/moon-tax/v0.3.3/aa_moonmining-3.1.0.post1-py3-none-any.whl"
+
+[[apps]]
+id = "structure-ops"
+path = "apps/structure-ops"
+distribution = "aa-buh-structure-ops"
+import_name = "buh_structure_ops"
+django_app = "buh_structure_ops"
+version_file = "src/buh_structure_ops/__init__.py"
+dependencies = []
+setup_commands = ["buh_structure_ops_setup"]
+
+[[apps]]
+id = "mining-analytics"
+path = "apps/mining-analytics"
+distribution = "aa-buh-mining-analytics"
+import_name = "buh_mining_analytics"
+django_app = "buh_mining_analytics"
+version_file = "src/buh_mining_analytics/__init__.py"
+dependencies = []
+setup_commands = ["buh_mining_setup"]
+
+[[apps]]
+id = "moon-tax"
+path = "apps/moon-tax"
+distribution = "aa-buh-moon-tax"
+import_name = "buh_moon_tax"
+django_app = "buh_moon_tax"
+version_file = "src/buh_moon_tax/__init__.py"
+dependencies = ["structure-ops"]
+setup_commands = ["buh_moon_tax_setup"]

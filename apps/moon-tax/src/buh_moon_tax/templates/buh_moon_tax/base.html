@@ -1,0 +1,17 @@
+{% extends "allianceauth/base-bs5.html" %}
+{% load static %}
+{% load navactive %}
+{% block page_title %}{{ app_name }}{% endblock %}
+{% block header_nav_brand %}{{ app_name }}{% endblock %}
+{% block header_nav_collapse_left %}
+<ul class="nav navbar-nav">
+    <li class="nav-item"><a class="nav-link {% navactive request 'buh_moon_tax:dashboard' %}" href="{% url 'buh_moon_tax:dashboard' %}"><i class="fa-solid fa-gauge-high me-1"></i> Overview</a></li>
+    {% if permissions.view_payment_evidence %}<li class="nav-item"><a class="nav-link {% navactive request 'buh_moon_tax:payments' %}" href="{% url 'buh_moon_tax:payments' %}"><i class="fa-solid fa-money-check-dollar me-1"></i> Payments</a></li>{% endif %}
+    {% if permissions.manage_tax_policy %}<li class="nav-item"><a class="nav-link {% navactive request 'buh_moon_tax:policy' %}" href="{% url 'buh_moon_tax:policy' %}"><i class="fa-solid fa-sliders me-1"></i> Policy</a></li>{% endif %}
+    {% if permissions.manage_exemptions %}<li class="nav-item"><a class="nav-link" href="{% url 'admin:buh_moon_tax_taxexemption_changelist' %}"><i class="fa-solid fa-user-shield me-1"></i> Exemptions</a></li>{% endif %}
+    {% if permissions.manage_access %}<li class="nav-item"><a class="nav-link" href="{% url 'admin:buh_moon_tax_moontaxaccessgroup_changelist' %}"><i class="fa-solid fa-users-gear me-1"></i> Access</a></li>{% endif %}
+    {% if operator_permissions.preview_member_view %}<li class="nav-item"><a class="nav-link {% navactive request 'buh_moon_tax:member_preview' %}" href="{% url 'buh_moon_tax:member_preview' %}"><i class="fa-solid fa-user-check me-1"></i> Member POV</a></li>{% endif %}
+</ul>
+{% endblock %}
+{% block extra_css %}{{ block.super }}<link rel="stylesheet" href="{% static 'buh_moon_tax/css/moon-tax.css' %}?v={{ app_version }}">{% endblock %}
+{% block extra_javascript %}{{ block.super }}<script src="{% static 'buh_moon_tax/js/moon-tax.js' %}?v={{ app_version }}" defer></script>{% endblock %}

@@ -1,0 +1,455 @@
+name: Reusable source test suite
+
+on:
+  workflow_call:
+    inputs:
+      cache_scope:
+        description: Isolated BuildKit cache scope for this caller
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  configuration:
+    name: Test configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      node: ${{ steps.versions.outputs.node }}
+      python: ${{ steps.versions.outputs.python }}
+      python_image: ${{ steps.versions.outputs.python_image }}
+      mariadb_image: ${{ steps.versions.outputs.mariadb_image }}
+      redis_image: ${{ steps.versions.outputs.redis_image }}
+      fake_esi_image: ${{ steps.versions.outputs.fake_esi_image }}
+      playwright_image: ${{ steps.versions.outputs.playwright_image }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read and validate the compatibility contract
+        id: versions
+        env:
+          CACHE_SCOPE: ${{ inputs.cache_scope }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          compatibility = tomllib.loads(
+              Path("platform/compatibility.toml").read_text(encoding="utf-8")
+          )
+          env_values = {}
+          for raw_line in Path("platform/testenv/env.example").read_text(
+              encoding="utf-8"
+          ).splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              key, separator, value = line.partition("=")
+              if not separator or not key or not value:
+                  raise SystemExit(f"Malformed test environment entry: {raw_line!r}")
+              env_values[key] = value
+
+          cache_scope = os.environ["CACHE_SCOPE"]
+          if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", cache_scope):
+              raise SystemExit("The BuildKit cache scope contains unsupported characters.")
+
+          runtime = compatibility["runtime"]
+          outputs = {
+              "python": str(runtime["python"]),
+              "node": str(runtime["node"]),
+              "python_image": env_values["BUH_PYTHON_IMAGE"],
+              "mariadb_image": env_values["BUH_MARIADB_IMAGE"],
+              "redis_image": env_values["BUH_REDIS_IMAGE"],
+              "fake_esi_image": env_values["BUH_FAKE_ESI_IMAGE"],
+              "playwright_image": env_values["BUH_PLAYWRIGHT_IMAGE"],
+          }
+          safe_image = re.compile(r"[A-Za-z0-9][A-Za-z0-9./:_@+-]{1,255}")
+          exact_version = re.compile(
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)"
+          )
+          if not exact_version.fullmatch(outputs["python"]):
+              raise SystemExit("Unsafe Python version in compatibility.toml")
+          if not exact_version.fullmatch(outputs["node"]):
+              raise SystemExit("Unsafe Node.js version in compatibility.toml")
+          for name, value in outputs.items():
+              if "\r" in value or "\n" in value:
+                  raise SystemExit(f"Multiline workflow output is forbidden: {name}")
+              if "image" in name and not safe_image.fullmatch(value):
+                  raise SystemExit(f"Unsafe container image in env.example: {name}")
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              for name, value in outputs.items():
+                  print(f"{name}={value}", file=output)
+          PY
+
+  fast:
+    name: Fast source checks
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BUH_COMPOSE_PROJECT: buh-${{ github.run_id }}-${{ github.run_attempt }}-fast
+      BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-fast
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare failure report
+        run: |
+          mkdir -p artifacts
+          : >artifacts/fast.log
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ needs.configuration.outputs.python }}
+          cache: pip
+          cache-dependency-path: |
+            platform/requirements/build.lock
+            platform/requirements/production.lock
+            platform/requirements/test.lock
+            platform/requirements/production.txt
+            platform/requirements/test.txt
+            apps/*/pyproject.toml
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ needs.configuration.outputs.node }}
+
+      - name: Install bounded native build prerequisites
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            default-libmysqlclient-dev \
+            pkg-config
+
+      - name: Install source-test dependencies
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --require-hashes \
+            -r platform/requirements/build.lock
+          python -m pip install \
+            --require-hashes \
+            --no-build-isolation \
+            --only-binary=:all: \
+            --no-binary=celery-once,django-bootstrap-form,mysqlclient \
+            -r platform/requirements/test.lock
+          python ops/supply_chain.py verify
+
+          baseline="$(
+            python - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          contract = tomllib.loads(
+              Path("platform/compatibility.toml").read_text(encoding="utf-8")
+          )
+          release_path = contract["production_baseline"]["release_path"]
+          if not re.fullmatch(
+              r"releases/(?:[A-Za-z0-9][A-Za-z0-9._+-]*/)*"
+              r"v(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)",
+              release_path,
+          ):
+              raise SystemExit("Unsafe production baseline release path")
+          print(release_path)
+          PY
+          )"
+          mapfile -t baseline_wheels < <(
+            find "${baseline}" -maxdepth 1 -type f -name '*.whl' -print |
+              LC_ALL=C sort
+          )
+          [[ "${#baseline_wheels[@]}" -gt 0 ]]
+          python -m pip install \
+            --no-index --no-deps "${baseline_wheels[@]}"
+          python -m pip install \
+            --no-build-isolation --no-deps \
+            -e apps/structure-ops \
+            -e apps/mining-analytics \
+            -e apps/moon-tax
+          python -m pip check
+
+      - name: Run unit, migration, and JavaScript checks
+        run: |
+          set -Eeuo pipefail
+          {
+            bash platform/testenv/run-fast.sh
+            python -m unittest discover -s tests/release -p 'test_*.py'
+          } 2>&1 | tee artifacts/fast.log
+
+      - name: Upload fast-lane failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-fast-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/fast.log
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    name: MariaDB, Redis, Celery, and fake ESI
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUILDX_BAKE_FILE_RELATIVE_PATHS: "1"
+      BUH_CACHE_SCOPE: ${{ inputs.cache_scope }}
+      BUH_CACHE_LANE: integration
+      BUH_COMPOSE_PROJECT: buh-${{ github.run_id }}-${{ github.run_attempt }}-integration
+      BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-integration
+      BUH_PYTHON_IMAGE: ${{ needs.configuration.outputs.python_image }}
+      BUH_MARIADB_IMAGE: ${{ needs.configuration.outputs.mariadb_image }}
+      BUH_REDIS_IMAGE: ${{ needs.configuration.outputs.redis_image }}
+      BUH_FAKE_ESI_IMAGE: ${{ needs.configuration.outputs.fake_esi_image }}
+      BUH_PLAYWRIGHT_IMAGE: ${{ needs.configuration.outputs.playwright_image }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare failure reports
+        run: |
+          mkdir -p artifacts/integration
+          : >artifacts/integration/run.log
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build the source test image with isolated caching
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          files: platform/testenv/docker-bake.hcl
+          source: .
+          targets: testauth
+          set: |
+            testauth.args.PYTHON_IMAGE=${{ needs.configuration.outputs.python_image }}
+
+      - name: Run integration tests
+        run: |
+          set -Eeuo pipefail
+          COMPOSE=(docker compose -f platform/testenv/compose.yml)
+          REPORT_DIR="artifacts/integration"
+
+          finish() {
+            result=$?
+            trap - EXIT
+            "${COMPOSE[@]}" ps -a >"${REPORT_DIR}/compose-ps.txt" 2>&1 || true
+            "${COMPOSE[@]}" logs --no-color \
+              db redis fake-esi worker >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
+            "${COMPOSE[@]}" down --volumes --remove-orphans \
+              >"${REPORT_DIR}/teardown.log" 2>&1 || true
+            exit "${result}"
+          }
+          trap finish EXIT
+
+          run_logged() {
+            "$@" 2>&1 | tee -a "${REPORT_DIR}/run.log"
+          }
+
+          run_logged "${COMPOSE[@]}" up -d --wait db redis fake-esi
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py check --no-color
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py migrate --noinput --no-color
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py migrate --noinput --no-color
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py showmigrations --plan
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py test --noinput --no-color tests.integration
+          run_logged "${COMPOSE[@]}" up -d --wait worker
+          run_logged "${COMPOSE[@]}" run --rm test \
+            python manage.py buh_test_celery --no-color
+
+      - name: Upload integration failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-integration-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/integration/
+          if-no-files-found: error
+          retention-days: 7
+
+  browser:
+    name: Browser tables, actions, and permissions
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUILDX_BAKE_FILE_RELATIVE_PATHS: "1"
+      BUH_CACHE_SCOPE: ${{ inputs.cache_scope }}
+      BUH_CACHE_LANE: browser
+      BUH_COMPOSE_PROJECT: buh-${{ github.run_id }}-${{ github.run_attempt }}-browser
+      BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-browser
+      BUH_PYTHON_IMAGE: ${{ needs.configuration.outputs.python_image }}
+      BUH_MARIADB_IMAGE: ${{ needs.configuration.outputs.mariadb_image }}
+      BUH_REDIS_IMAGE: ${{ needs.configuration.outputs.redis_image }}
+      BUH_FAKE_ESI_IMAGE: ${{ needs.configuration.outputs.fake_esi_image }}
+      BUH_PLAYWRIGHT_IMAGE: ${{ needs.configuration.outputs.playwright_image }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare browser reports
+        run: |
+          mkdir -p \
+            artifacts/browser/playwright-report \
+            artifacts/browser/test-results
+          : >artifacts/browser/run.log
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build the source test image with isolated caching
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          files: platform/testenv/docker-bake.hcl
+          source: .
+          targets: |
+            testauth
+            browser
+          set: |
+            testauth.args.PYTHON_IMAGE=${{ needs.configuration.outputs.python_image }}
+            browser.args.PLAYWRIGHT_IMAGE=${{ needs.configuration.outputs.playwright_image }}
+
+      - name: Run browser tests without external test-network access
+        env:
+          BROWSER_CONTAINER: buh-source-browser-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          COMPOSE=(docker compose -f platform/testenv/compose.yml)
+          REPORT_DIR="artifacts/browser"
+
+          finish() {
+            result=$?
+            trap - EXIT
+            "${COMPOSE[@]}" ps -a >"${REPORT_DIR}/compose-ps.txt" 2>&1 || true
+            "${COMPOSE[@]}" logs --no-color \
+              db redis fake-esi web >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
+            if docker container inspect "${BROWSER_CONTAINER}" >/dev/null 2>&1; then
+              docker cp \
+                "${BROWSER_CONTAINER}:/browser/playwright-report/." \
+                "${REPORT_DIR}/playwright-report/" 2>>"${REPORT_DIR}/run.log" || true
+              docker cp \
+                "${BROWSER_CONTAINER}:/browser/test-results/." \
+                "${REPORT_DIR}/test-results/" 2>>"${REPORT_DIR}/run.log" || true
+              docker rm --force "${BROWSER_CONTAINER}" \
+                >>"${REPORT_DIR}/run.log" 2>&1 || true
+            fi
+            "${COMPOSE[@]}" down --volumes --remove-orphans \
+              >"${REPORT_DIR}/teardown.log" 2>&1 || true
+            exit "${result}"
+          }
+          trap finish EXIT
+
+          run_logged() {
+            "$@" 2>&1 | tee -a "${REPORT_DIR}/run.log"
+          }
+
+          run_logged "${COMPOSE[@]}" up -d --wait db redis fake-esi
+          run_logged "${COMPOSE[@]}" run --rm \
+            -e BUH_TEST_SETTINGS=testauth.settings.browser test \
+            python manage.py migrate --noinput --no-color
+          run_logged "${COMPOSE[@]}" run --rm \
+            -e BUH_TEST_SETTINGS=testauth.settings.browser test \
+            python manage.py buh_seed_test_platform --reset --no-color
+          run_logged "${COMPOSE[@]}" up -d --wait web
+          # The pinned browser image contains node_modules. The test command runs
+          # only on Compose's internal network and cannot reach the public Internet.
+          run_logged "${COMPOSE[@]}" run --name "${BROWSER_CONTAINER}" browser
+
+      - name: Reject unsafe browser failure-artifact entries
+        id: browser_artifact_guard
+        if: failure()
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import stat
+          from pathlib import Path
+
+          root = Path("artifacts/browser")
+          total = 0
+          for path in root.rglob("*"):
+              mode = path.lstat().st_mode
+              if stat.S_ISLNK(mode):
+                  raise SystemExit(f"Artifact tree contains a symlink: {path}")
+              if stat.S_ISDIR(mode):
+                  continue
+              if not stat.S_ISREG(mode):
+                  raise SystemExit(f"Artifact tree contains a special file: {path}")
+              size = path.stat().st_size
+              if size > 64 * 1024 * 1024:
+                  raise SystemExit(f"Artifact file exceeds 64 MiB: {path}")
+              total += size
+          if total > 256 * 1024 * 1024:
+              raise SystemExit("Browser artifact tree exceeds 256 MiB")
+          PY
+
+      - name: Upload browser failure report
+        if: ${{ failure() && steps.browser_artifact_guard.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/browser/
+          if-no-files-found: error
+          retention-days: 7
+
+  required:
+    name: Required source checks
+    if: always()
+    needs: [configuration, fast, integration, browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every source-test lane
+        env:
+          CONFIGURATION_RESULT: ${{ needs.configuration.result }}
+          FAST_RESULT: ${{ needs.fast.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+        run: |
+          set -Eeuo pipefail
+          failed=0
+          for entry in \
+            "configuration:${CONFIGURATION_RESULT}" \
+            "fast:${FAST_RESULT}" \
+            "integration:${INTEGRATION_RESULT}" \
+            "browser:${BROWSER_RESULT}"; do
+            lane="${entry%%:*}"
+            result="${entry#*:}"
+            printf '%s: %s\n' "${lane}" "${result}"
+            if [[ "${result}" != "success" ]]; then
+              failed=1
+            fi
+          done
+          if [[ "${failed}" -ne 0 ]]; then
+            echo "At least one required source-test lane did not succeed." >&2
+            exit 1
+          fi

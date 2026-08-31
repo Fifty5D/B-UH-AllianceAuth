@@ -1,0 +1,18 @@
+schema_version = 1
+summary = "Establish the source-first B-UH platform, permanent test environment, and guarded release automation."
+
+[[changes]]
+app = "platform"
+kind = "internal"
+
+[[changes]]
+app = "structure-ops"
+kind = "internal"
+
+[[changes]]
+app = "mining-analytics"
+kind = "internal"
+
+[[changes]]
+app = "moon-tax"
+kind = "internal"

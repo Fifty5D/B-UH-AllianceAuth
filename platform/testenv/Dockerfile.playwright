@@ -1,0 +1,11 @@
+ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.55.0-noble@sha256:b27e719ecbfef153e13fd24e8341736733bf2658b229677eb21ff57ff5d7fb29
+FROM ${PLAYWRIGHT_IMAGE}
+
+WORKDIR /browser
+
+COPY tests/browser/package.json tests/browser/package-lock.json ./
+RUN npm ci --ignore-scripts
+
+COPY tests/browser/ ./
+
+CMD ["npx", "playwright", "test", "moon-tax.spec.ts"]

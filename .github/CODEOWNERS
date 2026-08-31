@@ -1,0 +1,9 @@
+# Default review ownership for the private B-UH platform repository.
+* @Fifty5D
+
+# Security-sensitive release and runtime boundaries.
+/.github/workflows/ @Fifty5D
+/.github/dependabot.yml @Fifty5D
+/ops/release/ @Fifty5D
+/platform/ @Fifty5D
+/changes/ @Fifty5D

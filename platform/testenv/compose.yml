@@ -1,0 +1,143 @@
+name: ${BUH_COMPOSE_PROJECT:-buh-source-tests}
+
+x-test-environment: &test-environment
+  PYTHONPATH: /workspace/platform/testauth:/workspace
+  BUH_DB_HOST: db
+  BUH_DB_NAME: buh_test
+  BUH_DB_USER: root
+  BUH_DB_PASSWORD: test-only-root
+  BUH_REDIS_URL: redis://redis:6379
+  BUH_FAKE_ESI_ROOT: http://fake-esi:8080/
+  BUH_FAKE_ESI_URL: http://fake-esi:8080/latest/
+  BUH_TEST_SITE_URL: http://web:8000
+  BUH_TEST_SUPPORT_ENABLED: "1"
+
+x-auth-image: &auth-image
+  build:
+    context: ../..
+    dockerfile: platform/testenv/Dockerfile
+    args:
+      PYTHON_IMAGE: ${BUH_PYTHON_IMAGE:-python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2}
+  image: buh/source-testauth:${BUH_TEST_IMAGE_TAG:-local}
+  networks: [test-internal]
+
+services:
+  db:
+    image: ${BUH_MARIADB_IMAGE:-mariadb:11.8@sha256:2439dcd7d14010ecd1ff7a4e1c5abe8e208c34fe35290744deeeaac3569043c3}
+    environment:
+      MARIADB_DATABASE: buh_test
+      MARIADB_ROOT_PASSWORD: test-only-root
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --transaction-isolation=READ-COMMITTED
+      - --sql-mode=STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    networks: [test-internal]
+
+  redis:
+    image: ${BUH_REDIS_IMAGE:-redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576}
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs: [/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [test-internal]
+
+  fake-esi:
+    image: ${BUH_FAKE_ESI_IMAGE:-python:3.12.13-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df}
+    working_dir: /fake-esi
+    command: ["python", "server.py"]
+    volumes:
+      - ../../tests/fake_esi:/fake-esi:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [test-internal]
+
+  test:
+    <<: *auth-image
+    environment: *test-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      fake-esi: {condition: service_healthy}
+    command: ["python", "manage.py", "check"]
+
+  worker:
+    <<: *auth-image
+    environment: *test-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      fake-esi: {condition: service_healthy}
+    command:
+      - celery
+      - --app=testauth
+      - worker
+      - --pool=solo
+      - --loglevel=WARNING
+      - --hostname=buh-ci@%h
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          celery --app=testauth inspect ping
+          --destination=buh-ci@$$HOSTNAME --timeout=2 | grep -q pong
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  web:
+    <<: *auth-image
+    environment:
+      <<: *test-environment
+      BUH_TEST_SETTINGS: testauth.settings.browser
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      fake-esi: {condition: service_healthy}
+    command:
+      - python
+      - manage.py
+      - runserver
+      - 0.0.0.0:8000
+      - --noreload
+      - --insecure
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/__test__/health/', timeout=3)"
+      interval: 3s
+      timeout: 4s
+      retries: 40
+
+  browser:
+    build:
+      context: ../..
+      dockerfile: platform/testenv/Dockerfile.playwright
+      args:
+        PLAYWRIGHT_IMAGE: ${BUH_PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.55.0-noble@sha256:b27e719ecbfef153e13fd24e8341736733bf2658b229677eb21ff57ff5d7fb29}
+    image: buh/source-playwright:${BUH_TEST_IMAGE_TAG:-local}
+    working_dir: /browser
+    environment:
+      BUH_BROWSER_BASE_URL: http://web:8000
+    depends_on:
+      web: {condition: service_healthy}
+    command: ["npx", "playwright", "test", "moon-tax.spec.ts"]
+    networks: [test-internal]
+
+networks:
+  test-internal:
+    internal: true

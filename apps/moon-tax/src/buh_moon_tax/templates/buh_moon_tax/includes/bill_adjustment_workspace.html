@@ -1,0 +1,44 @@
+{% load humanize %}
+<div class="tax-bill-workspace">
+    <div class="tax-bill-summary">
+        <span><small>Original calculation</small><strong>{{ bill.calculated_tax_due|floatformat:2|intcomma }} ISK</strong></span>
+        <span><small>Active adjustments</small><strong>{{ bill.adjustment_total|floatformat:2|intcomma }} ISK</strong></span>
+        <span><small>Remaining</small><strong>{{ bill.outstanding|floatformat:2|intcomma }} ISK</strong></span>
+    </div>
+    {% if bill.outstanding > 0 %}
+    <form class="tax-adjustment-form" method="post" action="{% url 'buh_moon_tax:adjust_assessment' bill.pk %}" data-row-nav-ignore>
+        {% csrf_token %}
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <label><span>Reason</span><input class="form-control" name="reason" maxlength="500" required value="{% if bill.can_quick_waive %}Small Jita price variance{% endif %}" placeholder="Required audit note"></label>
+        <label><span>Custom amount</span><div class="tax-input-suffix"><input class="form-control" type="number" name="amount" min="0.01" step="0.01" placeholder="Optional"><b>ISK</b></div></label>
+        <div class="tax-adjustment-actions" role="group" aria-label="Resolve bill for {{ bill.display_name }}">
+            <button class="btn btn-tax-primary" name="action" value="WAIVE_BALANCE" type="submit"><i class="fa-solid fa-eraser"></i> Waive remaining {{ bill.outstanding|floatformat:2|intcomma }}</button>
+            <button class="btn btn-tax-action" name="action" value="CREDIT" type="submit"><i class="fa-solid fa-minus"></i> Credit amount</button>
+            <button class="btn btn-tax-action" name="action" value="DEBIT" type="submit"><i class="fa-solid fa-plus"></i> Debit amount</button>
+            {% if not bill.approved_paid %}<button class="btn btn-tax-danger" name="action" value="VOID_BILL" type="submit" data-confirm-void><i class="fa-solid fa-trash-can"></i> Void bill</button>{% endif %}
+        </div>
+    </form>
+    {% else %}
+    <div class="tax-settled-note"><i class="fa-solid fa-circle-check"></i> This bill has no outstanding balance.</div>
+    {% endif %}
+    <div class="tax-adjustment-history">
+        <h4>Adjustment history</h4>
+        {% for adjustment in bill.adjustments.all %}
+        <article class="{% if adjustment.reversed_at %}is-reversed{% endif %}">
+            <div>
+                <strong>{{ adjustment.get_kind_display }} · {{ adjustment.amount|floatformat:2|intcomma }} ISK</strong>
+                <p>{{ adjustment.reason }}</p>
+                <small>{{ adjustment.created_at|date:"Y-m-d H:i" }} UTC · {{ adjustment.created_by|default:"System" }}{% if adjustment.reversed_at %} · Reversed {{ adjustment.reversed_at|date:"Y-m-d H:i" }} UTC: {{ adjustment.reversal_reason }}{% endif %}</small>
+            </div>
+            {% if not adjustment.reversed_at %}
+            <form method="post" action="{% url 'buh_moon_tax:reverse_adjustment' adjustment.pk %}" data-row-nav-ignore>
+                {% csrf_token %}
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+                <input class="form-control form-control-sm" name="reason" required maxlength="500" placeholder="Why reverse?">
+                <button class="btn btn-sm btn-tax-ghost" type="submit"><i class="fa-solid fa-rotate-left"></i> Reverse</button>
+            </form>
+            {% endif %}
+        </article>
+        {% empty %}<p class="tax-muted">No Director adjustments have been made.</p>{% endfor %}
+    </div>
+</div>
