@@ -82,9 +82,12 @@ for minutes in 5 15 30 60 180 360; do
 done
 output="$(PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="fingerprint platform-v2" "${entry}")"
 [[ "${output}" == "sudo_target=-n /usr/local/sbin/buh-github-observe-root stdin=fingerprint platform-v2" ]]
+output="$(PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="attempt gh-33846197025-1" "${entry}")"
+[[ "${output}" == "sudo_target=-n /usr/local/sbin/buh-github-observe-root stdin=attempt gh-33846197025-1" ]]
 
 for denied in "" "bash" "diagnostics 120" "diagnostics 15; id" "diagnostics" \
-    "fingerprint" "fingerprint platform-v2; id"; do
+    "fingerprint" "fingerprint platform-v2; id" "attempt" "attempt latest" \
+    "attempt gh-0-0" "attempt gh-33846197025-1; id"; do
     if PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="${denied}" "${entry}" >/dev/null 2>&1; then
         echo "Observer accepted forbidden command: ${denied}" >&2
         exit 1
