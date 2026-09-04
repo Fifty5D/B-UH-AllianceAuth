@@ -222,9 +222,11 @@ class PreflightEngine:
             try:
                 recovery = self.backend.rollback(bundle, "validated")
             except BaseException as rollback_error:
+                rollback_summary = _failure_fields(rollback_error)[0]
                 recovery = (
                     "Candidate preflight cleanup also failed; production containers were "
-                    f"not intentionally restarted ({rollback_error.__class__.__name__})."
+                    "not intentionally restarted "
+                    f"({rollback_error.__class__.__name__}: {rollback_summary})."
                 )
             self.journal.fail(error, recovery)
             if isinstance(error, DeploymentError):
@@ -277,9 +279,11 @@ class DeploymentEngine:
             try:
                 recovery = self.backend.rollback(bundle, self.journal.state)
             except BaseException as rollback_error:
+                rollback_summary = _failure_fields(rollback_error)[0]
                 recovery = (
                     "Automatic code rollback also failed; keep the database backup "
-                    f"and inspect the host locally ({rollback_error.__class__.__name__})."
+                    "and inspect the host locally "
+                    f"({rollback_error.__class__.__name__}: {rollback_summary})."
                 )
             self.journal.fail(error, recovery)
             if isinstance(error, DeploymentError):

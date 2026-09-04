@@ -67,11 +67,21 @@ def _safe_error_output(output: str) -> str:
     return "\n".join(lines)
 
 
-def _atomic_text(path: Path, text: str, mode: int) -> None:
+def _atomic_text(
+    path: Path,
+    text: str,
+    mode: int,
+    *,
+    owner: tuple[int, int] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
+        if owner is not None:
+            details = os.fstat(descriptor)
+            if (details.st_uid, details.st_gid) != owner:
+                os.fchown(descriptor, *owner)
         os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
             stream.write(text)
@@ -91,8 +101,10 @@ class DockerHost:
         self.backup_path: Path | None = None
         self.original_dockerfile: Path | None = None
         self.original_local_settings: Path | None = None
+        self.original_local_settings_metadata: tuple[int, int, int] | None = None
         self.staged_release: Path | None = None
         self.previous_images: dict[str, tuple[str, str]] = {}
+        self.previous_image_pins: dict[str, str] = {}
         self.candidate_image_ids: dict[str, str] = {}
         self.auth_replica_counts: dict[str, int] = {}
         self.live_replacement_started = False
@@ -538,7 +550,13 @@ class DockerHost:
             updated = pattern.sub(lambda _match: block, text)
         else:
             updated = text.rstrip() + "\n\n" + block
-        _atomic_text(path, updated, path.stat().st_mode & 0o777)
+        details = path.stat()
+        _atomic_text(
+            path,
+            updated,
+            stat.S_IMODE(details.st_mode),
+            owner=(details.st_uid, details.st_gid),
+        )
 
     def _expected_versions(self, bundle: ValidatedBundle) -> dict[str, str]:
         return {
@@ -698,19 +716,75 @@ class DockerHost:
             candidate_images[service] = image_id
         self.candidate_image_ids = candidate_images
 
+    def _pin_previous_images(self, bundle: ValidatedBundle) -> None:
+        """Keep each live image addressable while Compose replaces its normal tag."""
+
+        if set(self.previous_images) != set(self.config.auth_services):
+            raise DeploymentError("Previous service images were not captured")
+        self.previous_image_pins = {}
+        for index, service in enumerate(self.config.auth_services):
+            image_id, _reference = self.previous_images[service]
+            pin = f"buh-platform-v2-rollback:{bundle.request.attempt_id}-{index}"
+            if not SAFE_IMAGE_REFERENCE_RE.fullmatch(pin) or "@" in pin:
+                raise DeploymentError("Generated rollback image reference is unsafe")
+            self._run(
+                ["docker", "image", "tag", image_id, pin],
+                context=f"Previous image retention for {service}",
+            )
+            resolved = self._run(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", pin],
+                context=f"Previous image retention verification for {service}",
+            ).strip()
+            if resolved != image_id:
+                raise DeploymentError(
+                    f"Retained previous image for {service} has the wrong identity"
+                )
+            self.previous_image_pins[service] = pin
+
+    def _discard_previous_image_pins(self) -> None:
+        """Remove temporary tags after the normal Compose references are verified."""
+
+        pins = tuple(dict.fromkeys(self.previous_image_pins.values()))
+        for pin in pins:
+            try:
+                self._run(
+                    ["docker", "image", "rm", pin],
+                    context="Temporary rollback image tag cleanup",
+                )
+            except DeploymentError:
+                # The verified Compose references now retain these image IDs.
+                # A leftover private tag is harmless and aids manual recovery.
+                continue
+        self.previous_image_pins = {}
+
     def _restore_candidate_configuration(self) -> bool:
         """Restore host files and retag the exact pre-attempt image without a restart."""
 
         if (
             self.original_dockerfile is None
             or self.original_local_settings is None
+            or self.original_local_settings_metadata is None
             or self.backup_path is None
         ):
             return False
         dockerfile = self.config.app_dir / self.config.custom_dockerfile
         local_settings = self.config.app_dir / self.config.local_settings
         shutil.copy2(self.original_dockerfile, dockerfile)
-        shutil.copy2(self.original_local_settings, local_settings)
+        if sha256_file(self.original_local_settings) != sha256_file(local_settings):
+            raise DeploymentError(
+                "Local settings changed during the guarded deployment attempt"
+            )
+        local_details = local_settings.stat()
+        local_metadata = (
+            local_details.st_uid,
+            local_details.st_gid,
+            stat.S_IMODE(local_details.st_mode),
+        )
+        if local_metadata != self.original_local_settings_metadata:
+            raise DeploymentError(
+                "Local settings ownership or permissions changed during the guarded "
+                "deployment attempt"
+            )
         if self.previous_images:
             if set(self.previous_images) != set(self.config.auth_services):
                 raise DeploymentError(
@@ -727,10 +801,27 @@ class DockerHost:
                         )
                     continue
                 restored_references[reference] = image_id
+                source = self.previous_image_pins.get(service, image_id)
                 self._run(
-                    ["docker", "image", "tag", image_id, reference],
+                    ["docker", "image", "tag", source, reference],
                     context=f"Previous image reference restoration for {service}",
                 )
+                restored = self._run(
+                    [
+                        "docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{.Id}}",
+                        reference,
+                    ],
+                    context=f"Previous image reference verification for {service}",
+                ).strip()
+                if restored != image_id:
+                    raise DeploymentError(
+                        f"Previous image reference for {service} was not restored"
+                    )
+        self._discard_previous_image_pins()
         return True
 
     def prepare_candidate(self, bundle: ValidatedBundle) -> None:
@@ -740,12 +831,18 @@ class DockerHost:
         local_settings = self.config.app_dir / self.config.local_settings
         self.original_dockerfile = self.backup_path / "custom.dockerfile"
         self.original_local_settings = self.backup_path / "local.py"
+        local_details = local_settings.stat()
+        self.original_local_settings_metadata = (
+            local_details.st_uid,
+            local_details.st_gid,
+            stat.S_IMODE(local_details.st_mode),
+        )
         shutil.copy2(dockerfile, self.original_dockerfile)
         shutil.copy2(local_settings, self.original_local_settings)
-        self.original_dockerfile.chmod(0o600)
         self.original_local_settings.chmod(0o600)
 
         self._capture_live_images()
+        self._pin_previous_images(bundle)
         self.staged_release = self._stage_release(bundle)
         self._write_candidate_dockerfile(bundle)
         self._compose(

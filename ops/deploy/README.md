@@ -27,8 +27,14 @@ reviewed host operation.
   stable Docker layers before changed owned wheels. Unchanged layers remain
   cached, while same-version corrections cannot silently retain old bytes.
 - Preflight and deployment both build the real candidate and run package-version,
-  Django, and migration-plan checks. Preflight then retags the exact prior image
-  without restarting live Auth containers.
+  Django, and migration-plan checks. Before building, the receiver pins every
+  exact live image under an attempt-scoped rollback tag. Preflight restores and
+  verifies the prior Compose references without restarting live Auth containers,
+  then removes the temporary tags on a best-effort basis.
+- Candidate preparation preserves the owner and mode of `custom.dockerfile`.
+  The root-only backup of mounted `conf/local.py` is used only to verify its
+  bytes; it is never copied over the live settings file, whose owner and mode
+  must also remain unchanged throughout the attempt.
 - Every running replica of each configured Auth service is discovered. Replicas
   of one logical service must share an image and Compose reference, while
   different services may have distinct image IDs from the same anchored build
@@ -42,7 +48,8 @@ reviewed host operation.
   redacted diagnostic tail. `current.json` changes only after
   container, package, migration, Django, Redis, Celery, log, and HTTPS checks all
   pass.
-- Code/configuration rollback retags the captured pre-attempt image and is
+- Code/configuration rollback retags the pinned pre-attempt image, verifies the
+  restored Compose reference resolves to the exact captured image ID, and is
   automatic after a failed or partially completed swap, preserving the captured
   replica topology. Database restore
   is intentionally never automatic; migrations must remain backward compatible,
