@@ -32,7 +32,7 @@ compose() {
 }
 
 runtime_fingerprint() {
-    local runtime_tag inspect_line image_id repo_digests
+    local runtime_tag image_id repo_digests
     local services docker_version compose_version
 
     # Compose performs interpolation, but awk permits only AA_DOCKER_TAG to
@@ -45,16 +45,14 @@ runtime_fingerprint() {
         echo "AA_DOCKER_TAG must resolve exactly once." >&2
         exit 78
     fi
-    inspect_line="$(
-        docker image inspect --format '{{.Id}}\t{{json .RepoDigests}}' \
-            "${runtime_tag}"
+    # Docker's Go-template formatter prints backslash escapes literally, so
+    # collect these fields separately instead of relying on a tab delimiter.
+    image_id="$(
+        docker image inspect --format '{{.Id}}' "${runtime_tag}"
     )"
-    image_id="${inspect_line%%$'\t'*}"
-    repo_digests="${inspect_line#*$'\t'}"
-    if [[ "${image_id}" == "${inspect_line}" ]]; then
-        echo "Docker image inspection did not return repository digests." >&2
-        exit 69
-    fi
+    repo_digests="$(
+        docker image inspect --format '{{json .RepoDigests}}' "${runtime_tag}"
+    )"
 
     services="$(compose config --services | sed '/^$/d' | sort -u)"
     docker_version="$(docker version --format '{{.Server.Version}}')"
