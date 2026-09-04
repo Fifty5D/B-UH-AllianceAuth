@@ -30,16 +30,32 @@ trust boundary:
 commit that already has a successful Source CI push run. It builds and verifies
 one candidate artifact. Optional publication is separately restricted to the
 repository owner plus an exact confirmation phrase, re-verifies the downloaded
-candidate, and creates one new release branch with the tested source as its sole
-parent. It never updates main and never connects to the VPS.
+candidate, and, under one repository-wide publication lock, atomically creates
+an immutable release ref and a disposable sync ref at one release commit whose
+sole parent is the tested source. It never updates main or connects to the VPS.
+
+Publication automatically opens the exact release-state synchronization pull
+request from `sync/platform-vX.Y.Z`, never from the immutable release ref, and
+never merges it. This lets GitHub update the PR branch when `main` advances
+without changing published release identity. The helper accepts an advanced
+`main` only when the original release source remains an ancestor; divergence
+fails closed. If repository policy blocks Actions from creating pull requests,
+the publication run fails closed after recording a one-click manual recovery
+URL. That PR records the exact published release state on `main`; the publisher
+never pushes `main` directly. Source CI protects the append-only release ledger
+by rejecting changes or removals to prior release state and additions that do
+not match their immutable release ref. Before another release can be planned, an
+exact parity gate requires the highest release ref and the latest release state
+on `main` to identify the same release commit and bytes. Missing, extra, or
+different state fails closed.
 
 Source and release-candidate jobs now enforce exact transitive hash locks,
 exactly pinned build tools, and digest-pinned disposable test images. The
 production v2 receiver and backup-aware state machine are now repository-owned
-and tested, as is a previous-production upgrade/restore rehearsal. They remain
-inactive on the VPS. The production runtime-image digest, one-time receiver
-bootstrap, successful preflight, and approved deployment are still promotion
-gates.
+and tested, as is a previous-production upgrade/restore rehearsal. The reviewed
+production runtime-image digest is pinned. Receiver installation is operationally
+separate from application promotion; a successful no-change preflight and an
+explicitly approved deployment are still promotion gates.
 
 The release builder also refuses publication until
 `production_runtime.base_image` contains that reviewed digest. Candidate builds
@@ -64,6 +80,11 @@ an explicit reviewed source change.
 - Readers reject unknown schema versions and unknown security-sensitive fields.
 - A schema revision requires a new schema file/version plus positive, negative,
   backward-compatibility, and canonical example tests.
+- Before changing the current schema version, preserve and version every
+  transitive schema-v1 planner and manifest/install-plan reader, route ledger
+  replay by each historical manifest's schema, and prove every existing
+  immutable schema-v1 release still verifies. The current v1 entry point
+  intentionally fails closed until that migration work exists.
 - A release manifest records the source commit, prior release, compatibility
   contract, app graph, exact artifact hashes, install order, and migration plan.
 
@@ -88,11 +109,22 @@ fingerprint, and release provenance remain authoritative.
    dependents.
 8. Reuse unchanged wheels only after their previous identity and SHA-256 match.
 9. Assemble and verify one immutable release bundle in an isolated installation.
-10. Publish the bundle and version updates in one compare-and-swap commit/tag.
-11. Select that exact release in the manually approved production workflow.
+10. Under the global publication lock, atomically create one absent immutable
+    release ref and one absent disposable sync ref at the release commit, whose
+    sole parent is the tested source commit.
+11. Review and merge the mandatory synchronization PR from the sync ref
+    after approving its queued workflow run and after Source CI verifies
+    append-only history and exact release-ref/main parity. GitHub requires this
+    one-time run approval because the PR was opened with `GITHUB_TOKEN`. Use a
+    merge commit; never squash or rebase this PR. The sync ref may be updated or
+    deleted after merge; the release ref may not.
+12. Require that parity before planning or publishing any later release.
+13. Separately select that exact release in the manually approved production
+    workflow.
 
 A release is never rebuilt after publication. A correction receives new app and
-platform versions.
+platform versions. Publication and synchronization do not deploy or authorize a
+deployment.
 
 ## Required production controls
 
@@ -100,6 +132,11 @@ Platform v2 must retain or strengthen the legacy controls:
 
 - protected production environment with manual approval;
 - checkout of a full, protected release commit rather than an arbitrary branch;
+- a repository ruleset that restricts creation of `release/platform-v*` to the
+  reviewed publisher and forbids every update and deletion of those refs;
+- merge-commit-only handling for release synchronization PRs: disable squash and
+  rebase merging repository-wide or enforce an equivalent policy, and do not
+  require linear history on `main`;
 - minimal GitHub permissions and actions pinned to full commit SHAs;
 - separate least-privilege deploy and read-only observer identities;
 - pinned known-host validation and no credential output;
@@ -197,7 +234,7 @@ Minor backend changes do not need a preview.
 
 - [x] Exact `--require-hashes` dependency locks are generated and verified.
 - [x] All disposable source-test service and base images are pinned by digest.
-- [ ] The future production runtime image is pinned by digest.
+- [x] The production runtime image is pinned by digest.
 - [x] Schema v1 validators have canonical and adversarial tests, and schema
   evolution policy is enforced.
 - [x] Source, integration, upgrade, concurrency, browser, and contract lanes are
@@ -205,7 +242,7 @@ Minor backend changes do not need a preview.
 - [x] Database backup restoration is required in the disposable environment.
 - [x] Platform v2 forced-command receiver accepts only the declared manifest and
   install plan.
-- [ ] The receiver is installed and its no-change production preflight passes.
+- [ ] The installed receiver completes a no-change production preflight.
 - [ ] Mandatory post-deployment verification and diagnostics pass in production.
 - [ ] A Platform v2 rollback drill succeeds before legacy v1 is retired.
 
