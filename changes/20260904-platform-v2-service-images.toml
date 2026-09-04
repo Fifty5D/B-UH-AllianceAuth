@@ -1,0 +1,4 @@
+schema_version = 1
+summary = "Preserve and verify per-service Compose images during guarded deployment."
+app = "platform"
+kind = "fix"

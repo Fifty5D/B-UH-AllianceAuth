@@ -29,10 +29,12 @@ reviewed host operation.
 - Preflight and deployment both build the real candidate and run package-version,
   Django, and migration-plan checks. Preflight then retags the exact prior image
   without restarting live Auth containers.
-- Every running replica of each configured Auth service is discovered and must use
-  the same image. Its exact service replica counts are pinned explicitly during
+- Every running replica of each configured Auth service is discovered. Replicas
+  of one logical service must share an image and Compose reference, while
+  different services may have distinct image IDs from the same anchored build
+  definition. Exact per-service images and replica counts are pinned during
   replacement and rollback, and every expected replica must pass the post-swap
-  running/restart checks.
+  image/running/restart checks.
 - A pre-migration database dump is restored into an isolated, memory-backed
   MariaDB container using the exact running database image. Accounting-table and
   migration row counts must match before migration begins.
