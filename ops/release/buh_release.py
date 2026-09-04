@@ -32,6 +32,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
+PLAN_SCHEMA_V1 = 1
 MAX_RELEASE_FILES = 128
 MAX_RELEASE_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -274,7 +275,12 @@ def _safe_relative_path(value: str, context: str) -> str:
     ):
         raise ReleaseError(f"Unsafe {context}: {value!r}")
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or str(path) != value:
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or ".git" in path.parts
+        or str(path) != value
+    ):
         raise ReleaseError(f"Unsafe {context}: {value!r}")
     return value
 
@@ -288,7 +294,12 @@ def _safe_glob_pattern(value: str, context: str) -> str:
     ):
         raise ReleaseError(f"Unsafe {context}: {value!r}")
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or str(path) != value:
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or ".git" in path.parts
+        or str(path) != value
+    ):
         raise ReleaseError(f"Unsafe {context}: {value!r}")
     if any(part in {"", "."} for part in path.parts):
         raise ReleaseError(f"Unsafe {context}: {value!r}")
@@ -1069,7 +1080,7 @@ def _previous_artifacts(previous: Mapping[str, Any] | None) -> dict[str, dict[st
     return result
 
 
-def create_plan(
+def create_plan_v1(
     *,
     repo_root: Path,
     registry_path: Path,
@@ -1079,7 +1090,18 @@ def create_plan(
     source_commit: str,
     test_run: str | None = None,
 ) -> dict[str, Any]:
-    """Create a deterministic, change-aware release plan."""
+    """Create a schema-v1 plan through a fail-closed migration gate.
+
+    This entry point still uses the current transitive readers and validators;
+    it is not a frozen backward-compatible implementation. Before a schema
+    bump, those helpers must be preserved/versioned for v1. The explicit gate
+    prevents a bump from silently reinterpreting immutable schema-v1 history.
+    """
+
+    if SCHEMA_VERSION != PLAN_SCHEMA_V1:
+        raise ReleaseError(
+            "Schema-v1 planning requires a preserved compatibility implementation"
+        )
 
     if not COMMIT_RE.fullmatch(source_commit):
         raise ReleaseError("source_commit must be a full 40- or 64-character Git id")
@@ -1233,7 +1255,7 @@ def create_plan(
         dependency_artifacts.append(planned_dependency)
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": PLAN_SCHEMA_V1,
         "platform_id": registry.platform_id,
         "source_commit": source_commit,
         "test_run": test_run,
@@ -1270,6 +1292,74 @@ def create_plan(
         "changes": [change.as_dict() for change in changes],
         "consumed_fragments": sorted({change.fragment for change in changes}),
     }
+
+
+def create_plan(
+    *,
+    repo_root: Path,
+    registry_path: Path,
+    compatibility_path: Path | None,
+    changes_dir: Path,
+    previous_manifest_path: Path | None,
+    source_commit: str,
+    test_run: str | None = None,
+) -> dict[str, Any]:
+    """Create a release plan using the repository's current schema router."""
+
+    if SCHEMA_VERSION == PLAN_SCHEMA_V1:
+        return create_plan_v1(
+            repo_root=repo_root,
+            registry_path=registry_path,
+            compatibility_path=compatibility_path,
+            changes_dir=changes_dir,
+            previous_manifest_path=previous_manifest_path,
+            source_commit=source_commit,
+            test_run=test_run,
+        )
+    raise ReleaseError(f"No release planner is registered for schema {SCHEMA_VERSION}")
+
+
+def render_release_readme_v1(
+    *,
+    platform_version: str,
+    source_commit: str,
+    changes: Sequence[Mapping[str, Any]],
+    artifacts: Sequence[Mapping[str, Any]],
+) -> bytes:
+    """Render the immutable schema-v1 release notes byte-for-byte."""
+
+    notes: list[str] = [
+        f"# B-UH platform {platform_version}",
+        "",
+        f"Source commit: `{source_commit}`",
+        "",
+        "## Changes",
+        "",
+    ]
+    if changes:
+        for change in sorted(
+            changes, key=lambda item: (item["app_id"], item["fragment"])
+        ):
+            notes.append(
+                f"- **{change['app_id']} ({change['kind']}):** {change['summary']}"
+            )
+    else:
+        notes.append(
+            "- Source-first baseline; application behavior and versions are preserved."
+        )
+    notes.extend(
+        [
+            "",
+            "## Artifacts",
+            "",
+            *[
+                f"- `{item['filename']}` — {item['sha256']} ({item['origin']})"
+                for item in sorted(artifacts, key=lambda artifact: artifact["filename"])
+            ],
+            "",
+        ]
+    )
+    return "\n".join(notes).encode("utf-8")
 
 
 def write_plan(plan: Mapping[str, Any], path: Path) -> None:
@@ -2192,34 +2282,14 @@ def assemble_release(
     manifest_path = output_dir / "RELEASE.json"
     manifest_path.write_bytes(_canonical_json_bytes(manifest))
 
-    notes: list[str] = [
-        f"# B-UH platform {plan['platform_version']}",
-        "",
-        f"Source commit: `{plan['source_commit']}`",
-        "",
-        "## Changes",
-        "",
-    ]
-    if plan["changes"]:
-        for change in sorted(
-            plan["changes"], key=lambda item: (item["app_id"], item["fragment"])
-        ):
-            notes.append(f"- **{change['app_id']} ({change['kind']}):** {change['summary']}")
-    else:
-        notes.append("- Source-first baseline; application behavior and versions are preserved.")
-    notes.extend(
-        [
-            "",
-            "## Artifacts",
-            "",
-            *[
-                f"- `{item['filename']}` — {item['sha256']} ({item['origin']})"
-                for item in sorted(artifacts, key=lambda artifact: artifact["filename"])
-            ],
-            "",
-        ]
+    (output_dir / "README.md").write_bytes(
+        render_release_readme_v1(
+            platform_version=plan["platform_version"],
+            source_commit=plan["source_commit"],
+            changes=plan["changes"],
+            artifacts=artifacts,
+        )
     )
-    (output_dir / "README.md").write_text("\n".join(notes), encoding="utf-8")
 
     checked_files = sorted(
         path for path in output_dir.iterdir() if path.is_file() and path.name != "SHA256SUMS"
