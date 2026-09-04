@@ -125,6 +125,15 @@ class PlatformConfigurationContracts(TestCase):
                 self.assertNotRegex(image, r"(?i)(?::|@)latest(?:$|[-.])")
                 self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
 
+    def test_production_runtime_is_pinned_to_the_observed_allianceauth_image(self):
+        runtime = self.compatibility["production_runtime"]
+        self.assertEqual(set(runtime), {"base_image"})
+        self.assertRegex(
+            runtime["base_image"],
+            r"^registry\.gitlab\.com/allianceauth/allianceauth/auth"
+            r"@sha256:[0-9a-f]{64}$",
+        )
+
     def test_reviewed_images_match_the_compatibility_matrix(self):
         runtime = self.compatibility["runtime"]
         self.assertRegex(
