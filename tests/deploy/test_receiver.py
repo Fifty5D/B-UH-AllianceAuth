@@ -4,7 +4,9 @@ import dataclasses
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from ops.deploy.contracts import DeploymentError, ReceiverConfig
@@ -12,6 +14,29 @@ from ops.deploy.receiver import LockBusy, _forced_mode, _open_lock
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@contextmanager
+def simulated_root_metadata():
+    """Present temporary runner-owned files as root-owned to the root-only unit."""
+
+    real_lstat = Path.lstat
+    real_fstat = os.fstat
+
+    def lstat_as_root(path):
+        details = real_lstat(path)
+        return SimpleNamespace(st_mode=details.st_mode, st_uid=0)
+
+    def fstat_as_root(descriptor):
+        details = real_fstat(descriptor)
+        return SimpleNamespace(st_mode=details.st_mode, st_uid=0)
+
+    with mock.patch(
+        "ops.deploy.receiver.os.geteuid", return_value=0
+    ), mock.patch.object(Path, "lstat", lstat_as_root), mock.patch(
+        "ops.deploy.receiver.os.fstat", side_effect=fstat_as_root
+    ):
+        yield
 
 
 class ReceiverBoundaryTests(unittest.TestCase):
@@ -46,16 +71,16 @@ class ReceiverBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             config = dataclasses.replace(source, state_dir=state)
-            with mock.patch("ops.deploy.receiver.os.geteuid", return_value=0):
+            with simulated_root_metadata():
                 first = _open_lock(config)
-            try:
-                self.assertEqual((state / "deploy.lock").stat().st_mode & 0o777, 0o600)
-                with mock.patch(
-                    "ops.deploy.receiver.os.geteuid", return_value=0
-                ), self.assertRaises(LockBusy):
-                    _open_lock(config)
-            finally:
-                os.close(first)
+                try:
+                    self.assertEqual(
+                        (state / "deploy.lock").stat().st_mode & 0o777, 0o600
+                    )
+                    with self.assertRaises(LockBusy):
+                        _open_lock(config)
+                finally:
+                    os.close(first)
 
     def test_world_readable_state_directory_is_rejected(self):
         source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
@@ -63,9 +88,9 @@ class ReceiverBoundaryTests(unittest.TestCase):
             state = Path(temporary) / "state"
             state.mkdir(mode=0o755)
             config = dataclasses.replace(source, state_dir=state)
-            with mock.patch(
-                "ops.deploy.receiver.os.geteuid", return_value=0
-            ), self.assertRaisesRegex(DeploymentError, "private"):
+            with simulated_root_metadata(), self.assertRaisesRegex(
+                DeploymentError, "private"
+            ):
                 _open_lock(config)
 
 
