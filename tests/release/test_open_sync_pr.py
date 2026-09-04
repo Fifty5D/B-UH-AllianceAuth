@@ -48,6 +48,7 @@ def _pr(number: int = 17, *, head_sha: str = RELEASE) -> dict[str, Any]:
         "maintainer_can_modify": False,
         "number": number,
         "state": "open",
+        "user": {"login": "Fifty5D"},
     }
 
 
@@ -375,7 +376,10 @@ class SyncPrTests(unittest.TestCase):
             self.assertEqual(outputs[0], "action=created")
             self.assertEqual(outputs[1], "number=17")
             self.assertEqual(outputs[2], f"url={_pr()['html_url']}")
-            self.assertIn("must approve", summary.read_text(encoding="utf-8"))
+            self.assertIn(
+                "owner approves inside ChatGPT",
+                summary.read_text(encoding="utf-8"),
+            )
             combined = stdout.getvalue() + stderr.getvalue() + summary.read_text()
             self.assertNotIn(TOKEN, combined)
 

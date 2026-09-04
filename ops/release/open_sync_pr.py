@@ -466,6 +466,8 @@ def _validate_pr(pr: Any, config: SyncConfig) -> dict[str, Any]:
         or pr.get("draft") is not False
         or pr.get("auto_merge") is not None
         or pr.get("maintainer_can_modify") is not False
+        or not isinstance(pr.get("user"), dict)
+        or pr["user"].get("login") != config.owner
         or not isinstance(head, dict)
         or head.get("ref") != config.sync_branch
         or head.get("sha") != config.release_commit
@@ -496,6 +498,8 @@ def _listed_pr_number(pr: Any, config: SyncConfig) -> int:
         type(number) is not int
         or number < 1
         or pr.get("state") != "open"
+        or not isinstance(pr.get("user"), dict)
+        or pr["user"].get("login") != config.owner
         or not isinstance(head, dict)
         or head.get("ref") != config.sync_branch
         or head.get("sha") != config.release_commit
@@ -541,9 +545,12 @@ def _list_exact_pr(client: GitHubClient, config: SyncConfig) -> dict[str, Any] |
 def _create_payload(config: SyncConfig) -> dict[str, Any]:
     body = (
         "This pull request synchronizes the immutable platform release ledger.\n\n"
-        "Approve the workflow run GitHub queues for this automated PR, then "
-        "merge it with a merge commit after every required Source CI check "
-        "passes; do not squash or rebase it.\n\n"
+        "Source CI and the no-change production preflight run automatically. "
+        "Do not merge this pull request manually. ChatGPT will request the one "
+        "production approval after it verifies the readiness marker. Once the "
+        "repository owner approves in ChatGPT, ChatGPT records that approval "
+        "in the merge commit and performs one merge action; it never squashes "
+        "or rebases.\n\n"
         f"Source commit: {config.source_sha}\n"
         f"Release commit: {config.release_commit}\n\n"
         "Production has not been deployed by this release workflow.\n"
@@ -664,8 +671,9 @@ def _success_summary(config: SyncConfig, report: Mapping[str, Any]) -> str:
         f"- Pull request: {report['pull_request']['url']}\n"
         f"- Exact head: {config.release_commit}\n"
         f"- Result: {report['action']}\n\n"
-        "A maintainer must approve the queued workflows.\n"
-        "Merge only after Source CI passes. Production was not deployed.\n"
+        "Source CI and production preflight now run automatically.\n"
+        "Merge only after ChatGPT presents the evidence and the owner approves "
+        "inside ChatGPT. Production was not deployed.\n"
     )
 
 

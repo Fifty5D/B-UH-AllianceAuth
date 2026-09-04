@@ -1,6 +1,50 @@
 name: Deploy Platform v2
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Validate only, or perform the guarded production deployment
+        required: true
+        type: string
+      platform_version:
+        description: Exact published platform version without a leading v
+        required: true
+        type: string
+      release_commit:
+        description: Exact 40-character commit at the published release branch tip
+        required: true
+        type: string
+      confirmation:
+        description: Exact preflight or deployment confirmation phrase
+        required: true
+        type: string
+    secrets:
+      BUH_DEPLOY_SSH_KEY:
+        description: Forced-command Platform v2 deploy identity
+        required: false
+      BUH_OBSERVER_SSH_KEY:
+        description: Read-only production observer identity
+        required: false
+      BUH_VPS_KNOWN_HOSTS:
+        description: Pinned VPS SSH host key
+        required: false
+      BUH_VPS_HOST:
+        description: Optional secret fallback for the VPS host
+        required: false
+      BUH_VPS_PORT:
+        description: Optional secret fallback for the VPS SSH port
+        required: false
+      BUH_OBSERVER_USER:
+        description: Optional secret fallback for the observer user
+        required: false
+    outputs:
+      artifact_name:
+        description: Sanitized retained diagnostic artifact
+        value: ${{ jobs.deploy.outputs.artifact_name }}
+      manifest_sha256:
+        description: Exact deployed release manifest hash
+        value: ${{ jobs.deploy.outputs.manifest_sha256 }}
   workflow_dispatch:
     inputs:
       mode:
@@ -41,6 +85,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     environment: production
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      manifest_sha256: ${{ steps.release.outputs.manifest_sha256 }}
     steps:
       - name: Validate owner, mode, version, and immutable release ref
         env:
@@ -350,11 +397,18 @@ jobs:
               raise SystemExit("Diagnostic artifacts exceed their aggregate limit")
           PY
 
+      - name: Name the retained diagnostic artifact
+        id: artifact
+        if: always() && steps.sanitize.outcome == 'success'
+        run: |
+          set -Eeuo pipefail
+          echo "name=platform-v2-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}" >>"${GITHUB_OUTPUT}"
+
       - name: Upload sanitized diagnostics for every attempt
         if: always() && steps.sanitize.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: platform-v2-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.artifact.outputs.name }}
           path: |
             artifacts/receiver.txt
             artifacts/diagnostics.txt

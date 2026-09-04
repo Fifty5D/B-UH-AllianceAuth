@@ -1,0 +1,186 @@
+name: Deploy ChatGPT-approved platform release
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buh-chatgpt-approved-platform-deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  authorize:
+    name: Bind merge to ChatGPT approval and preflight
+    if: ${{ github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      manifest_sha256: ${{ steps.gate.outputs.manifest_sha256 }}
+      platform_version: ${{ steps.gate.outputs.platform_version }}
+      preflight_artifact: ${{ steps.gate.outputs.preflight_artifact }}
+      preflight_run_id: ${{ steps.gate.outputs.preflight_run_id }}
+      release_commit: ${{ steps.gate.outputs.release_commit }}
+      source_commit: ${{ steps.gate.outputs.source_commit }}
+    steps:
+      # pull_request_target is trusted only because this checkout is the base
+      # branch revision. No code is ever checked out from event-controlled refs.
+      - name: Check out the trusted main workflow revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reverify the merge, evidence, and one ChatGPT approval
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${{ github.sha }}" ]]
+          python3 ops/release/platform_approval.py authorize \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${GITHUB_EVENT_PATH}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-deploy-approval.json >/dev/null
+
+      - name: Download the exact retained preflight artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.gate.outputs.preflight_artifact }}
+          path: build/preflight-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.gate.outputs.preflight_run_id }}
+
+      - name: Verify receiver and observer preflight evidence
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/platform_approval.py verify-artifact \
+            --report build/platform-deploy-approval.json \
+            --artifact-dir build/preflight-evidence >/dev/null
+
+      - name: Upload bounded deployment-approval evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-deploy-approval-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/platform-deploy-approval.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  deploy:
+    name: Deploy the approved immutable release
+    needs: authorize
+    uses: ./.github/workflows/deploy-platform-v2.yml
+    with:
+      mode: deploy
+      platform_version: ${{ needs.authorize.outputs.platform_version }}
+      release_commit: ${{ needs.authorize.outputs.release_commit }}
+      confirmation: DEPLOY PLATFORM V2
+    secrets: inherit
+    permissions:
+      contents: read
+
+  report:
+    name: Report deployment result for ChatGPT
+    if: ${{ always() && github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v') }}
+    needs: [authorize, deploy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Publish a machine-readable result comment
+        env:
+          API_URL: ${{ github.api_url }}
+          ARTIFACT_NAME: ${{ needs.deploy.outputs.artifact_name }}
+          AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PLATFORM_VERSION: ${{ needs.authorize.outputs.platform_version }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.release_commit }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          authorize = os.environ["AUTHORIZE_RESULT"]
+          deploy = os.environ["DEPLOY_RESULT"]
+          if authorize != "success":
+              result = "authorization-failed"
+          elif deploy != "success":
+              result = "deployment-failed"
+          else:
+              result = "success"
+          values = {
+              "artifact_name": os.environ["ARTIFACT_NAME"],
+              "platform_version": os.environ["PLATFORM_VERSION"],
+              "release_commit": os.environ["RELEASE_COMMIT"],
+              "repository": os.environ["REPOSITORY"],
+              "result": result,
+              "schema_version": 1,
+              "workflow_run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "workflow_run_id": int(os.environ["RUN_ID"]),
+          }
+          if result == "success":
+              if not re.fullmatch(r"[0-9a-f]{40}", values["release_commit"]):
+                  raise SystemExit("Successful deployment lacks an exact release commit")
+              if not re.fullmatch(
+                  r"platform-v2-deploy-[0-9]{1,20}-[1-9][0-9]{0,5}",
+                  values["artifact_name"],
+              ):
+                  raise SystemExit("Successful deployment lacks its retained artifact")
+          marker = json.dumps(values, sort_keys=True, separators=(",", ":"))
+          run_url = (
+              f"{os.environ['SERVER_URL']}/{os.environ['REPOSITORY']}/actions/runs/"
+              f"{os.environ['RUN_ID']}/attempts/{os.environ['RUN_ATTEMPT']}"
+          )
+          body = (
+              f"<!-- buh-platform-deploy-result:v1 {marker} -->\n\n"
+              f"### Platform production deployment: {result}\n\n"
+              f"Retained workflow evidence: {run_url}"
+          )
+          request = urllib.request.Request(
+              f"{os.environ['API_URL']}/repos/{os.environ['REPOSITORY']}/issues/"
+              f"{os.environ['PULL_REQUEST']}/comments",
+              data=(json.dumps({"body": body}, separators=(",", ":")) + "\n").encode(),
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "buh-platform-deploy-result/1",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              if response.status != 201 or len(response.read(2 * 1024 * 1024 + 1)) > 2 * 1024 * 1024:
+                  raise SystemExit("GitHub did not accept the deployment result comment")
+          PY

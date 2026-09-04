@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "feature"
+summary = "Automate release testing and deployment around one production approval in ChatGPT."

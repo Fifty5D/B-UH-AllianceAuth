@@ -24,10 +24,14 @@ or unredacted logs.
   Append-only Source CI checks and exact release-ref/main parity fail closed
   before any later release. A repository ruleset grants only the reviewed
   publisher permission to create release refs and forbids their update or
-  deletion. A maintainer approves the queued workflow run and merges it with a
-  merge commit; squash and rebase merging are not valid for synchronization.
-- Publication and synchronization never deploy production. Deployment remains a
-  separate, manually approved operation.
+  deletion. Source CI and a no-change production preflight run automatically.
+  ChatGPT presents their exact retained evidence and waits for one explicit
+  repository-owner approval. It places the exact approval marker in the merge
+  commit message and performs one merge action; squash and rebase are not valid
+  synchronization.
+- Publication and preflight never change production. Only a sync PR carrying
+  the matching GitHub Actions readiness marker and merge commit carrying its
+  exact ChatGPT approval marker can start guarded production deployment.
 - Pull requests, tests, and previews never receive production credentials or
   database access.
 - Application versions, platform versions, source commits, dependency locks,
@@ -83,11 +87,12 @@ preview run.
   source commit IDs, selective builds, SHA-256 verification, and reuse metadata
   for unchanged wheels.
 - Release and install manifests have published JSON Schema v1 definitions.
-- A dispatch-only workflow can build an exact, already-tested main commit and,
-  after a separate owner confirmation, publish one absent immutable release
-  branch under a repository-wide lock. The release commit retains the tested
-  source as its sole parent; publication cannot update `main` or deploy
-  production.
+- A successful Source CI push run on the newest `main` automatically starts a
+  release only when reviewed change fragments remain unconsumed. The same
+  workflow remains manually dispatchable for recovery. Publication creates one
+  absent immutable release branch under a repository-wide lock. The release
+  commit retains the tested source as its sole parent; publication cannot update
+  `main` or deploy production.
 - Publication opens a mandatory release-state synchronization PR from the
   disposable sync ref and fails closed with a manual recovery URL if repository
   policy blocks PR creation. If `main` advances after publication, the helper
@@ -97,9 +102,11 @@ preview run.
   Source CI rejects modification or removal of prior ledger entries, and the
   next release cannot proceed unless the highest release ref exactly matches the
   latest release state on `main`.
-- A separate production workflow accepts only an immutable release-branch commit,
-  requires an exact owner confirmation and the existing production environment,
-  and always retains sanitized receiver and observer diagnostics.
+- The reusable receiver workflow accepts only an immutable release-branch
+  commit and exact operation confirmation. The trusted merge workflow can call
+  deploy mode only after revalidating the readiness record and ChatGPT approval
+  embedded in the merge commit, and always retains sanitized receiver and
+  observer diagnostics.
 - The required upgrade lane recreates the checked v0.3.3 package schema, verifies
   an in-place migration, restores its pre-migration SQL backup into a second
   database, and verifies the restored migration independently.
@@ -216,7 +223,7 @@ and a tested database restore path.
   exercised by tests.
 - [ ] Release artifacts are built once, provenance recorded, and promoted without
   rebuilding.
-- [ ] Production v2 has completed its manual-approval path with host locking,
+- [ ] Production v2 has completed its one-approval ChatGPT path with host locking,
   least-privilege forced commands, mandatory health checks, sanitized diagnostics,
   and safe rollback. Receiver installation alone does not satisfy this gate.
 - [ ] The legacy `v0.3.x` deployment remains available until one full production

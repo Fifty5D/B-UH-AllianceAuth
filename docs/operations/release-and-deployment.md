@@ -112,15 +112,23 @@ fingerprint, and release provenance remain authoritative.
 10. Under the global publication lock, atomically create one absent immutable
     release ref and one absent disposable sync ref at the release commit, whose
     sole parent is the tested source commit.
-11. Review and merge the mandatory synchronization PR from the sync ref
-    after approving its queued workflow run and after Source CI verifies
-    append-only history and exact release-ref/main parity. GitHub requires this
-    one-time run approval because the PR was opened with `GITHUB_TOKEN`. Use a
-    merge commit; never squash or rebase this PR. The sync ref may be updated or
-    deleted after merge; the release ref may not.
-12. Require that parity before planning or publishing any later release.
-13. Separately select that exact release in the manually approved production
-    workflow.
+11. Create the mandatory synchronization PR with the repository-owner
+    `BUH_RELEASE_PR_TOKEN`, allowing Source CI to start without a GitHub run-
+    approval click. The token cannot publish a release or deploy production.
+12. Run Source CI on the exact sync head and run the production receiver in
+    no-change `preflight` mode. A workflow-authored readiness marker binds both
+    successful runs, the retained artifact, manifest hash, source, release, and
+    PR into one approval nonce.
+13. Have ChatGPT present that evidence and wait for one explicit approval from
+    the repository owner. ChatGPT places the exact matching approval marker in
+    the merge commit message and performs one merge action; never squash or
+    rebase this PR.
+14. Revalidate the merged PR, readiness marker, approval-bearing merge commit,
+    both workflow runs, release lineage, merge ancestry, and downloaded preflight
+    evidence, then deploy the exact immutable release. A result comment returns
+    success or failure to ChatGPT.
+15. Require release-ref/main parity before planning any later release. The sync
+    ref may be updated or deleted after merge; the release ref may not.
 
 A release is never rebuilt after publication. A correction receives new app and
 platform versions. Publication and synchronization do not deploy or authorize a
@@ -130,7 +138,8 @@ deployment.
 
 Platform v2 must retain or strengthen the legacy controls:
 
-- protected production environment with manual approval;
+- protected production environment, with the sole human approval recorded in
+  ChatGPT and bound to the exact preflighted release on GitHub;
 - checkout of a full, protected release commit rather than an arbitrary branch;
 - a repository ruleset that restricts creation of `release/platform-v*` to the
   reviewed publisher and forbids every update and deletion of those refs;
@@ -147,6 +156,41 @@ Platform v2 must retain or strengthen the legacy controls:
   checks; and
 - fail-closed diagnostic redaction and a sanitized retained artifact for every
   attempt.
+
+## One-time ChatGPT deployment automation setup
+
+Create one fine-grained personal access token owned by `Fifty5D`, restricted to
+this repository, with **Contents: read** and **Pull requests: read and write**.
+Store it as the repository Actions secret `BUH_RELEASE_PR_TOKEN`. Give it the
+shortest practical expiration and rotate it before expiry. The release workflow
+uses it only in the sync-PR job; publication continues to use the short-lived
+workflow token and production continues to use the forced-command SSH identity.
+
+Connect the same GitHub account to ChatGPT and create one event-triggered task
+for pull-request activity in `Fifty5D/B-UH-AllianceAuth`, filtered to titles
+beginning `Sync platform release v`. The task must:
+
+1. react to the `buh-platform-ready:v1` comment by reading the PR, required
+   checks, referenced workflow runs, and retained preflight artifact;
+2. show the version, source/release commits, manifest hash, Source CI result,
+   preflight result, and PR URL, then wait for the owner's explicit approval;
+3. after approval, re-read the unchanged head and checks, then perform exactly
+   one merge action using a merge commit with the expected head SHA and the
+   supplied `buh-chatgpt-approved:v1` marker in its commit message; and
+4. react to the `buh-platform-deploy-result:v1` comment by inspecting the deploy
+   run and retained diagnostics and reporting success or the precise safe
+   failure. It must never retry or roll forward production automatically.
+
+The automatic release trigger deliberately requires the newest successful
+`Source CI` push run on `main` and at least one tracked `changes/*.toml` file.
+Release synchronization deletes consumed fragments, so merging a sync PR cannot
+start another release. If `main` advances while a release is queued, the older
+run stops and the newer tested commit collects the still-unconsumed fragments.
+
+Do not configure a second required-reviewer click on the `production`
+environment when the one-approval ChatGPT flow is active. Keep the environment
+for secret isolation and deployment policy; the approval-marker/merge gate is
+the single human production authorization.
 
 Docker cache entries may improve build speed, but cache keys include the lockfile,
 architecture, Python version, and base-image digest. Cached layers are not release

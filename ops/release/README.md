@@ -110,17 +110,29 @@ candidate preparation and final publication so a remote-ledger change cannot be
 silently accepted midway through a run.
 
 The assembled directory contains `RELEASE.json`, `INSTALL_PLAN.json`, release
-notes, wheels, and strict SHA-256 sums. The dispatch-only
+notes, wheels, and strict SHA-256 sums. The reusable and manually dispatchable
 `build-platform-release.yml` workflow can optionally add the new directory,
 version-file updates, and consumed-fragment deletions in one new release-branch
 commit whose sole parent is the tested main commit. The atomic publication also
 creates a disposable `sync/platform-vX.Y.Z` ref at that commit. It never writes
 main or deploys production. After publication it opens, but never merges, the
 exact release-state synchronization PR from the sync ref; the immutable release
-ref is never an updateable PR head. A maintainer approves that PR's queued Source
-CI run and uses a merge commit after all checks pass. Unchanged wheel entries
+ref is never an updateable PR head. `auto-platform-release.yml` runs this path
+after successful newest-main Source CI when change fragments remain, then runs
+the no-change production preflight and publishes canonical approval evidence.
+The repository owner gives the only production approval in ChatGPT; ChatGPT
+places the supplied marker in the merge commit message and performs one merge
+action after all checks pass.
+`deploy-approved-platform-release.yml` revalidates every bound input before it
+calls the guarded deploy workflow. Unchanged wheel entries
 retain their previous `git_blob_sha`, allowing later repository operations to
 reference the existing Git object instead of uploading the wheel.
+
+The sync PR is created with the narrowly scoped `BUH_RELEASE_PR_TOKEN` Actions
+secret so GitHub treats it as an owner-created same-repository PR and starts
+Source CI without a separate workflow-approval click. The token needs only
+repository Contents read plus Pull requests read/write and is not passed to
+candidate, publication, preflight, approval, or deployment jobs.
 
 Repository policy is part of this boundary: only the reviewed publisher may
 create `release/platform-v*`, and no identity may update or delete those refs.
