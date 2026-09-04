@@ -75,3 +75,4 @@ production_requires_image_digests = true
 release_bundles_are_append_only = true
 real_network_calls_in_tests = false
 database_migrations_must_be_rollback_compatible = true
+legacy_bootstrap_may_skip_uninstalled_v2_releases = true
