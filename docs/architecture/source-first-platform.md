@@ -13,8 +13,21 @@ or unredacted logs.
 
 ## Invariants
 
-- Production releases are immutable, checksum verified, manually approved, and
-  serialized.
+- Release publication is globally serialized. Publish-capable runs queue instead
+  of replacing one another, while non-publishing candidate builds may run in
+  parallel. Every immutable release commit is checksum verified and has exactly
+  one parent: the tested source commit.
+- Publication atomically creates the immutable `release/platform-vX.Y.Z` ref and
+  a disposable `sync/platform-vX.Y.Z` ref at that exact commit. Only the sync ref
+  is used as the mandatory pull-request head, so branch updates can never mutate
+  the release ref. Publication opens, but never merges, that pull request.
+  Append-only Source CI checks and exact release-ref/main parity fail closed
+  before any later release. A repository ruleset grants only the reviewed
+  publisher permission to create release refs and forbids their update or
+  deletion. A maintainer approves the queued workflow run and merges it with a
+  merge commit; squash and rebase merging are not valid for synchronization.
+- Publication and synchronization never deploy production. Deployment remains a
+  separate, manually approved operation.
 - Pull requests, tests, and previews never receive production credentials or
   database access.
 - Application versions, platform versions, source commits, dependency locks,
@@ -71,8 +84,19 @@ preview run.
   for unchanged wheels.
 - Release and install manifests have published JSON Schema v1 definitions.
 - A dispatch-only workflow can build an exact, already-tested main commit and,
-  after a separate owner confirmation, publish one new immutable release branch.
-  It cannot update main or deploy production.
+  after a separate owner confirmation, publish one absent immutable release
+  branch under a repository-wide lock. The release commit retains the tested
+  source as its sole parent; publication cannot update `main` or deploy
+  production.
+- Publication opens a mandatory release-state synchronization PR from the
+  disposable sync ref and fails closed with a manual recovery URL if repository
+  policy blocks PR creation. If `main` advances after publication, the helper
+  accepts it only when the release source remains an ancestor; divergence fails
+  closed. It never merges or pushes `main`, and the immutable release ref is
+  never the PR head.
+  Source CI rejects modification or removal of prior ledger entries, and the
+  next release cannot proceed unless the highest release ref exactly matches the
+  latest release state on `main`.
 - A separate production workflow accepts only an immutable release-branch commit,
   requires an exact owner confirmation and the existing production environment,
   and always retains sanitized receiver and observer diagnostics.
@@ -194,6 +218,6 @@ and a tested database restore path.
   rebuilding.
 - [ ] Production v2 has completed its manual-approval path with host locking,
   least-privilege forced commands, mandatory health checks, sanitized diagnostics,
-  and safe rollback. The controls exist in source but are not yet bootstrapped.
+  and safe rollback. Receiver installation alone does not satisfy this gate.
 - [ ] The legacy `v0.3.x` deployment remains available until one full production
   cycle and a rollback drill succeed on Platform v2.
