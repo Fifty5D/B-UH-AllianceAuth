@@ -470,12 +470,15 @@ class DockerHost:
             pattern = re.compile(
                 rf"(?ms)^{re.escape(BEGIN_V2)}\n.*?^{re.escape(END_V2)}\n?"
             )
-            updated = pattern.sub(block, text)
+            # A callable replacement preserves Dockerfile backslashes verbatim.
+            # Passing ``block`` directly makes ``re.sub`` interpret sequences
+            # such as ``\\n`` inside the generated shell command.
+            updated = pattern.sub(lambda _match: block, text)
         elif BEGIN_LEGACY in text:
             pattern = re.compile(
                 rf"(?ms)^{re.escape(BEGIN_LEGACY)}\n.*?^{re.escape(END_LEGACY)}\n?"
             )
-            updated = pattern.sub(block, text)
+            updated = pattern.sub(lambda _match: block, text)
         else:
             updated = text.rstrip() + "\n\n" + block
         _atomic_text(path, updated, path.stat().st_mode & 0o777)
