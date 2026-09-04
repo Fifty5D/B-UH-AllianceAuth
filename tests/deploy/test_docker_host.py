@@ -184,6 +184,20 @@ class DockerHostContracts(unittest.TestCase):
             self.assertIn(END_V2, written)
             self.assertNotIn(BEGIN_LEGACY, written)
             self.assertNotIn(END_LEGACY, written)
+            expected_printf = "RUN printf '%s  %s\\n' \\"
+            self.assertEqual(
+                [line for line in written.splitlines() if line.startswith("RUN printf")],
+                [expected_printf] * 3,
+            )
+
+            # Replacing an existing Platform v2 block must preserve the same
+            # literal shell escapes as the legacy-to-v2 migration path.
+            host._write_candidate_dockerfile(bundle)
+            rewritten = (config.app_dir / config.custom_dockerfile).read_text()
+            self.assertEqual(
+                [line for line in rewritten.splitlines() if line.startswith("RUN printf")],
+                [expected_printf] * 3,
+            )
 
     def test_only_recreated_auth_services_require_zero_restarts(self):
         with tempfile.TemporaryDirectory() as temporary:
