@@ -306,6 +306,26 @@ class RegistryAndChangeTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "Duplicate release distribution"):
                 release.load_registry(fixture.registry)
 
+    def test_registry_rejects_git_internal_paths_and_globs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            original = fixture.registry.read_text(encoding="utf-8")
+            cases = {
+                "shared": original.replace(
+                    "shared_build_inputs = []",
+                    'shared_build_inputs = [".git/HEAD"]',
+                ),
+                "platform": original.replace(
+                    '  "platform/build/**/*",',
+                    '  ".git/**",',
+                ),
+            }
+            for name, contents in cases.items():
+                with self.subTest(name=name):
+                    fixture.registry.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(release.ReleaseError, "Unsafe"):
+                        release.load_registry(fixture.registry)
+
 
 class PlanningTests(unittest.TestCase):
     def _bootstrap_release(self, fixture: RepoFixture) -> Path:
@@ -325,6 +345,40 @@ class PlanningTests(unittest.TestCase):
             repo_root=fixture.root,
         )
         return output
+
+    def test_current_schema_router_matches_explicit_v1_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            routed = fixture.plan()
+            explicit = release.create_plan_v1(
+                repo_root=fixture.root,
+                registry_path=fixture.registry,
+                compatibility_path=fixture.compatibility,
+                changes_dir=fixture.changes,
+                previous_manifest_path=None,
+                source_commit="a" * 40,
+                test_run="unit-test",
+            )
+            self.assertEqual(routed, explicit)
+            self.assertEqual(explicit["schema_version"], release.PLAN_SCHEMA_V1)
+
+    def test_v1_planner_fails_closed_after_unimplemented_schema_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            with mock.patch.object(release, "SCHEMA_VERSION", 2):
+                with self.assertRaisesRegex(
+                    release.ReleaseError,
+                    "requires a preserved compatibility implementation",
+                ):
+                    release.create_plan_v1(
+                        repo_root=fixture.root,
+                        registry_path=fixture.registry,
+                        compatibility_path=fixture.compatibility,
+                        changes_dir=fixture.changes,
+                        previous_manifest_path=None,
+                        source_commit="a" * 40,
+                        test_run="unit-test",
+                    )
 
     def test_bootstrap_preserves_current_versions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -21,7 +21,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: platform-release-${{ inputs.expected_source_sha }}
+  group: ${{ inputs.publish_release_branch && 'buh-platform-release-publication' || format('buh-platform-release-candidate-{0}', github.run_id) }}
+  queue: max
   cancel-in-progress: false
 
 defaults:
@@ -165,7 +166,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.expected_source_sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate the dispatch and compatibility contract
@@ -213,88 +214,27 @@ jobs:
               print(f"python={python_version}", file=output)
           PY
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ steps.source.outputs.python }}
-          cache: pip
-          cache-dependency-path: |
-            platform/requirements/build.lock
-            platform/requirements/production.lock
-            platform/requirements/test.lock
-            platform/requirements/production.txt
-            platform/requirements/test.txt
-            apps/*/pyproject.toml
-
-      - name: Install bounded native build prerequisites
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            default-libmysqlclient-dev \
-            pkg-config
-
-      - name: Install checksum-locked release tools
-        run: |
-          set -Eeuo pipefail
-          python -m pip install \
-            --require-hashes \
-            -r platform/requirements/build.lock
-          python -m pip install \
-            --require-hashes \
-            --no-build-isolation \
-            --only-binary=:all: \
-            --no-binary=celery-once,django-bootstrap-form,mysqlclient \
-            -r platform/requirements/test.lock
-          python ops/supply_chain.py verify
-
-      - name: Select and verify the previous immutable release
+      - name: Verify the synchronized immutable release ledger
         id: previous
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          from ops.release.buh_release import SemVer, verify_release_dir
-
-          release_root = Path("releases/platform")
-          candidates = []
-          if release_root.exists():
-              if not release_root.is_dir() or release_root.is_symlink():
-                  raise SystemExit("releases/platform is not a regular directory")
-              for entry in sorted(release_root.iterdir(), key=lambda item: item.name):
-                  if entry.name.startswith("."):
-                      continue
-                  if not entry.is_dir() or entry.is_symlink() or not entry.name.startswith("v"):
-                      raise SystemExit(f"Unexpected platform release entry: {entry}")
-                  version = SemVer.parse(entry.name[1:])
-                  manifest = verify_release_dir(entry)
-                  if manifest["platform_version"] != str(version):
-                      raise SystemExit(f"Release directory and manifest disagree: {entry}")
-                  candidates.append((version, entry))
-
-          output_path = Path(os.environ["GITHUB_OUTPUT"])
-          with output_path.open("a", encoding="utf-8") as output:
-              if not candidates:
-                  print("has_previous=false", file=output)
-              else:
-                  _, latest = max(candidates)
-                  print("has_previous=true", file=output)
-                  print(f"previous_dir={latest.as_posix()}", file=output)
-                  print(
-                      f"previous_manifest={(latest / 'RELEASE.json').as_posix()}",
-                      file=output,
-                  )
-          PY
+          mkdir -p build
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${EXPECTED_SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --output build/release-ledger-unplanned.json >/dev/null
 
       - name: Plan changed applications and versions
         id: plan
         env:
+          BOOTSTRAP: ${{ steps.previous.outputs.bootstrap }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
-          HAS_PREVIOUS: ${{ steps.previous.outputs.has_previous }}
-          PREVIOUS_MANIFEST: ${{ steps.previous.outputs.previous_manifest }}
+          PREVIOUS_RELEASE_PATH: ${{ steps.previous.outputs.latest_release_path }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           TEST_RUN_URL: ${{ needs.source_gate.outputs.run_url }}
@@ -302,18 +242,28 @@ jobs:
           set -Eeuo pipefail
           mkdir -p build
           command=(
-            python ops/release/buh_release.py plan
+            python3 ops/release/buh_release.py plan
             --root .
             --source-sha "${EXPECTED_SOURCE_SHA}"
             --test-run "${TEST_RUN_URL}"
             --output build/release-plan.json
           )
-          if [[ "${HAS_PREVIOUS}" == "true" ]]; then
-            command+=(--previous "${PREVIOUS_MANIFEST}")
-          fi
+          case "${BOOTSTRAP}" in
+            true)
+              [[ -z "${PREVIOUS_RELEASE_PATH}" ]]
+              ;;
+            false)
+              [[ "${PREVIOUS_RELEASE_PATH}" =~ ^releases/platform/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              command+=(--previous "${PREVIOUS_RELEASE_PATH}/RELEASE.json")
+              ;;
+            *)
+              echo "Release-ledger bootstrap output is invalid." >&2
+              exit 1
+              ;;
+          esac
           "${command[@]}"
 
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           import os
           import re
@@ -358,6 +308,82 @@ jobs:
           print("Changed applications:", ", ".join(app_ids) if app_ids else "(none)")
           PY
 
+      - name: Pin the planned release target to the verified ledger
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ steps.plan.outputs.platform_version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${EXPECTED_SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --target-version "${EXPECTED_VERSION}" \
+            --output build/release-state.json >/dev/null
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          initial = json.loads(
+              Path("build/release-ledger-unplanned.json").read_text(encoding="utf-8")
+          )
+          pinned = json.loads(
+              Path("build/release-state.json").read_text(encoding="utf-8")
+          )
+          target = pinned.get("target")
+          expected_version = os.environ["EXPECTED_VERSION"]
+          if target != {
+              "platform_version": expected_version,
+              "ref": f"refs/heads/release/platform-v{expected_version}",
+              "release_path": f"releases/platform/v{expected_version}",
+              "absent": True,
+          }:
+              raise SystemExit("Pinned release target is not exact and absent")
+          pinned_without_target = dict(pinned)
+          pinned_without_target["target"] = None
+          if initial != pinned_without_target:
+              raise SystemExit("Immutable release ledger changed while planning")
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ steps.source.outputs.python }}
+          cache: pip
+          cache-dependency-path: |
+            platform/requirements/build.lock
+            platform/requirements/production.lock
+            platform/requirements/test.lock
+            platform/requirements/production.txt
+            platform/requirements/test.txt
+            apps/*/pyproject.toml
+
+      - name: Install bounded native build prerequisites
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            default-libmysqlclient-dev \
+            pkg-config
+
+      - name: Install checksum-locked release tools
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --require-hashes \
+            -r platform/requirements/build.lock
+          python -m pip install \
+            --require-hashes \
+            --no-build-isolation \
+            --only-binary=:all: \
+            --no-binary=celery-once,django-bootstrap-form,mysqlclient \
+            -r platform/requirements/test.lock
+          python ops/supply_chain.py verify
+
       - name: Build only changed application wheels
         run: |
           set -Eeuo pipefail
@@ -373,8 +399,8 @@ jobs:
 
       - name: Assemble with verified unchanged artifacts
         env:
-          HAS_PREVIOUS: ${{ steps.previous.outputs.has_previous }}
-          PREVIOUS_DIR: ${{ steps.previous.outputs.previous_dir }}
+          BOOTSTRAP: ${{ steps.previous.outputs.bootstrap }}
+          PREVIOUS_DIR: ${{ steps.previous.outputs.latest_release_path }}
         run: |
           set -Eeuo pipefail
           command=(
@@ -384,9 +410,19 @@ jobs:
             --wheel-dir build/wheels
             --output-dir build/release
           )
-          if [[ "${HAS_PREVIOUS}" == "true" ]]; then
-            command+=(--previous-dir "${PREVIOUS_DIR}")
-          fi
+          case "${BOOTSTRAP}" in
+            true)
+              [[ -z "${PREVIOUS_DIR}" ]]
+              ;;
+            false)
+              [[ "${PREVIOUS_DIR}" =~ ^releases/platform/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              command+=(--previous-dir "${PREVIOUS_DIR}")
+              ;;
+            *)
+              echo "Release-ledger bootstrap output is invalid." >&2
+              exit 1
+              ;;
+          esac
           "${command[@]}"
 
       - name: Verify checksums, wheel metadata, and isolated installation
@@ -518,6 +554,7 @@ jobs:
           path: |
             build/candidate-metadata/
             build/release-plan.json
+            build/release-state.json
             build/wheels/
           if-no-files-found: error
           compression-level: 0
@@ -529,7 +566,9 @@ jobs:
         with:
           name: platform-release-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            build/release-ledger-unplanned.json
             build/release-plan.json
+            build/release-state.json
             build/apps-to-build.txt
             build/candidate-metadata/
             build/wheels/
@@ -637,10 +676,31 @@ jobs:
           name: ${{ needs.candidate.outputs.artifact_name }}
           path: build
 
-      - name: Reconstruct and verify the delta candidate
+      - name: Reverify the candidate's pinned release ledger
+        id: ledger
         env:
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          [[ -f build/release-state.json && ! -L build/release-state.json ]]
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${EXPECTED_SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --target-version "${EXPECTED_VERSION}" \
+            --output build/publish-release-state.json >/dev/null
+          cmp --silent \
+            build/release-state.json build/publish-release-state.json
+
+      - name: Reconstruct and verify the delta candidate
+        env:
+          BOOTSTRAP: ${{ steps.ledger.outputs.bootstrap }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          PREVIOUS_RELEASE_PATH: ${{ steps.ledger.outputs.latest_release_path }}
           TEST_RUN_URL: ${{ needs.candidate.outputs.test_run_url }}
         run: |
           set -Eeuo pipefail
@@ -649,33 +709,23 @@ jobs:
           [[ ! -e build/release && ! -L build/release ]]
           mkdir -p build/wheels
 
-          previous_manifest=""
-          if [[ -d releases/platform ]]; then
-            previous_manifest="$(
-              python - <<'PY'
-          from pathlib import Path
-          from ops.release.buh_release import SemVer, verify_release_dir
-
-          candidates = []
-          for entry in sorted(Path("releases/platform").iterdir(), key=lambda item: item.name):
-              if entry.name.startswith("."):
-                  continue
-              if not entry.is_dir() or entry.is_symlink() or not entry.name.startswith("v"):
-                  raise SystemExit(f"Unexpected platform release entry: {entry}")
-              version = SemVer.parse(entry.name[1:])
-              manifest = verify_release_dir(entry)
-              if manifest["platform_version"] != str(version):
-                  raise SystemExit(f"Release directory and manifest disagree: {entry}")
-              candidates.append((version, entry))
-          if candidates:
-              print((max(candidates)[1] / "RELEASE.json").as_posix())
-          PY
-            )"
-          fi
           previous_dir=""
-          if [[ -n "${previous_manifest}" ]]; then
-            previous_dir="${previous_manifest%/RELEASE.json}"
-          fi
+          previous_manifest=""
+          case "${BOOTSTRAP}" in
+            true)
+              [[ -z "${PREVIOUS_RELEASE_PATH}" ]]
+              ;;
+            false)
+              [[ "${PREVIOUS_RELEASE_PATH}" =~ ^releases/platform/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              previous_dir="${PREVIOUS_RELEASE_PATH}"
+              previous_manifest="${PREVIOUS_RELEASE_PATH}/RELEASE.json"
+              [[ -f "${previous_manifest}" && ! -L "${previous_manifest}" ]]
+              ;;
+            *)
+              echo "Release-ledger bootstrap output is invalid." >&2
+              exit 1
+              ;;
+          esac
           export PREVIOUS_DIR="${previous_dir}"
 
           command=(
@@ -972,12 +1022,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           python - <<'PY'
-          import re
           import shutil
           import subprocess
           from pathlib import Path
 
           from ops.release.buh_release import (
+              VERSION_ASSIGNMENT_RE,
+              _replace_version,
               load_plan,
               validate_append_only_changes,
               version_updates,
@@ -991,27 +1042,18 @@ jobs:
           shutil.copytree("build/release", release_path)
 
           version_paths = set()
-          assignment = re.compile(
-              r"(?m)^(?P<prefix>__version__\s*=\s*[\"'])"
-              r"(?P<version>[^\"'\r\n]+)(?P<suffix>[\"']\s*)$"
-          )
           for update in version_updates(plan):
               path = Path(update["path"])
-              content = path.read_text(encoding="utf-8")
-              matches = list(assignment.finditer(content))
-              if len(matches) != 1 or matches[0].group("version") != update["from"]:
+              content = path.read_bytes()
+              matches = list(VERSION_ASSIGNMENT_RE.finditer(content))
+              current = (
+                  content[matches[0].end("prefix") : matches[0].start("suffix")]
+                  if len(matches) == 1
+                  else b""
+              )
+              if current != update["from"].encode("ascii"):
                   raise SystemExit(f"Version source changed unexpectedly: {path}")
-              replacement = (
-                  matches[0].group("prefix")
-                  + update["to"]
-                  + matches[0].group("suffix")
-              )
-              path.write_text(
-                  content[: matches[0].start()]
-                  + replacement
-                  + content[matches[0].end() :],
-                  encoding="utf-8",
-              )
+              _replace_version(path, update["to"])
               version_paths.add(path.as_posix())
 
           fragment_paths = set()
@@ -1086,6 +1128,10 @@ jobs:
           set -Eeuo pipefail
           publication_dir="build/publication"
           mkdir -p "${publication_dir}"
+          [[ -f build/release-state.json && ! -L build/release-state.json ]]
+          cp --no-preserve=mode,ownership,timestamps \
+            build/release-state.json "${publication_dir}/release-state.json"
+          chmod 0644 "${publication_dir}/release-state.json"
 
           source_epoch="$(git show -s --format=%ct "${EXPECTED_SOURCE_SHA}")"
           [[ "${source_epoch}" =~ ^[0-9]+$ ]]
@@ -1255,7 +1301,7 @@ jobs:
 
           (
             cd "${publication_dir}"
-            sha256sum metadata.json release.patch >SHA256SUMS
+            sha256sum metadata.json release-state.json release.patch >SHA256SUMS
           )
           artifact_name="platform-publication-v${EXPECTED_VERSION}-${RUN_ID}-${RUN_ATTEMPT}"
           echo "artifact_name=${artifact_name}" >>"${GITHUB_OUTPUT}"
@@ -1286,6 +1332,10 @@ jobs:
     environment: platform-release-publication
     permissions:
       contents: write
+    outputs:
+      release_branch: ${{ steps.publish_refs.outputs.release_branch }}
+      release_commit: ${{ steps.publish_refs.outputs.release_commit }}
+      sync_branch: ${{ steps.publish_refs.outputs.sync_branch }}
     steps:
       - name: Check out exact source without persisted credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1299,6 +1349,27 @@ jobs:
         with:
           name: ${{ needs.prepare_publication.outputs.artifact_name }}
           path: ${{ runner.temp }}/platform-publication
+
+      - name: Reverify the pinned release ledger before publication
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLICATION_DIR: ${{ runner.temp }}/platform-publication
+        run: |
+          set -Eeuo pipefail
+          [[ -f "${PUBLICATION_DIR}/release-state.json" ]]
+          [[ ! -L "${PUBLICATION_DIR}/release-state.json" ]]
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${EXPECTED_SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --target-version "${EXPECTED_VERSION}" \
+            --output "${RUNNER_TEMP}/publish-release-state.json" >/dev/null
+          cmp --silent \
+            "${PUBLICATION_DIR}/release-state.json" \
+            "${RUNNER_TEMP}/publish-release-state.json"
 
       - name: Validate payload and reconstruct the exact release commit
         id: verify
@@ -1326,7 +1397,7 @@ jobs:
             find "${PUBLICATION_DIR}" -mindepth 1 -maxdepth 1 -printf '%f\n' |
               LC_ALL=C sort
           )
-          expected_files=(SHA256SUMS metadata.json release.patch)
+          expected_files=(SHA256SUMS metadata.json release-state.json release.patch)
           [[ "${#payload_files[@]}" -eq "${#expected_files[@]}" ]]
           for index in "${!expected_files[@]}"; do
             [[ "${payload_files[index]}" == "${expected_files[index]}" ]]
@@ -1337,12 +1408,12 @@ jobs:
           declare -A checksum_names=()
           checksum_count=0
           while IFS= read -r line; do
-            [[ "${line}" =~ ^([0-9a-f]{64})\ \ (metadata\.json|release\.patch)$ ]]
+            [[ "${line}" =~ ^([0-9a-f]{64})\ \ (metadata\.json|release-state\.json|release\.patch)$ ]]
             checksum_names["${BASH_REMATCH[2]}"]=1
             checksum_count=$((checksum_count + 1))
           done <"${PUBLICATION_DIR}/SHA256SUMS"
-          [[ "${checksum_count}" -eq 2 ]]
-          [[ "${#checksum_names[@]}" -eq 2 ]]
+          [[ "${checksum_count}" -eq 3 ]]
+          [[ "${#checksum_names[@]}" -eq 3 ]]
           (
             cd "${PUBLICATION_DIR}"
             sha256sum --check --strict SHA256SUMS
@@ -1605,11 +1676,34 @@ jobs:
           git cat-file blob "${tree_sha}:${release_path}/RELEASE.json" \
             >"${release_manifest}"
           jq -e \
+            --arg branch "${branch}" \
+            --arg release_path "${release_path}" \
             --arg source "${EXPECTED_SOURCE_SHA}" \
-            --arg version "${EXPECTED_VERSION}" '
-              type == "object"
+            --arg version "${EXPECTED_VERSION}" \
+            --slurpfile ledger "${PUBLICATION_DIR}/release-state.json" '
+              $ledger[0] as $state
+              | type == "object"
               and .source_commit == $source
               and .platform_version == $version
+              and .platform_id == $state.platform_id
+              and $state.source_commit == $source
+              and $state.target == {
+                absent: true,
+                platform_version: $version,
+                ref: ("refs/heads/" + $branch),
+                release_path: $release_path
+              }
+              and .previous_release == (
+                if $state.bootstrap then
+                  null
+                else
+                  {
+                    manifest_sha256: $state.latest.manifest_sha256,
+                    platform_version: $state.latest.platform_version,
+                    source_commit: $state.latest.source_commit
+                  }
+                end
+              )
               and (.artifacts | type == "array" and length > 0)
             ' "${release_manifest}" >/dev/null
 
@@ -1702,24 +1796,48 @@ jobs:
             echo "- Release commit: ${release_commit}"
           } >>"${GITHUB_STEP_SUMMARY}"
 
-      - name: Atomically create the absent release branch
+      - name: Atomically create the absent release and synchronization branches
+        id: publish_refs
         env:
           ACTOR: ${{ github.actor }}
-          BRANCH: ${{ steps.verify.outputs.branch }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
           GITHUB_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
+          PUBLICATION_DIR: ${{ runner.temp }}/platform-publication
+          RELEASE_BRANCH: ${{ steps.verify.outputs.branch }}
           RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
+          REPOSITORY: ${{ github.repository }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          SERVER_URL: ${{ github.server_url }}
+          SYNC_BRANCH: sync/platform-v${{ needs.candidate.outputs.platform_version }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -Eeuo pipefail
           [[ "${ACTOR}" == "${OWNER}" ]]
           [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
           [[ "${RUN_ATTEMPT}" == "1" ]]
-          [[ "${BRANCH}" =~ ^release/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${RELEASE_BRANCH}" =~ ^release/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${RELEASE_BRANCH}" == "release/platform-v${EXPECTED_VERSION}" ]]
+          [[ "${SYNC_BRANCH}" =~ ^sync/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${SYNC_BRANCH}" == "sync/platform-v${EXPECTED_VERSION}" ]]
           [[ "$(git rev-list --parents -n 1 "${RELEASE_COMMIT}")" == \
             "${RELEASE_COMMIT} ${EXPECTED_SOURCE_SHA}" ]]
+          [[ -f "${PUBLICATION_DIR}/release-state.json" ]]
+          [[ ! -L "${PUBLICATION_DIR}/release-state.json" ]]
+
+          # Pin the predecessor refs again immediately before the only remote
+          # write. The final absent-ref lease below closes the target race.
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${EXPECTED_SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --target-version "${EXPECTED_VERSION}" \
+            --output "${RUNNER_TEMP}/final-release-state.json" >/dev/null
+          cmp --silent \
+            "${PUBLICATION_DIR}/release-state.json" \
+            "${RUNNER_TEMP}/final-release-state.json"
 
           auth_header="$(
             printf 'x-access-token:%s' "${GITHUB_TOKEN}" |
@@ -1727,6 +1845,28 @@ jobs:
               tr -d '\n'
           )"
           git_auth=(-c "http.extraheader=AUTHORIZATION: basic ${auth_header}")
+
+          read_remote_refs() {
+            local attempt output pattern status temporary
+            pattern="$1"
+            output="$2"
+            temporary="${output}.attempt"
+            for attempt in 1 2 3; do
+              set +e
+              timeout --signal=TERM 30s \
+                git "${git_auth[@]}" ls-remote --refs origin "${pattern}" |
+                LC_ALL=C sort >"${temporary}"
+              status=$?
+              set -e
+              if [[ "${status}" -eq 0 ]] && mv -- "${temporary}" "${output}"; then
+                return 0
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                sleep "${attempt}"
+              fi
+            done
+            return 1
+          }
 
           remote_main="$(
             git "${git_auth[@]}" ls-remote --refs origin refs/heads/main |
@@ -1737,54 +1877,184 @@ jobs:
             exit 1
           fi
 
-          set +e
-          git "${git_auth[@]}" ls-remote \
-            --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null
-          branch_status=$?
-          set -e
-          if [[ "${branch_status}" -eq 0 ]]; then
-            echo "Release branch already exists; refusing to overwrite it." >&2
+          release_snapshot_failure() {
+            local reason="$1"
+            echo "${reason}" >&2
+            {
+              echo "### Release-ref publication requires manual review"
+              echo
+              echo "${reason}"
+              echo "The workflow stopped because it could not prove an exact"
+              echo "append-only release namespace transition. Do not move or delete"
+              echo "any immutable release ref. If both new refs exist at the exact"
+              echo "release commit, open the synchronization PR manually:"
+              echo
+              echo "- ${SERVER_URL}/${REPOSITORY}/compare/main...${SYNC_BRANCH}?expand=1"
+              echo "- Expected release commit: ${RELEASE_COMMIT}"
+            } >>"${GITHUB_STEP_SUMMARY}"
             exit 1
+          }
+
+          for branch in "${RELEASE_BRANCH}" "${SYNC_BRANCH}"; do
+            set +e
+            git "${git_auth[@]}" ls-remote \
+              --exit-code --heads origin "refs/heads/${branch}" >/dev/null
+            branch_status=$?
+            set -e
+            if [[ "${branch_status}" -eq 0 ]]; then
+              release_snapshot_failure \
+                "Publication ref already exists; refusing to overwrite ${branch}."
+            fi
+            if [[ "${branch_status}" -ne 2 ]]; then
+              release_snapshot_failure \
+                "Could not establish that publication ref ${branch} is absent."
+            fi
+          done
+
+          # Bind the final ledger report to the authenticated remote namespace
+          # immediately before the atomic write. This rejects movement or
+          # additions to any already-published immutable release ref.
+          release_refs_before="${RUNNER_TEMP}/platform-release-refs-before.tsv"
+          expected_refs_before="${RUNNER_TEMP}/platform-release-refs-expected.tsv"
+          if ! read_remote_refs \
+            'refs/heads/release/platform-v*' "${release_refs_before}"; then
+            release_snapshot_failure \
+              "Could not read the immutable release namespace before publication."
           fi
-          if [[ "${branch_status}" -ne 2 ]]; then
-            echo "Could not establish that the release branch is absent." >&2
-            exit 1
+          jq -r '.releases[] | [.release_commit, .ref] | @tsv' \
+            "${PUBLICATION_DIR}/release-state.json" | LC_ALL=C sort \
+            >"${expected_refs_before}"
+          if ! cmp --silent "${release_refs_before}" "${expected_refs_before}"; then
+            release_snapshot_failure \
+              "Immutable release refs changed after final ledger verification."
           fi
 
-          set +e
-          push_output="$(
-            git "${git_auth[@]}" push --porcelain \
-              --force-with-lease="refs/heads/${BRANCH}:" \
-              origin "${RELEASE_COMMIT}:refs/heads/${BRANCH}" 2>&1
-          )"
-          push_status=$?
-          set -e
+          post_push_unexpected_error() {
+            trap - ERR TERM
+            release_snapshot_failure \
+              "An unexpected error interrupted post-push verification."
+          }
+          # From this point onward the remote write might have succeeded. Any
+          # unexpected shell error or external termination must leave a manual
+          # recovery path in the run summary.
+          trap post_push_unexpected_error ERR TERM
+          if push_output="$(
+            timeout --signal=TERM --kill-after=10s 120s \
+              git "${git_auth[@]}" push --atomic --porcelain \
+              --force-with-lease="refs/heads/${RELEASE_BRANCH}:" \
+              --force-with-lease="refs/heads/${SYNC_BRANCH}:" \
+              origin \
+              "${RELEASE_COMMIT}:refs/heads/${RELEASE_BRANCH}" \
+              "${RELEASE_COMMIT}:refs/heads/${SYNC_BRANCH}" 2>&1
+          )"; then
+            push_status=0
+          else
+            # A timeout, transport failure, or lost response is ambiguous. Do
+            # not retry the write; prove the exact two-ref outcome below.
+            push_status=$?
+          fi
           printf '%s\n' "${push_output}"
-          [[ "${push_status}" -eq 0 ]] || {
-            echo "Atomic release-branch creation failed." >&2
-            exit 1
-          }
-          expected_update=$'*\t'"${RELEASE_COMMIT}:refs/heads/${BRANCH}"$'\t[new branch]'
-          actual_update="$(
-            printf '%s\n' "${push_output}" |
-              awk -F '\t' '$1 == "*" { print }'
-          )"
-          [[ "${actual_update}" == "${expected_update}" ]] || {
-            echo "Push did not exclusively create the expected absent branch." >&2
-            exit 1
-          }
-          published_commit="$(
-            git "${git_auth[@]}" ls-remote --refs \
-              origin "refs/heads/${BRANCH}" |
-              awk '{print $1}'
-          )"
-          [[ "${published_commit}" == "${RELEASE_COMMIT}" ]]
+
+          # The very first authenticated read after the atomic push must be the
+          # complete immutable namespace. It may differ only by the one exact
+          # release ref this run was authorized to create.
+          release_refs_after="${RUNNER_TEMP}/platform-release-refs-after.tsv"
+          expected_refs_after="${RUNNER_TEMP}/platform-release-refs-after-expected.tsv"
+          if ! read_remote_refs \
+            'refs/heads/release/platform-v*' "${release_refs_after}"; then
+            release_snapshot_failure \
+              "Could not read immutable release refs after the atomic push."
+          fi
           {
-            echo "### Platform release branch published"
+            cat "${release_refs_before}"
+            printf '%s\t%s\n' \
+              "${RELEASE_COMMIT}" "refs/heads/${RELEASE_BRANCH}"
+          } | LC_ALL=C sort >"${expected_refs_after}"
+          if ! cmp --silent "${release_refs_after}" "${expected_refs_after}"; then
+            release_snapshot_failure \
+              "Atomic push did not make the exact append-only release-ref transition."
+          fi
+
+          # The sync namespace is intentionally mutable and is not part of the
+          # immutable ledger; verify its new ref separately and exactly.
+          sync_ref_after="${RUNNER_TEMP}/platform-sync-ref-after.tsv"
+          if ! read_remote_refs \
+            "refs/heads/${SYNC_BRANCH}" "${sync_ref_after}"; then
+            release_snapshot_failure \
+              "Could not read the synchronization ref after the atomic push."
+          fi
+          published_sync="$(<"${sync_ref_after}")"
+          expected_sync="${RELEASE_COMMIT}"$'\t'"refs/heads/${SYNC_BRANCH}"
+          if [[ "${published_sync}" != "${expected_sync}" ]]; then
+            release_snapshot_failure \
+              "Atomic push did not create the exact synchronization ref."
+          fi
+          push_recovered=false
+          if [[ "${push_status}" -ne 0 ]]; then
+            # A lost response can follow a fully accepted atomic push. Exact
+            # remote equality for both refs is the only recoverable outcome.
+            push_recovered=true
+          fi
+          echo "release_branch=${RELEASE_BRANCH}" >>"${GITHUB_OUTPUT}"
+          echo "release_commit=${RELEASE_COMMIT}" >>"${GITHUB_OUTPUT}"
+          echo "sync_branch=${SYNC_BRANCH}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Platform release and synchronization branches published"
             echo
-            echo "- Branch: ${BRANCH}"
+            echo "- Immutable branch: ${RELEASE_BRANCH}"
+            echo "- Synchronization branch: ${SYNC_BRANCH}"
             echo "- Parent source: ${EXPECTED_SOURCE_SHA}"
             echo "- Release commit: ${RELEASE_COMMIT}"
+            echo "- Ambiguous push recovered: ${push_recovered}"
             echo
             echo "Production was not deployed and main was not modified."
           } >>"${GITHUB_STEP_SUMMARY}"
+          trap - ERR TERM
+
+  synchronize_release:
+    name: Open mandatory release synchronization PR
+    if: ${{ inputs.publish_release_branch }}
+    needs: [candidate, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the exact reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Open or recover the exact synchronization pull request
+        id: sync_pr
+        env:
+          ACTOR: ${{ github.actor }}
+          API_URL: ${{ github.api_url }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          RELEASE_BRANCH: ${{ needs.publish.outputs.release_branch }}
+          RELEASE_COMMIT: ${{ needs.publish.outputs.release_commit }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          SYNC_BRANCH: ${{ needs.publish.outputs.sync_branch }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ACTOR}" == "${OWNER}" ]]
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          python3 ops/release/open_sync_pr.py \
+            --owner "${OWNER}" \
+            --repository "${REPOSITORY}" \
+            --version "${EXPECTED_VERSION}" \
+            --release-branch "${RELEASE_BRANCH}" \
+            --sync-branch "${SYNC_BRANCH}" \
+            --source-sha "${EXPECTED_SOURCE_SHA}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --api-url "${API_URL}" \
+            --server-url "${SERVER_URL}" \
+            --output "${RUNNER_TEMP}/release-sync-pr.json" >/dev/null

@@ -1,0 +1,4 @@
+schema_version = 1
+summary = "Require immutable release-ledger synchronization and exact source parity before later releases."
+app = "platform"
+kind = "fix"
