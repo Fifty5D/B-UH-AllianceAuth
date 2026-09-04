@@ -20,9 +20,11 @@ SOURCE_WORKFLOWS = (
     "source-compatibility.yml",
     "source-supply-chain.yml",
     "ui-preview.yml",
-    "build-platform-release.yml",
 )
 PRODUCTION_V2_WORKFLOWS = (
+    "auto-platform-release.yml",
+    "build-platform-release.yml",
+    "deploy-approved-platform-release.yml",
     "deploy-platform-v2.yml",
     "production-runtime-fingerprint.yml",
 )
@@ -584,7 +586,22 @@ class PlatformConfigurationContracts(TestCase):
         helper_text = (ROOT / "ops" / "release" / "open_sync_pr.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Merge only after Source CI passes", helper_text)
+        self.assertIn("Merge only after ChatGPT presents the evidence", helper_text)
+        self.assertEqual(
+            synchronize["outputs"],
+            {
+                "platform_version": "${{ needs.candidate.outputs.platform_version }}",
+                "release_commit": "${{ needs.publish.outputs.release_commit }}",
+                "source_commit": "${{ inputs.expected_source_sha }}",
+                "sync_pr_number": "${{ steps.sync_pr.outputs.number }}",
+                "sync_pr_url": "${{ steps.sync_pr.outputs.url }}",
+            },
+        )
+        self.assertEqual(
+            sync_step["env"]["GITHUB_TOKEN"],
+            "${{ secrets.BUH_RELEASE_PR_TOKEN }}",
+        )
+        self.assertIn("BUH_RELEASE_PR_TOKEN is required", sync_step["run"])
         self.assertNotIn("/merges", build_text)
         self.assertNotIn("/merges", helper_text)
 
@@ -596,7 +613,7 @@ class PlatformConfigurationContracts(TestCase):
             "release_ledger", source["jobs"]["required"]["needs"]
         )
 
-    def test_platform_v2_deploy_remains_manual_guarded_and_fail_closed(self):
+    def test_platform_v2_deploy_is_reusable_guarded_and_fail_closed(self):
         text = (WORKFLOWS / "deploy-platform-v2.yml").read_text(encoding="utf-8")
         workflow = _load_workflow(WORKFLOWS / "deploy-platform-v2.yml")
         deploy = workflow["jobs"]["deploy"]
@@ -604,6 +621,16 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(
             workflow["concurrency"]["group"], "buh-production-platform-v2"
+        )
+        triggers = workflow.get("on", workflow.get(True))
+        self.assertIn("workflow_call", triggers)
+        self.assertIn("workflow_dispatch", triggers)
+        self.assertEqual(
+            set(triggers["workflow_call"]["outputs"]),
+            {"artifact_name", "manifest_sha256"},
+        )
+        self.assertEqual(
+            set(deploy["outputs"]), {"artifact_name", "manifest_sha256"}
         )
         for required in (
             "PREFLIGHT PLATFORM V2",
@@ -623,6 +650,93 @@ class PlatformConfigurationContracts(TestCase):
             self.assertIn(required, text)
         self.assertNotIn("continue-on-error", text)
         self.assertNotIn("StrictHostKeyChecking=no", text)
+
+    def test_release_automation_stops_at_the_chatgpt_approval_boundary(self):
+        automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
+        automatic_text = (WORKFLOWS / "auto-platform-release.yml").read_text(
+            encoding="utf-8"
+        )
+        triggers = automatic.get("on", automatic.get(True))
+        self.assertEqual(
+            triggers,
+            {
+                "workflow_run": {
+                    "workflows": ["Source CI"],
+                    "types": ["completed"],
+                }
+            },
+        )
+        qualify = automatic["jobs"]["qualify"]
+        self.assertEqual(
+            qualify["outputs"]["release_needed"],
+            "${{ steps.fragments.outputs.release_needed }}",
+        )
+        self.assertIn("changes/*.toml", automatic_text)
+        self.assertIn("CURRENT_MAIN_SHA", automatic_text)
+        self.assertIn("release_needed=false", automatic_text)
+        self.assertIn("release_needed=true", automatic_text)
+        release = automatic["jobs"]["release"]
+        self.assertEqual(
+            release["uses"], "./.github/workflows/build-platform-release.yml"
+        )
+        self.assertEqual(release["with"]["publish_release_branch"], True)
+        self.assertEqual(release["secrets"], "inherit")
+        preflight = automatic["jobs"]["preflight"]
+        self.assertEqual(
+            preflight["uses"], "./.github/workflows/deploy-platform-v2.yml"
+        )
+        self.assertEqual(preflight["with"]["mode"], "preflight")
+        self.assertEqual(preflight["needs"], "release")
+        ready = automatic["jobs"]["ready"]
+        self.assertEqual(ready["needs"], ["release", "preflight"])
+        self.assertIn("platform_approval.py ready", automatic_text)
+        self.assertIn("buh-platform-ready:v1", (
+            ROOT / "ops" / "release" / "platform_approval.py"
+        ).read_text(encoding="utf-8"))
+        self.assertNotRegex(
+            automatic_text,
+            r"(?m)^\s+mode:\s*deploy\s*$",
+        )
+
+    def test_only_an_exact_chatgpt_approved_merge_can_start_production(self):
+        workflow = _load_workflow(
+            WORKFLOWS / "deploy-approved-platform-release.yml"
+        )
+        text = (WORKFLOWS / "deploy-approved-platform-release.yml").read_text(
+            encoding="utf-8"
+        )
+        triggers = workflow.get("on", workflow.get(True))
+        self.assertEqual(triggers, {"pull_request_target": {"types": ["closed"]}})
+        self.assertNotIn("workflow_dispatch", triggers)
+        authorize = workflow["jobs"]["authorize"]
+        self.assertIn("github.event.pull_request.merged == true", authorize["if"])
+        self.assertEqual(
+            authorize["steps"][0]["with"]["ref"], "${{ github.sha }}"
+        )
+        self.assertFalse(authorize["steps"][0]["with"]["persist-credentials"])
+        deploy = workflow["jobs"]["deploy"]
+        self.assertEqual(deploy["needs"], "authorize")
+        self.assertEqual(deploy["with"]["mode"], "deploy")
+        self.assertEqual(deploy["with"]["confirmation"], "DEPLOY PLATFORM V2")
+        for required in (
+            "platform_approval.py authorize",
+            "platform_approval.py verify-artifact",
+            "buh-platform-deploy-result:v1",
+            "pull_request_target is trusted only",
+        ):
+            self.assertIn(required, text)
+        helper = (ROOT / "ops" / "release" / "platform_approval.py").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "buh-chatgpt-approved:v1",
+            "Exactly one GitHub Actions readiness marker",
+            "Merge commit lacks the ChatGPT approval marker",
+            "Synchronization PR was not merged with a merge commit",
+            "Recorded sync PR Source CI evidence is invalid",
+            "Receiver evidence does not prove the exact preflight",
+        ):
+            self.assertIn(required, helper)
 
     def test_production_fingerprint_is_owner_only_and_read_only(self):
         text = (WORKFLOWS / "production-runtime-fingerprint.yml").read_text(

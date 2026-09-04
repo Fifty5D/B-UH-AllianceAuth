@@ -1,0 +1,171 @@
+name: Automatic platform release
+
+on:
+  workflow_run:
+    workflows: [Source CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buh-platform-release-automation
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  qualify:
+    name: Qualify successful main source
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      release_needed: ${{ steps.fragments.outputs.release_needed }}
+      source_commit: ${{ steps.event.outputs.source_commit }}
+    steps:
+      - name: Validate the trusted Source CI completion
+        id: event
+        env:
+          ACTOR: ${{ github.actor }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CURRENT_MAIN_SHA: ${{ github.sha }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          STATUS: ${{ github.event.workflow_run.status }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ACTOR}" == "${OWNER}" ]]
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          [[ "${RUN_ATTEMPT}" == "1" ]]
+          [[ "${WORKFLOW_NAME}" == "Source CI" ]]
+          [[ "${WORKFLOW_PATH%%@*}" == ".github/workflows/source-ci.yml" ]]
+          [[ "${STATUS}" == "completed" && "${CONCLUSION}" == "success" ]]
+          [[ "${EVENT}" == "push" && "${HEAD_BRANCH}" == "main" ]]
+          [[ "${HEAD_REPOSITORY}" == "${REPOSITORY}" ]]
+          [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          echo "source_commit=${SOURCE_COMMIT}" >>"${GITHUB_OUTPUT}"
+          # Release only the newest tested main. If main advanced, its own Source
+          # CI completion will collect every still-unconsumed change fragment.
+          if [[ "${CURRENT_MAIN_SHA}" != "${SOURCE_COMMIT}" ]]; then
+            echo "release_needed=false" >>"${GITHUB_OUTPUT}"
+            echo "main advanced; its newer Source CI run owns release automation." >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Check out the exact tested source
+        if: ${{ steps.event.outputs.release_needed != 'false' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.event.outputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Detect unconsumed release intent
+        id: fragments
+        if: ${{ steps.event.outputs.release_needed != 'false' }}
+        env:
+          SOURCE_COMMIT: ${{ steps.event.outputs.source_commit }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_COMMIT}" ]]
+          mapfile -d '' fragments < <(git ls-files -z -- 'changes/*.toml')
+          for fragment in "${fragments[@]}"; do
+            [[ "${fragment}" =~ ^changes/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.toml$ ]]
+            [[ -f "${fragment}" && ! -L "${fragment}" ]]
+          done
+          if [[ "${#fragments[@]}" -eq 0 ]]; then
+            echo "release_needed=false" >>"${GITHUB_OUTPUT}"
+            echo "No unconsumed change fragments; release automation is complete." >>"${GITHUB_STEP_SUMMARY}"
+          else
+            echo "release_needed=true" >>"${GITHUB_OUTPUT}"
+            echo "Found ${#fragments[@]} unconsumed change fragment(s)." >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+  release:
+    name: Build and publish immutable release
+    if: ${{ needs.qualify.outputs.release_needed == 'true' }}
+    needs: qualify
+    uses: ./.github/workflows/build-platform-release.yml
+    with:
+      expected_source_sha: ${{ needs.qualify.outputs.source_commit }}
+      publish_release_branch: true
+      publish_confirmation: PUBLISH RELEASE BRANCH
+    secrets: inherit
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+
+  preflight:
+    name: Run production no-change preflight
+    needs: release
+    uses: ./.github/workflows/deploy-platform-v2.yml
+    with:
+      mode: preflight
+      platform_version: ${{ needs.release.outputs.platform_version }}
+      release_commit: ${{ needs.release.outputs.release_commit }}
+      confirmation: PREFLIGHT PLATFORM V2
+    secrets: inherit
+    permissions:
+      contents: read
+
+  ready:
+    name: Publish ChatGPT approval evidence
+    needs: [release, preflight]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Check out the exact tested source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reverify evidence and publish the readiness marker
+        id: approval
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/platform_approval.py ready \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --version "${{ needs.release.outputs.platform_version }}" \
+            --source-commit "${{ needs.release.outputs.source_commit }}" \
+            --release-commit "${{ needs.release.outputs.release_commit }}" \
+            --pull-request "${{ needs.release.outputs.sync_pr_number }}" \
+            --manifest-sha256 "${{ needs.preflight.outputs.manifest_sha256 }}" \
+            --preflight-run-id "${{ github.run_id }}" \
+            --preflight-run-attempt "${{ github.run_attempt }}" \
+            --preflight-artifact "${{ needs.preflight.outputs.artifact_name }}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-approval-ready.json >/dev/null
+
+      - name: Upload canonical readiness evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-approval-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/platform-approval-ready.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

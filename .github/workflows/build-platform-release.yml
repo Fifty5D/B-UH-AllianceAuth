@@ -1,6 +1,42 @@
 name: Build platform release
 
 on:
+  workflow_call:
+    inputs:
+      expected_source_sha:
+        description: Exact full main commit SHA (40 or 64 lowercase hex characters)
+        required: true
+        type: string
+      publish_release_branch:
+        description: Publish the verified candidate to a new release branch
+        required: false
+        type: boolean
+        default: false
+      publish_confirmation:
+        description: Exact publication confirmation when publication is enabled
+        required: false
+        type: string
+        default: ""
+    secrets:
+      BUH_RELEASE_PR_TOKEN:
+        description: Owner fine-grained token used only to create the sync PR
+        required: false
+    outputs:
+      platform_version:
+        description: Published platform version without a leading v
+        value: ${{ jobs.synchronize_release.outputs.platform_version }}
+      release_commit:
+        description: Exact immutable release commit
+        value: ${{ jobs.synchronize_release.outputs.release_commit }}
+      source_commit:
+        description: Exact tested main commit
+        value: ${{ jobs.synchronize_release.outputs.source_commit }}
+      sync_pr_number:
+        description: Mandatory release synchronization pull request number
+        value: ${{ jobs.synchronize_release.outputs.sync_pr_number }}
+      sync_pr_url:
+        description: Mandatory release synchronization pull request URL
+        value: ${{ jobs.synchronize_release.outputs.sync_pr_url }}
   workflow_dispatch:
     inputs:
       expected_source_sha:
@@ -2020,6 +2056,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    outputs:
+      platform_version: ${{ needs.candidate.outputs.platform_version }}
+      release_commit: ${{ needs.publish.outputs.release_commit }}
+      source_commit: ${{ inputs.expected_source_sha }}
+      sync_pr_number: ${{ steps.sync_pr.outputs.number }}
+      sync_pr_url: ${{ steps.sync_pr.outputs.url }}
     steps:
       - name: Check out the exact reviewed source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -2035,7 +2077,7 @@ jobs:
           API_URL: ${{ github.api_url }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.BUH_RELEASE_PR_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           RELEASE_BRANCH: ${{ needs.publish.outputs.release_branch }}
           RELEASE_COMMIT: ${{ needs.publish.outputs.release_commit }}
@@ -2047,6 +2089,10 @@ jobs:
           set -Eeuo pipefail
           [[ "${ACTOR}" == "${OWNER}" ]]
           [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          test -n "${GITHUB_TOKEN}" || {
+            echo "BUH_RELEASE_PR_TOKEN is required to create a trusted-owner sync PR." >&2
+            exit 78
+          }
           python3 ops/release/open_sync_pr.py \
             --owner "${OWNER}" \
             --repository "${REPOSITORY}" \
