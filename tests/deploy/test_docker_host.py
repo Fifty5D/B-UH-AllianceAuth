@@ -208,7 +208,9 @@ class DockerHostContracts(unittest.TestCase):
             self.assertLess(block.index("vendor.whl"), block.index("structure.whl"))
             self.assertLess(block.index("structure.whl"), block.index("moon.whl"))
             self.assertEqual(block.count("python3 -m pip install"), 3)
+            self.assertEqual(block.count("--force-reinstall"), 3)
             self.assertEqual(block.count("sha256sum --check --strict"), 3)
+            self.assertNotIn("rm -f /tmp/buh-platform-v2", block)
             host._write_candidate_dockerfile(bundle)
             written = (config.app_dir / config.custom_dockerfile).read_text()
             self.assertIn(BEGIN_V2, written)
@@ -228,6 +230,42 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(
                 [line for line in rewritten.splitlines() if line.startswith("RUN printf")],
                 [expected_printf] * 3,
+            )
+
+    def test_rollback_retags_exact_previous_image_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            host.original_dockerfile = host.backup_path / "custom.dockerfile"
+            host.original_local_settings = host.backup_path / "local.py"
+            host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
+            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            host.previous_image_id = "sha256:" + "6" * 64
+            host.previous_image_references = ("aa-docker-auth:latest",)
+
+            with mock.patch.object(host, "_run", return_value="") as run, mock.patch.object(
+                host, "_compose", return_value=""
+            ) as compose:
+                recovery = host.rollback(make_bundle(root), "validated")
+
+            self.assertIn("never replaced", recovery)
+            run.assert_called_once_with(
+                [
+                    "docker",
+                    "image",
+                    "tag",
+                    "sha256:" + "6" * 64,
+                    "aa-docker-auth:latest",
+                ],
+                context="Previous AllianceAuth image reference restoration",
+            )
+            compose.assert_not_called()
+            self.assertEqual(
+                (config.app_dir / config.custom_dockerfile).read_text(), "FROM restored\n"
             )
 
     def test_only_recreated_auth_services_require_zero_restarts(self):
