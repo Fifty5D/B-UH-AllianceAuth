@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auth.b-uh.com/schemas/platform-v2-receiver-config-v1.json",
+  "title": "B-UH Platform v2 receiver configuration",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository",
+    "app_dir",
+    "state_dir",
+    "backup_dir",
+    "compose_file",
+    "env_file",
+    "custom_dockerfile",
+    "local_settings",
+    "manage_py",
+    "auth_services",
+    "gunicorn_service",
+    "worker_service",
+    "database_service",
+    "redis_service",
+    "proxy_service",
+    "setup_arguments",
+    "smoke_checks",
+    "legacy_platform_version",
+    "legacy_release_commit",
+    "command_timeout_seconds",
+    "health_attempts",
+    "health_interval_seconds",
+    "restore_tmpfs_mb",
+    "max_archive_bytes"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$"},
+    "app_dir": {"$ref": "#/$defs/absolutePath"},
+    "state_dir": {"$ref": "#/$defs/absolutePath"},
+    "backup_dir": {"$ref": "#/$defs/absolutePath"},
+    "compose_file": {"$ref": "#/$defs/relativePath"},
+    "env_file": {"$ref": "#/$defs/relativePath"},
+    "custom_dockerfile": {"$ref": "#/$defs/relativePath"},
+    "local_settings": {"$ref": "#/$defs/relativePath"},
+    "manage_py": {"type": "string", "pattern": "^/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"},
+    "auth_services": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/service"}
+    },
+    "gunicorn_service": {"$ref": "#/$defs/service"},
+    "worker_service": {"$ref": "#/$defs/service"},
+    "database_service": {"$ref": "#/$defs/service"},
+    "redis_service": {"$ref": "#/$defs/service"},
+    "proxy_service": {"$ref": "#/$defs/service"},
+    "setup_arguments": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 32,
+        "items": {"type": "string", "minLength": 1, "maxLength": 255}
+      }
+    },
+    "smoke_checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["url", "statuses"],
+        "properties": {
+          "url": {"type": "string", "pattern": "^https://auth\\.b-uh\\.com(?::443)?/[^#\\r\\n]*$", "maxLength": 500},
+          "statuses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {"type": "integer", "minimum": 100, "maximum": 599}
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "legacy_platform_version": {"$ref": "#/$defs/semver"},
+    "legacy_release_commit": {"$ref": "#/$defs/commit"},
+    "command_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3600},
+    "health_attempts": {"type": "integer", "minimum": 1, "maximum": 120},
+    "health_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
+    "restore_tmpfs_mb": {"type": "integer", "minimum": 256, "maximum": 16384},
+    "max_archive_bytes": {"type": "integer", "minimum": 1048576, "maximum": 268435456}
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/(?:[A-Za-z0-9._-]+/?)+$", "maxLength": 255},
+    "relativePath": {"type": "string", "pattern": "^[A-Za-z0-9.][A-Za-z0-9._/-]{0,254}$"},
+    "service": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+    "semver": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+  },
+  "additionalProperties": false
+}

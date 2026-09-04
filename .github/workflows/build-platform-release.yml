@@ -580,6 +580,31 @@ jobs:
             exit 1
           }
 
+      - name: Require a deployable production runtime contract
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          contract = tomllib.loads(
+              Path("platform/compatibility.toml").read_text(encoding="utf-8")
+          )
+          runtime = contract.get("production_runtime")
+          image = runtime.get("base_image") if isinstance(runtime, dict) else None
+          pattern = re.compile(
+              r"[a-z0-9]+(?:[._/-][a-z0-9]+)*"
+              r"(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?"
+              r"@sha256:[0-9a-f]{64}"
+          )
+          if not isinstance(image, str) or not pattern.fullmatch(image):
+              raise SystemExit(
+                  "Publication is blocked until production_runtime.base_image "
+                  "contains the reviewed production image digest"
+              )
+          PY
+
   prepare_publication:
     name: Prepare publication payload
     if: ${{ inputs.publish_release_branch }}

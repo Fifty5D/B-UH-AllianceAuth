@@ -35,8 +35,16 @@ parent. It never updates main and never connects to the VPS.
 
 Source and release-candidate jobs now enforce exact transitive hash locks,
 exactly pinned build tools, and digest-pinned disposable test images. The
-production v2 receiver, its runtime-image digest, previous-production upgrade
-proof, and backup-aware deployment are still gated future work.
+production v2 receiver and backup-aware state machine are now repository-owned
+and tested, as is a previous-production upgrade/restore rehearsal. They remain
+inactive on the VPS. The production runtime-image digest, one-time receiver
+bootstrap, successful preflight, and approved deployment are still promotion
+gates.
+
+The release builder also refuses publication until
+`production_runtime.base_image` contains that reviewed digest. Candidate builds
+remain available before then, so the bootstrap prerequisite cannot accidentally
+create an immutable but undeployable release.
 
 `ops/supply_chain.py verify` is offline and fail closed. The scheduled
 `source-supply-chain.yml` resolver has only `contents: read`: it may contact PyPI
@@ -69,7 +77,9 @@ fingerprint, and release provenance remain authoritative.
 2. Run fast checks: Ruff, compilation, JavaScript syntax, Django checks,
    migration drift, and targeted tests.
 3. Run the disposable MariaDB/Redis/Celery/fake-ESI integration environment.
-4. Test both a fresh migration and an upgrade from the currently deployed schema.
+4. Reconstruct the immutable v0.3.3 schema, seed synthetic accounting evidence,
+   test the in-place upgrade, restore its pre-migration dump to a second database,
+   and test the restored upgrade again.
 5. Run Playwright table, sorting, row navigation, controls, keyboard, responsive,
    and permission tests with synthetic identities.
 6. Resolve the reviewed compatibility contract into exact hashed Python locks and
@@ -104,6 +114,11 @@ Platform v2 must retain or strengthen the legacy controls:
 Docker cache entries may improve build speed, but cache keys include the lockfile,
 architecture, Python version, and base-image digest. Cached layers are not release
 provenance and never bypass artifact verification.
+
+The Platform v2 host Dockerfile also installs one verified wheel per layer in a
+stable order: third-party and unchanged wheels first, changed owned wheels last.
+Most application-only releases therefore rebuild only the final small layers.
+The candidate is still built and checked before live containers are replaced.
 
 ## Database and rollback safety
 
@@ -161,12 +176,17 @@ Minor backend changes do not need a preview.
 - [x] Exact `--require-hashes` dependency locks are generated and verified.
 - [x] All disposable source-test service and base images are pinned by digest.
 - [ ] The future production runtime image is pinned by digest.
-- [ ] Schema v1 validators have canonical and adversarial tests, and schema
+- [x] Schema v1 validators have canonical and adversarial tests, and schema
   evolution policy is enforced.
-- [ ] Source, integration, upgrade, concurrency, browser, and contract lanes are
+- [x] Source, integration, upgrade, concurrency, browser, and contract lanes are
   required GitHub checks.
-- [ ] Database backup restoration has succeeded in a disposable environment.
-- [ ] Platform v2 forced-command receiver accepts only the declared manifest and
+- [x] Database backup restoration is required in the disposable environment.
+- [x] Platform v2 forced-command receiver accepts only the declared manifest and
   install plan.
-- [ ] Mandatory post-deployment verification and diagnostics pass.
+- [ ] The receiver is installed and its no-change production preflight passes.
+- [ ] Mandatory post-deployment verification and diagnostics pass in production.
 - [ ] A Platform v2 rollback drill succeeds before legacy v1 is retired.
+
+Implementation checkmarks describe repository controls. They become operational
+evidence only after the corresponding hosted workflow succeeds; no unchecked
+production item may be inferred from a source test.

@@ -13,6 +13,7 @@ while IFS= read -r -d '' script; do
     node --check "${script}"
 done < <(find apps -type f -name '*.js' -print0)
 python -m unittest discover -s tests/platform -p 'test_*.py'
+python -m unittest discover -s tests/deploy -p 'test_*.py'
 
 export PYTHONPATH="${ROOT}/platform/testauth:${ROOT}"
 export BUH_TEST_SETTINGS="testauth.settings.unit"

@@ -11,7 +11,19 @@ variable "BUH_TEST_IMAGE_TAG" {
 }
 
 group "default" {
-  targets = ["testauth", "browser"]
+  targets = ["testauth", "baseline", "browser"]
+}
+
+target "baseline" {
+  context = "../.."
+  dockerfile = "platform/testenv/Dockerfile.baseline"
+  tags = ["buh/source-baseline:${BUH_TEST_IMAGE_TAG}"]
+  cache-from = [
+    "type=gha,scope=buh-baseline-main",
+    "type=gha,scope=buh-baseline-${BUH_CACHE_SCOPE}",
+  ]
+  cache-to = ["type=gha,scope=buh-baseline-${BUH_CACHE_SCOPE},mode=max,timeout=10m,ignore-error=true"]
+  output = ["type=docker"]
 }
 
 target "browser" {

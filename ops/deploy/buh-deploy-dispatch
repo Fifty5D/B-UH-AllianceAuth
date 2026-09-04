@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+legacy_receiver="${1-}"
+case "${legacy_receiver}" in
+  /*) ;;
+  *) echo "Legacy receiver path rejected" >&2; exit 64 ;;
+esac
+if [ ! -f "${legacy_receiver}" ] || [ ! -x "${legacy_receiver}" ]; then
+  echo "Legacy receiver is unavailable" >&2
+  exit 69
+fi
+
+case "${SSH_ORIGINAL_COMMAND-}" in
+  "deploy moon-tax")
+    exec /usr/bin/sudo -n -- "${legacy_receiver}"
+    ;;
+  "preflight platform-v2")
+    exec /usr/bin/sudo -n -- /usr/local/sbin/buh-platform-v2-receiver preflight
+    ;;
+  "deploy platform-v2")
+    exec /usr/bin/sudo -n -- /usr/local/sbin/buh-platform-v2-receiver deploy
+    ;;
+  *)
+    echo "Deployment command rejected" >&2
+    exit 64
+    ;;
+esac

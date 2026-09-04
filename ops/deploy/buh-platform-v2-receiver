@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+case "${1-}" in
+  preflight|deploy) mode="$1" ;;
+  *) echo "Platform v2 receiver mode rejected" >&2; exit 64 ;;
+esac
+
+exec /usr/bin/env -i \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PYTHONPATH=/usr/local/lib/buh-platform-v2 \
+  /usr/bin/python3 -P -m ops.deploy.receiver \
+  --config /etc/buh-platform-v2/receiver.json "${mode}"

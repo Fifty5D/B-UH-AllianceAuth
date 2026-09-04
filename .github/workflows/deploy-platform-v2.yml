@@ -1,0 +1,362 @@
+name: Deploy Platform v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only, or perform the guarded production deployment
+        required: true
+        type: choice
+        default: preflight
+        options:
+          - preflight
+          - deploy
+      platform_version:
+        description: Exact published platform version without a leading v
+        required: true
+        type: string
+      release_commit:
+        description: Exact 40-character commit at the published release branch tip
+        required: true
+        type: string
+      confirmation:
+        description: Type PREFLIGHT PLATFORM V2 or DEPLOY PLATFORM V2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buh-production-platform-v2
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: Guarded Platform v2 operation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    environment: production
+    steps:
+      - name: Validate owner, mode, version, and immutable release ref
+        env:
+          ACTOR: ${{ github.actor }}
+          API_URL: ${{ github.api_url }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          OWNER: ${{ github.repository_owner }}
+          PLATFORM_VERSION: ${{ inputs.platform_version }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+          REPOSITORY: ${{ github.repository }}
+          SELECTED_REF: ${{ github.ref }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ACTOR}" == "${OWNER}" ]]
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          [[ "${SELECTED_REF}" == "refs/heads/main" ]]
+          [[ "${PLATFORM_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          case "${MODE}" in
+            preflight) [[ "${CONFIRMATION}" == "PREFLIGHT PLATFORM V2" ]] ;;
+            deploy) [[ "${CONFIRMATION}" == "DEPLOY PLATFORM V2" ]] ;;
+            *) exit 64 ;;
+          esac
+
+          mkdir -p artifacts
+          ref_url="${API_URL}/repos/${REPOSITORY}/git/ref/heads/release/platform-v${PLATFORM_VERSION}"
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${ref_url}" >artifacts/release-ref.json
+          [[ "$(jq -er '.object.type' artifacts/release-ref.json)" == "commit" ]]
+          [[ "$(jq -er '.object.sha' artifacts/release-ref.json)" == "${RELEASE_COMMIT}" ]]
+
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${API_URL}/repos/${REPOSITORY}/git/commits/${RELEASE_COMMIT}" \
+            >artifacts/release-commit.json
+          [[ "$(jq -er '.parents | length' artifacts/release-commit.json)" == "1" ]]
+
+      - name: Check out the exact published release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_commit }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify release lineage, bundle, and production compatibility
+        id: release
+        env:
+          PLATFORM_VERSION: ${{ inputs.platform_version }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_COMMIT}" ]]
+          mapfile -t parents < <(git show -s --format='%P' HEAD)
+          read -r -a parent_ids <<<"${parents[0]}"
+          [[ "${#parent_ids[@]}" -eq 1 ]]
+
+          release_dir="releases/platform/v${PLATFORM_VERSION}"
+          [[ -d "${release_dir}" && ! -L "${release_dir}" ]]
+          python3 ops/release/buh_release.py verify --release-dir "${release_dir}"
+
+          RELEASE_DIR="${release_dir}" python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          release = Path(os.environ["RELEASE_DIR"])
+          manifest = json.loads((release / "RELEASE.json").read_text(encoding="ascii"))
+          version = os.environ["PLATFORM_VERSION"]
+          commit = os.environ["RELEASE_COMMIT"]
+          if manifest.get("platform_version") != version:
+              raise SystemExit("Release directory and manifest version disagree")
+          source = manifest.get("source_commit")
+          if not isinstance(source, str) or not re.fullmatch(r"[0-9a-f]{40}", source):
+              raise SystemExit("Manifest source commit is not a full GitHub commit")
+          parent = subprocess.run(
+              ["git", "rev-parse", f"{commit}^"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout.strip()
+          if source != parent:
+              raise SystemExit("Published release is not a direct child of its tested source")
+          runtime = manifest.get("compatibility", {}).get("values", {}).get(
+              "production_runtime"
+          )
+          image = runtime.get("base_image") if isinstance(runtime, dict) else None
+          if not isinstance(image, str) or not re.fullmatch(
+              r"[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?"
+              r"@sha256:[0-9a-f]{64}",
+              image,
+          ):
+              raise SystemExit("Release lacks its reviewed digest-pinned production image")
+
+          tracked = subprocess.run(
+              ["git", "ls-tree", "-r", "-z", "--full-tree", commit, "--", release.as_posix()],
+              check=True,
+              stdout=subprocess.PIPE,
+          ).stdout.split(b"\0")
+          expected = {path.relative_to(release).as_posix() for path in release.iterdir()}
+          actual = set()
+          for record in tracked:
+              if not record:
+                  continue
+              header, name = record.split(b"\t", 1)
+              mode, kind, _object_id = header.decode("ascii").split()
+              path = Path(name.decode("utf-8"))
+              if mode != "100644" or kind != "blob" or path.parent != release:
+                  raise SystemExit(f"Unsafe release-tree entry: {path}")
+              actual.add(path.name)
+          if actual != expected:
+              raise SystemExit("Release filesystem and exact Git tree differ")
+          PY
+
+          manifest_sha256="$(sha256sum "${release_dir}/RELEASE.json" | awk '{print $1}')"
+          [[ "${manifest_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "release_dir=${release_dir}" >>"${GITHUB_OUTPUT}"
+          echo "manifest_sha256=${manifest_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: Build a deterministic bounded deployment archive
+        env:
+          MANIFEST_SHA256: ${{ steps.release.outputs.manifest_sha256 }}
+          MODE: ${{ inputs.mode }}
+          PLATFORM_VERSION: ${{ inputs.platform_version }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+          RELEASE_DIR: ${{ steps.release.outputs.release_dir }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import gzip
+          import io
+          import json
+          import os
+          import stat
+          import tarfile
+          from pathlib import Path
+
+          release = Path(os.environ["RELEASE_DIR"])
+          request = {
+              "manifest_sha256": os.environ["MANIFEST_SHA256"],
+              "mode": os.environ["MODE"],
+              "platform_version": os.environ["PLATFORM_VERSION"],
+              "release_commit": os.environ["RELEASE_COMMIT"],
+              "release_ref": f"release/platform-v{os.environ['PLATFORM_VERSION']}",
+              "repository": os.environ["REPOSITORY"],
+              "schema_version": 1,
+              "workflow_run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "workflow_run_id": os.environ["RUN_ID"],
+          }
+          request_bytes = (
+              json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii")
+          if len(request_bytes) > 16 * 1024:
+              raise SystemExit("Deployment request is unexpectedly large")
+
+          entries = sorted(release.iterdir(), key=lambda item: item.name)
+          if not entries or len(entries) > 128:
+              raise SystemExit("Release bundle has an unsafe entry count")
+          for path in entries:
+              details = path.lstat()
+              if not stat.S_ISREG(details.st_mode) or path.is_symlink():
+                  raise SystemExit(f"Release entry is not a regular file: {path}")
+              if details.st_size <= 0 or details.st_size > 64 * 1024 * 1024:
+                  raise SystemExit(f"Release entry has an unsafe size: {path}")
+
+          archive_path = Path("platform-v2-deployment.tar.gz")
+          with archive_path.open("xb") as raw:
+              with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+                  with tarfile.open(
+                      fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT
+                  ) as archive:
+                      def add_bytes(name, data, mode=0o644):
+                          info = tarfile.TarInfo(name)
+                          info.size = len(data)
+                          info.mode = mode
+                          info.uid = info.gid = 0
+                          info.uname = info.gname = ""
+                          info.mtime = 0
+                          archive.addfile(info, io.BytesIO(data))
+
+                      add_bytes("REQUEST.json", request_bytes, 0o600)
+                      directory = tarfile.TarInfo("release")
+                      directory.type = tarfile.DIRTYPE
+                      directory.mode = 0o755
+                      directory.uid = directory.gid = 0
+                      directory.uname = directory.gname = ""
+                      directory.mtime = 0
+                      archive.addfile(directory)
+                      for path in entries:
+                          add_bytes(f"release/{path.name}", path.read_bytes())
+          if archive_path.stat().st_size > 256 * 1024 * 1024:
+              raise SystemExit("Deployment archive exceeds the receiver maximum")
+          PY
+
+      - name: Configure guarded deploy and observer SSH identities
+        env:
+          DEPLOY_KEY: ${{ secrets.BUH_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BUH_VPS_KNOWN_HOSTS }}
+          OBSERVER_KEY: ${{ secrets.BUH_OBSERVER_SSH_KEY }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifacts
+          test -n "${DEPLOY_KEY}" || { echo "Deploy identity is not configured." >&2; exit 78; }
+          test -n "${OBSERVER_KEY}" || { echo "Observer identity is not configured." >&2; exit 78; }
+          test -n "${KNOWN_HOSTS}" || { echo "Known hosts are not configured." >&2; exit 78; }
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" >"${HOME}/.ssh/buh_deployer"
+          printf '%s\n' "${OBSERVER_KEY}" >"${HOME}/.ssh/buh_observer"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/buh_deployer" \
+            "${HOME}/.ssh/buh_observer" "${HOME}/.ssh/known_hosts"
+
+      - name: Send the verified archive through the forced command
+        id: receiver
+        env:
+          DEPLOY_USER: ${{ vars.BUH_DEPLOY_USER || 'buh-deployer' }}
+          MODE: ${{ inputs.mode }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52' }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          : >artifacts/receiver.raw.txt
+          set +e
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=12 \
+            -i "${HOME}/.ssh/buh_deployer" -p "${VPS_PORT}" \
+            "${DEPLOY_USER}@${VPS_HOST}" "${MODE} platform-v2" \
+            <platform-v2-deployment.tar.gz >artifacts/receiver.raw.txt 2>&1
+          code=$?
+          set -e
+          echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
+
+      - name: Collect post-operation observer diagnostics
+        id: observer
+        if: always()
+        env:
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER || 'buh-observer' }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52' }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          : >artifacts/diagnostics.raw.txt
+          set +e
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
+            "${OBSERVER_USER}@${VPS_HOST}" "diagnostics 15" \
+            >artifacts/diagnostics.raw.txt 2>&1
+          code=$?
+          set -e
+          echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
+
+      - name: Sanitize and validate retained diagnostics
+        id: sanitize
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          for source in artifacts/receiver.raw.txt artifacts/diagnostics.raw.txt; do
+            target="${source/.raw/}"
+            python3 ops/buh-redact-diagnostics.py "${source}" >"${target}"
+            python3 ops/buh-redact-diagnostics.py --validate "${target}"
+            rm -f -- "${source}"
+          done
+          python3 - <<'PY'
+          import stat
+          from pathlib import Path
+
+          root = Path("artifacts")
+          total = 0
+          for path in root.rglob("*"):
+              mode = path.lstat().st_mode
+              if stat.S_ISLNK(mode):
+                  raise SystemExit(f"Artifact tree contains a symlink: {path}")
+              if stat.S_ISDIR(mode):
+                  continue
+              if not stat.S_ISREG(mode) or path.stat().st_size > 16 * 1024 * 1024:
+                  raise SystemExit(f"Unsafe diagnostic artifact: {path}")
+              total += path.stat().st_size
+          if total > 32 * 1024 * 1024:
+              raise SystemExit("Diagnostic artifacts exceed their aggregate limit")
+          PY
+
+      - name: Upload sanitized diagnostics for every attempt
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-v2-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/receiver.txt
+            artifacts/diagnostics.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Require receiver, observer, and sanitization success
+        if: always()
+        env:
+          OBSERVER_EXIT: ${{ steps.observer.outputs.exit_code }}
+          RECEIVER_EXIT: ${{ steps.receiver.outputs.exit_code }}
+          SANITIZE_OUTCOME: ${{ steps.sanitize.outcome }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${RECEIVER_EXIT}" == "0" ]]
+          [[ "${OBSERVER_EXIT}" == "0" ]]
+          [[ "${SANITIZE_OUTCOME}" == "success" ]]

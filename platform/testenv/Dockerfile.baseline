@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       build-essential default-libmysqlclient-dev pkg-config curl \
+       build-essential default-libmysqlclient-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -26,28 +26,27 @@ RUN python -m pip install \
       --no-binary=mysqlclient \
       -r /workspace/platform/requirements/production.lock
 
-# These two upstream wheels are kept immutable in the last verified release.
-COPY releases/moon-tax/v0.3.3/aa_structures-4.0.3-py3-none-any.whl /tmp/wheels/
-COPY releases/moon-tax/v0.3.3/aa_moonmining-3.1.0.post1-py3-none-any.whl /tmp/wheels/
+COPY releases/moon-tax/v0.3.3/aa_buh_mining_analytics-0.2.0-py3-none-any.whl /tmp/baseline/
+COPY releases/moon-tax/v0.3.3/aa_buh_moon_tax-0.3.2-py3-none-any.whl /tmp/baseline/
+COPY releases/moon-tax/v0.3.3/aa_buh_structure_ops-0.3.0-py3-none-any.whl /tmp/baseline/
+COPY releases/moon-tax/v0.3.3/aa_moonmining-3.1.0.post1-py3-none-any.whl /tmp/baseline/
+COPY releases/moon-tax/v0.3.3/aa_structures-4.0.3-py3-none-any.whl /tmp/baseline/
 RUN printf '%s  %s\n' \
-      'ba8493ef10a450198fa5ba3d8995e1ea661b74dca20d770beaa91bf005f558e3' \
-      '/tmp/wheels/aa_structures-4.0.3-py3-none-any.whl' \
+      '5716cb36b6ab1d476734da057d730361b5e27873b1927822586c626d2794c5bb' \
+      '/tmp/baseline/aa_buh_mining_analytics-0.2.0-py3-none-any.whl' \
+      '12fe8d278398f4aa270fb0f88e2e09b8556c1525d4a1c138c2a4663382ec4e85' \
+      '/tmp/baseline/aa_buh_moon_tax-0.3.2-py3-none-any.whl' \
+      '02418557b0e6f44bb8b954dae34894985c09c411b08e75236d5f118b980e5d16' \
+      '/tmp/baseline/aa_buh_structure_ops-0.3.0-py3-none-any.whl' \
       'aa4ddbc7da64151cd6d988d971d59462360e35a5111d47a3bf56d577f454bc13' \
-      '/tmp/wheels/aa_moonmining-3.1.0.post1-py3-none-any.whl' \
+      '/tmp/baseline/aa_moonmining-3.1.0.post1-py3-none-any.whl' \
+      'ba8493ef10a450198fa5ba3d8995e1ea661b74dca20d770beaa91bf005f558e3' \
+      '/tmp/baseline/aa_structures-4.0.3-py3-none-any.whl' \
       | sha256sum --check --strict - \
-    && python -m pip install --no-index --no-deps /tmp/wheels/*.whl
-
-COPY apps/ /workspace/apps/
-RUN python -m pip install \
-      --no-build-isolation \
-      --no-deps \
-      -e /workspace/apps/structure-ops \
-      -e /workspace/apps/mining-analytics \
-      -e /workspace/apps/moon-tax
+    && python -m pip install --no-index --no-deps /tmp/baseline/*.whl
 
 COPY platform/testauth/ /workspace/platform/testauth/
 COPY platform/baselines/ /workspace/platform/baselines/
-COPY tests/ /workspace/tests/
 
 ENV PYTHONPATH=/workspace/platform/testauth \
     BUH_TEST_SETTINGS=testauth.settings.integration
