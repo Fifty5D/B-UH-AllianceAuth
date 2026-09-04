@@ -1292,9 +1292,11 @@ def _validate_manifest_changes(
         ]
     except (OSError, ReleaseError) as exc:
         raise LedgerError("Historical change fragments are malformed") from exc
-    key = lambda item: (item["fragment"], item["app_id"])
-    if sorted(parsed, key=key) != sorted(
-        (dict(change) for change in manifest_changes), key=key
+    def change_key(item: Mapping[str, Any]) -> tuple[Any, Any]:
+        return item["fragment"], item["app_id"]
+
+    if sorted(parsed, key=change_key) != sorted(
+        (dict(change) for change in manifest_changes), key=change_key
     ):
         raise LedgerError(
             "Historical change fragments do not exactly match the verified release manifest"
