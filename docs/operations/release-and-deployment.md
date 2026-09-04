@@ -130,6 +130,13 @@ exact preflight image ID to every prior Compose image reference without restarti
 live containers. A deployment rollback uses that captured image ID as well, so it
 does not depend on rebuilding old source after a failure.
 
+The receiver treats each configured Compose service as one logical service with
+one or more running replicas. Before building, it captures the exact replica count
+and common image across every Auth container. Swap and rollback pass those counts
+back to Compose explicitly, preventing an update from silently shrinking a scaled
+worker pool. Health succeeds only when every expected replica is running on the
+shared image and every replaced Auth replica has a zero restart count.
+
 ## Database and rollback safety
 
 Before any production migration, the deployer must:

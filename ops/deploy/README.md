@@ -29,6 +29,10 @@ reviewed host operation.
 - Preflight and deployment both build the real candidate and run package-version,
   Django, and migration-plan checks. Preflight then retags the exact prior image
   without restarting live Auth containers.
+- Every running replica of each configured Auth service is discovered and must use
+  the same image. Its exact service replica counts are pinned explicitly during
+  replacement and rollback, and every expected replica must pass the post-swap
+  running/restart checks.
 - A pre-migration database dump is restored into an isolated, memory-backed
   MariaDB container using the exact running database image. Accounting-table and
   migration row counts must match before migration begins.
@@ -37,7 +41,8 @@ reviewed host operation.
   container, package, migration, Django, Redis, Celery, log, and HTTPS checks all
   pass.
 - Code/configuration rollback retags the captured pre-attempt image and is
-  automatic after a failed swap. Database restore
+  automatic after a failed or partially completed swap, preserving the captured
+  replica topology. Database restore
   is intentionally never automatic; migrations must remain backward compatible,
   and the verified backup is retained for an explicit recovery decision.
 
