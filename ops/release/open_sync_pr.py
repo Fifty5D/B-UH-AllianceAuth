@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import http.client
 import json
 import os
 import re
@@ -290,7 +291,12 @@ class GitHubClient:
                     None,
                     HTTP_TIMEOUT_SECONDS,
                 )
-            except (OSError, TimeoutError, urllib.error.URLError):
+            except (
+                OSError,
+                TimeoutError,
+                http.client.HTTPException,
+                urllib.error.URLError,
+            ):
                 if attempt + 1 == GET_ATTEMPTS:
                     raise SyncPrError(
                         "GitHub GET failed after bounded retries"
@@ -308,7 +314,13 @@ class GitHubClient:
             self.sleeper(0.25 * (2**attempt))
         raise SyncPrError("GitHub GET exhausted its fixed attempt limit")
 
-    def post(self, path: str, payload: Mapping[str, Any]) -> Any:
+    def post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        context: str = "GitHub mutation",
+    ) -> Any:
         body = _canonical_json_bytes(payload)
         try:
             response = self.transport.request(
@@ -318,21 +330,26 @@ class GitHubClient:
                 body,
                 HTTP_TIMEOUT_SECONDS,
             )
-        except (OSError, TimeoutError, urllib.error.URLError):
+        except (
+            OSError,
+            TimeoutError,
+            http.client.HTTPException,
+            urllib.error.URLError,
+        ):
             raise AmbiguousCreateError(
-                "GitHub did not return a conclusive pull-request creation response"
+                f"GitHub did not return a conclusive {context} response"
             ) from None
         if response.status == 201:
             try:
-                return _decode_json(response, "pull-request creation")
+                return _decode_json(response, context)
             except SyncPrError as exc:
                 raise AmbiguousCreateError(str(exc)) from exc
         if response.status in {408, 422, 425, 429} or 500 <= response.status <= 599:
             raise AmbiguousCreateError(
-                f"GitHub returned ambiguous HTTP {response.status} after creation"
+                f"GitHub returned ambiguous HTTP {response.status} during {context}"
             )
         raise SyncPrError(
-            f"GitHub denied pull-request creation with HTTP {response.status}"
+            f"GitHub denied {context} with HTTP {response.status}"
         )
 
 
@@ -582,7 +599,12 @@ def open_sync_pr(
     else:
         try:
             pr = _validate_pr(
-                client.post(_pulls_path(config), _create_payload(config)), config
+                client.post(
+                    _pulls_path(config),
+                    _create_payload(config),
+                    context="pull-request creation",
+                ),
+                config,
             )
             action = "created"
         except AmbiguousCreateError:
