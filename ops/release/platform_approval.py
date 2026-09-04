@@ -413,7 +413,9 @@ def _post_ready_comment(
         f"```html\n{approval}\n```"
     )
     response = client.post(
-        _path(config.repository, f"issues/{number}/comments"), {"body": body}
+        _path(config.repository, f"issues/{number}/comments"),
+        {"body": body},
+        context="readiness comment publication",
     )
     if (
         not isinstance(response, dict)
