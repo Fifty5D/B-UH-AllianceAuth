@@ -1,0 +1,6 @@
+schema_version = 1
+summary = "Force verified wheel replacement and make preflight build the real production candidate."
+
+[[changes]]
+app = "platform"
+kind = "fix"
