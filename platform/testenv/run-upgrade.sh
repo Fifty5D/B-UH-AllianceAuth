@@ -33,7 +33,7 @@ trap cleanup EXIT
 
 # This is the pre-migration backup. It contains synthetic CI data only.
 "${COMPOSE[@]}" exec -T db sh -ceu \
-    'MARIADB_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --user=root --single-transaction --quick --routines --triggers --events --hex-blob "$MARIADB_DATABASE"' \
+    'export MARIADB_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb-dump --user=root --single-transaction --quick --routines --triggers --events --hex-blob "$MARIADB_DATABASE"' \
     >"${TEMP_DIR}/legacy-v1.sql"
 test -s "${TEMP_DIR}/legacy-v1.sql"
 sha256sum "${TEMP_DIR}/legacy-v1.sql"
@@ -50,9 +50,9 @@ sha256sum "${TEMP_DIR}/legacy-v1.sql"
 # Prove that the pre-migration backup restores independently, then upgrade the
 # restored copy as the rollback/forward-fix rehearsal.
 "${COMPOSE[@]}" exec -T db sh -ceu \
-    'MARIADB_PWD="$MARIADB_ROOT_PASSWORD" mariadb --user=root --execute="DROP DATABASE IF EXISTS buh_restore; CREATE DATABASE buh_restore CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"'
+    'export MARIADB_PWD="$MARIADB_ROOT_PASSWORD"; mariadb --user=root --execute="DROP DATABASE IF EXISTS buh_restore; CREATE DATABASE buh_restore CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"'
 "${COMPOSE[@]}" exec -T db sh -ceu \
-    'MARIADB_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb --user=root buh_restore' \
+    'export MARIADB_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb --user=root buh_restore' \
     <"${TEMP_DIR}/legacy-v1.sql"
 "${COMPOSE[@]}" run --rm -e BUH_DB_NAME=buh_restore test \
     python manage.py migrate --noinput --no-color
