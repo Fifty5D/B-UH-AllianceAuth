@@ -1,0 +1,49 @@
+{
+  "fixture": "buh-upgrade-v0.3.3",
+  "migration_targets": {
+    "buh_mining_analytics": "0002_miningaccessgroup_and_more",
+    "buh_moon_tax": "0005_payment_workspace_and_bill_adjustments",
+    "buh_structure_ops": "0003_access_role_configuration"
+  },
+  "platform_version": "0.3.3",
+  "release_commit": "e70a8ee713d358e2f0e3c1dc5b23305c863aa628",
+  "release_path": "releases/moon-tax/v0.3.3",
+  "schema_version": 1,
+  "wheels": [
+    {
+      "distribution": "aa-buh-mining-analytics",
+      "filename": "aa_buh_mining_analytics-0.2.0-py3-none-any.whl",
+      "git_blob_sha": "3a4363bf8aa260cc01cb59b0b4bbba06666f16dc",
+      "sha256": "5716cb36b6ab1d476734da057d730361b5e27873b1927822586c626d2794c5bb",
+      "version": "0.2.0"
+    },
+    {
+      "distribution": "aa-buh-moon-tax",
+      "filename": "aa_buh_moon_tax-0.3.2-py3-none-any.whl",
+      "git_blob_sha": "ff94a7e740ea396544d13fd758ab6f1af159c5f4",
+      "sha256": "12fe8d278398f4aa270fb0f88e2e09b8556c1525d4a1c138c2a4663382ec4e85",
+      "version": "0.3.2"
+    },
+    {
+      "distribution": "aa-buh-structure-ops",
+      "filename": "aa_buh_structure_ops-0.3.0-py3-none-any.whl",
+      "git_blob_sha": "093b4a9af73152f359f1481de69fe8f84c1f3766",
+      "sha256": "02418557b0e6f44bb8b954dae34894985c09c411b08e75236d5f118b980e5d16",
+      "version": "0.3.0"
+    },
+    {
+      "distribution": "aa-moonmining",
+      "filename": "aa_moonmining-3.1.0.post1-py3-none-any.whl",
+      "git_blob_sha": "381062cce2aa1d38dfc56123dff132198d0fd50e",
+      "sha256": "aa4ddbc7da64151cd6d988d971d59462360e35a5111d47a3bf56d577f454bc13",
+      "version": "3.1.0.post1"
+    },
+    {
+      "distribution": "aa-structures",
+      "filename": "aa_structures-4.0.3-py3-none-any.whl",
+      "git_blob_sha": "95854c4ac5bc74d6acda97c08653d02e0cee75be",
+      "sha256": "ba8493ef10a450198fa5ba3d8995e1ea661b74dca20d770beaa91bf005f558e3",
+      "version": "4.0.3"
+    }
+  ]
+}

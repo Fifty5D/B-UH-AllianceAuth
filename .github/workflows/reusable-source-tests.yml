@@ -294,6 +294,79 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  upgrade:
+    name: Legacy schema upgrade and backup restore
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BUILDX_BAKE_FILE_RELATIVE_PATHS: "1"
+      BUH_CACHE_SCOPE: ${{ inputs.cache_scope }}
+      BUH_CACHE_LANE: upgrade
+      BUH_COMPOSE_PROJECT: buh-${{ github.run_id }}-${{ github.run_attempt }}-upgrade
+      BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-upgrade
+      BUH_PYTHON_IMAGE: ${{ needs.configuration.outputs.python_image }}
+      BUH_MARIADB_IMAGE: ${{ needs.configuration.outputs.mariadb_image }}
+      BUH_REDIS_IMAGE: ${{ needs.configuration.outputs.redis_image }}
+      BUH_FAKE_ESI_IMAGE: ${{ needs.configuration.outputs.fake_esi_image }}
+      BUH_PLAYWRIGHT_IMAGE: ${{ needs.configuration.outputs.playwright_image }}
+      BUH_KEEP_COMPOSE: "1"
+    steps:
+      - name: Check out source and immutable baseline wheels
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare upgrade reports
+        run: |
+          mkdir -p artifacts/upgrade
+          : >artifacts/upgrade/run.log
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build current and frozen-baseline images with isolated caching
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          files: platform/testenv/docker-bake.hcl
+          source: .
+          targets: |
+            baseline
+            testauth
+          set: |
+            baseline.args.PYTHON_IMAGE=${{ needs.configuration.outputs.python_image }}
+            testauth.args.PYTHON_IMAGE=${{ needs.configuration.outputs.python_image }}
+
+      - name: Rehearse production upgrade and verified backup restoration
+        run: |
+          set -Eeuo pipefail
+          COMPOSE=(docker compose -f platform/testenv/compose.yml)
+          REPORT_DIR="artifacts/upgrade"
+
+          finish() {
+            result=$?
+            trap - EXIT
+            "${COMPOSE[@]}" ps -a >"${REPORT_DIR}/compose-ps.txt" 2>&1 || true
+            "${COMPOSE[@]}" logs --no-color \
+              db redis fake-esi >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
+            "${COMPOSE[@]}" down --volumes --remove-orphans \
+              >"${REPORT_DIR}/teardown.log" 2>&1 || true
+            exit "${result}"
+          }
+          trap finish EXIT
+
+          bash platform/testenv/run-upgrade.sh \
+            2>&1 | tee "${REPORT_DIR}/run.log"
+
+      - name: Upload upgrade failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-upgrade-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/upgrade/
+          if-no-files-found: error
+          retention-days: 7
+
   browser:
     name: Browser tables, actions, and permissions
     needs: configuration
@@ -423,7 +496,7 @@ jobs:
   required:
     name: Required source checks
     if: always()
-    needs: [configuration, fast, integration, browser]
+    needs: [configuration, fast, integration, upgrade, browser]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -433,6 +506,7 @@ jobs:
           CONFIGURATION_RESULT: ${{ needs.configuration.result }}
           FAST_RESULT: ${{ needs.fast.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          UPGRADE_RESULT: ${{ needs.upgrade.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
         run: |
           set -Eeuo pipefail
@@ -441,6 +515,7 @@ jobs:
             "configuration:${CONFIGURATION_RESULT}" \
             "fast:${FAST_RESULT}" \
             "integration:${INTEGRATION_RESULT}" \
+            "upgrade:${UPGRADE_RESULT}" \
             "browser:${BROWSER_RESULT}"; do
             lane="${entry%%:*}"
             result="${entry#*:}"

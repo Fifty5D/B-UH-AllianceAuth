@@ -22,6 +22,7 @@ SOURCE_WORKFLOWS = (
     "ui-preview.yml",
     "build-platform-release.yml",
 )
+PRODUCTION_V2_WORKFLOWS = ("deploy-platform-v2.yml",)
 LEGACY_WORKFLOWS = (
     "ci.yml",
     "deploy-moon-tax.yml",
@@ -188,7 +189,12 @@ class PlatformConfigurationContracts(TestCase):
             {path.name for path in requirements.glob("*.lock")},
             {"build.lock", "production.lock", "test.lock"},
         )
-        for name in ("run-fast.sh", "run-integration.sh", "run-browser.sh"):
+        for name in (
+            "run-fast.sh",
+            "run-integration.sh",
+            "run-upgrade.sh",
+            "run-browser.sh",
+        ):
             path = ROOT / "platform" / "testenv" / name
             with self.subTest(path=path):
                 self.assertTrue(path.stat().st_mode & stat.S_IXUSR)
@@ -314,8 +320,9 @@ class PlatformConfigurationContracts(TestCase):
         self.assertIn("format('merge-{0}', github.run_id)", source_ci)
         self.assertIn("format('compatibility-{0}', github.run_id)", compatibility)
         self.assertIn("BUH_CACHE_LANE: integration", reusable)
+        self.assertIn("BUH_CACHE_LANE: upgrade", reusable)
         self.assertIn("BUH_CACHE_LANE: browser", reusable)
-        for lane in ("fast", "integration", "browser"):
+        for lane in ("fast", "integration", "upgrade", "browser"):
             self.assertIn(
                 f"BUH_COMPOSE_PROJECT: buh-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-{lane}",
                 reusable,
@@ -325,8 +332,8 @@ class PlatformConfigurationContracts(TestCase):
                 reusable,
             )
         self.assertIn("${BUH_CACHE_SCOPE}-${BUH_CACHE_LANE}", bake)
-        self.assertEqual(bake.count("${BUH_TEST_IMAGE_TAG}"), 2)
-        self.assertEqual(bake.count("timeout=10m,ignore-error=true"), 2)
+        self.assertEqual(bake.count("${BUH_TEST_IMAGE_TAG}"), 3)
+        self.assertEqual(bake.count("timeout=10m,ignore-error=true"), 3)
 
     def test_every_external_action_is_pinned_to_a_full_commit(self):
         action = re.compile(r"^\s*uses:\s*([^\s#]+)", re.MULTILINE)
@@ -334,7 +341,7 @@ class PlatformConfigurationContracts(TestCase):
         # Legacy v1 deploy/diagnostics workflows stay byte-for-byte available
         # during the Platform v2 rollout. New source-first workflows enforce the
         # stronger full-SHA policy without silently rewriting that rollback path.
-        for name in SOURCE_WORKFLOWS:
+        for name in (*SOURCE_WORKFLOWS, *PRODUCTION_V2_WORKFLOWS):
             workflow = WORKFLOWS / name
             for use in action.findall(workflow.read_text(encoding="utf-8")):
                 if use.startswith("./"):
@@ -348,10 +355,15 @@ class PlatformConfigurationContracts(TestCase):
             for path in WORKFLOWS.iterdir()
             if path.is_file() and path.suffix in {".yml", ".yaml"}
         }
-        self.assertEqual(present, set(SOURCE_WORKFLOWS) | set(LEGACY_WORKFLOWS))
+        self.assertEqual(
+            present,
+            set(SOURCE_WORKFLOWS)
+            | set(PRODUCTION_V2_WORKFLOWS)
+            | set(LEGACY_WORKFLOWS),
+        )
 
     def test_every_workflow_rejects_duplicate_yaml_keys(self):
-        for name in (*SOURCE_WORKFLOWS, *LEGACY_WORKFLOWS):
+        for name in (*SOURCE_WORKFLOWS, *PRODUCTION_V2_WORKFLOWS, *LEGACY_WORKFLOWS):
             with self.subTest(workflow=name):
                 self.assertIsInstance(_load_workflow(WORKFLOWS / name), dict)
 
@@ -401,12 +413,74 @@ class PlatformConfigurationContracts(TestCase):
         text = (WORKFLOWS / "reusable-source-tests.yml").read_text(
             encoding="utf-8"
         )
-        for job in ("configuration", "fast", "integration", "browser", "required"):
+        for job in (
+            "configuration",
+            "fast",
+            "integration",
+            "upgrade",
+            "browser",
+            "required",
+        ):
             self.assertRegex(text, rf"(?m)^  {re.escape(job)}:\s*$")
-        self.assertIn("needs: [configuration, fast, integration, browser]", text)
+        self.assertIn(
+            "needs: [configuration, fast, integration, upgrade, browser]",
+            text,
+        )
+        self.assertIn('"upgrade:${UPGRADE_RESULT}"', text)
         self.assertIn('if: always()', text)
         self.assertIn('"${result}" != "success"', text)
         self.assertIn("Multiline workflow output is forbidden", text)
+
+    def test_platform_v2_deploy_remains_manual_guarded_and_fail_closed(self):
+        text = (WORKFLOWS / "deploy-platform-v2.yml").read_text(encoding="utf-8")
+        workflow = _load_workflow(WORKFLOWS / "deploy-platform-v2.yml")
+        deploy = workflow["jobs"]["deploy"]
+        self.assertEqual(deploy["environment"], "production")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(
+            workflow["concurrency"]["group"], "buh-production-platform-v2"
+        )
+        for required in (
+            "PREFLIGHT PLATFORM V2",
+            "DEPLOY PLATFORM V2",
+            "release/platform-v",
+            "production_runtime",
+            "BUH_DEPLOY_SSH_KEY",
+            "BUH_OBSERVER_SSH_KEY",
+            "BUH_VPS_KNOWN_HOSTS",
+            '"${MODE} platform-v2"',
+            '"${RECEIVER_EXIT}" == "0"',
+            '"${OBSERVER_EXIT}" == "0"',
+            "ops/buh-redact-diagnostics.py --validate",
+        ):
+            self.assertIn(required, text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("StrictHostKeyChecking=no", text)
+
+    def test_release_publication_requires_a_deployable_runtime_contract(self):
+        text = (WORKFLOWS / "build-platform-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Require a deployable production runtime contract", text)
+        self.assertIn('contract.get("production_runtime")', text)
+        self.assertIn("production_runtime.base_image", text)
+        self.assertIn("Publication is blocked", text)
+
+    def test_receiver_bootstrap_scripts_are_executable_and_do_not_edit_ssh(self):
+        deploy_dir = ROOT / "ops/deploy"
+        for name in (
+            "buh-deploy-dispatch",
+            "buh-platform-v2-receiver",
+            "install-receiver.sh",
+        ):
+            path = deploy_dir / name
+            self.assertTrue(path.stat().st_mode & stat.S_IXUSR)
+        installer = (deploy_dir / "install-receiver.sh").read_text()
+        dispatcher = (deploy_dir / "buh-deploy-dispatch").read_text()
+        self.assertNotIn("authorized_keys", installer)
+        self.assertIn('"deploy moon-tax"', dispatcher)
+        self.assertIn('"preflight platform-v2"', dispatcher)
+        self.assertIn('"deploy platform-v2"', dispatcher)
 
 
 if __name__ == "__main__":

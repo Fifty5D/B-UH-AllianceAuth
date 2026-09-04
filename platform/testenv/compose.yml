@@ -21,6 +21,15 @@ x-auth-image: &auth-image
   image: buh/source-testauth:${BUH_TEST_IMAGE_TAG:-local}
   networks: [test-internal]
 
+x-baseline-image: &baseline-image
+  build:
+    context: ../..
+    dockerfile: platform/testenv/Dockerfile.baseline
+    args:
+      PYTHON_IMAGE: ${BUH_PYTHON_IMAGE:-python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2}
+  image: buh/source-baseline:${BUH_TEST_IMAGE_TAG:-local}
+  networks: [test-internal]
+
 services:
   db:
     image: ${BUH_MARIADB_IMAGE:-mariadb:11.8@sha256:2439dcd7d14010ecd1ff7a4e1c5abe8e208c34fe35290744deeeaac3569043c3}
@@ -66,6 +75,15 @@ services:
 
   test:
     <<: *auth-image
+    environment: *test-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      fake-esi: {condition: service_healthy}
+    command: ["python", "manage.py", "check"]
+
+  baseline:
+    <<: *baseline-image
     environment: *test-environment
     depends_on:
       db: {condition: service_healthy}

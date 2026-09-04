@@ -36,6 +36,8 @@ or unredacted logs.
 | `tests/` | Cross-app integration, concurrency, fake ESI, browser, and permission tests |
 | `ops/supply_chain.py` | Offline lock/image verification and review-only update generation |
 | `ops/release/` | Change planning, selective builds, manifests, checksums, and verification |
+| `ops/deploy/` | Strict Platform v2 receiver, host adapter, state journal, and bootstrap files |
+| `platform/baselines/` | Frozen legacy identity and synthetic previous-production upgrade seed |
 | `releases/` | Append-only checked release inputs; legacy releases are preserved |
 
 The environment definition is permanent in GitHub. Each runtime instance is
@@ -71,11 +73,20 @@ preview run.
 - A dispatch-only workflow can build an exact, already-tested main commit and,
   after a separate owner confirmation, publish one new immutable release branch.
   It cannot update main or deploy production.
+- A separate production workflow accepts only an immutable release-branch commit,
+  requires an exact owner confirmation and the existing production environment,
+  and always retains sanitized receiver and observer diagnostics.
+- The required upgrade lane recreates the checked v0.3.3 package schema, verifies
+  an in-place migration, restores its pre-migration SQL backup into a second
+  database, and verifies the restored migration independently.
+- The host adapter uses stable per-wheel Docker layers, a host-side lock,
+  candidate checks, verified backup restoration, atomic deployment journals, and
+  rollback-aware container replacement.
 
 These pieces are foundations, not proof that Platform v2 is production ready.
-Previous-production upgrade-path coverage, complete adapter isolation, backup
-restoration, a digest-pinned production runtime image, and the production v2
-receiver remain promotion gates.
+A digest-pinned production runtime image, one-time receiver bootstrap, a
+successful no-change host preflight, and an approved full production/rollback
+cycle remain promotion gates.
 
 ## Compatibility and upgrade policy
 
@@ -164,7 +175,8 @@ and a tested database restore path.
 
 - [ ] Source-built wheels reproduce the behavior and packaged contents of the
   deployed custom applications.
-- [ ] Required GitHub checks run fast, integration, migration, browser,
+- [x] Required GitHub checks run fast, integration, migration, upgrade/restore,
+  browser,
   permission, and release-verification lanes.
 - [x] Exact hashed Python locks and digest-pinned source-test service/base images
   are recorded and enforced.
@@ -174,11 +186,14 @@ and a tested database restore path.
   checks.
 - [ ] Manifest, install-plan, compatibility, and fixture schemas are versioned;
   readers reject unsupported versions and schema changes include fixtures/tests.
-- [ ] Fresh-install and previous-production upgrade migrations pass on MariaDB.
-- [ ] Backup restoration and rollback/forward-fix procedures are demonstrated.
+- [x] Fresh-install and previous-production upgrade migrations are blocking on
+  MariaDB in the source workflow.
+- [x] Disposable backup restoration and rollback/forward-fix procedures are
+  exercised by tests.
 - [ ] Release artifacts are built once, provenance recorded, and promoted without
   rebuilding.
-- [ ] Production v2 uses manual approval, host locking, least-privilege forced
-  commands, mandatory health checks, sanitized diagnostics, and safe rollback.
+- [ ] Production v2 has completed its manual-approval path with host locking,
+  least-privilege forced commands, mandatory health checks, sanitized diagnostics,
+  and safe rollback. The controls exist in source but are not yet bootstrapped.
 - [ ] The legacy `v0.3.x` deployment remains available until one full production
   cycle and a rollback drill succeed on Platform v2.
