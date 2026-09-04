@@ -5,11 +5,17 @@ readonly APP_DIR="/opt/aa-docker"
 readonly MAX_LOG_LINES_PER_CONTAINER=250
 readonly PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-IFS= read -r minutes
-case "${minutes}" in
-    5|15|30|60|180|360) ;;
+IFS= read -r request
+case "${request}" in
+    5|15|30|60|180|360)
+        mode=diagnostics
+        minutes="${request}"
+        ;;
+    "fingerprint platform-v2")
+        mode=fingerprint
+        ;;
     *)
-        echo "Denied: invalid diagnostics window." >&2
+        echo "Denied: invalid observer request." >&2
         exit 64
         ;;
 esac
@@ -19,19 +25,128 @@ if [[ ! -d "${APP_DIR}" || ! -f "${APP_DIR}/docker-compose.yml" || ! -f "${APP_D
     exit 69
 fi
 
-umask 077
-raw_output="$(mktemp -t buh-diagnostics-raw.XXXXXX)"
-trap 'rm -f -- "${raw_output}"' EXIT
-
 cd "${APP_DIR}"
 
 compose() {
     docker compose --env-file=.env "$@"
 }
 
+runtime_fingerprint() {
+    local runtime_tag inspect_line image_id repo_digests
+    local services docker_version compose_version
+
+    # Compose performs interpolation, but awk permits only AA_DOCKER_TAG to
+    # cross the process boundary. No other .env value is retained or printed.
+    runtime_tag="$(
+        compose config --environment 2>/dev/null |
+            awk -F= '$1 == "AA_DOCKER_TAG" {print substr($0, index($0, "=") + 1)}'
+    )"
+    if [[ -z "${runtime_tag}" || "${runtime_tag}" == *$'\n'* ]]; then
+        echo "AA_DOCKER_TAG must resolve exactly once." >&2
+        exit 78
+    fi
+    inspect_line="$(
+        docker image inspect --format '{{.Id}}\t{{json .RepoDigests}}' \
+            "${runtime_tag}"
+    )"
+    image_id="${inspect_line%%$'\t'*}"
+    repo_digests="${inspect_line#*$'\t'}"
+    if [[ "${image_id}" == "${inspect_line}" ]]; then
+        echo "Docker image inspection did not return repository digests." >&2
+        exit 69
+    fi
+
+    services="$(compose config --services | sed '/^$/d' | sort -u)"
+    docker_version="$(docker version --format '{{.Server.Version}}')"
+    compose_version="$(docker compose version --short)"
+
+    python3 - \
+        "${runtime_tag}" "${image_id}" "${repo_digests}" "${services}" \
+        "${docker_version}" "${compose_version}" <<'PY'
+import datetime
+import json
+import re
+import socket
+import sys
+
+
+tag, image_id, raw_digests, raw_services, docker_version, compose_version = sys.argv[1:]
+image_ref = re.compile(
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*"
+    r"(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?"
+    r"(?:@sha256:[0-9a-f]{64})?"
+)
+digest_ref = re.compile(
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}"
+)
+if not image_ref.fullmatch(tag):
+    raise SystemExit("AA_DOCKER_TAG is not a canonical public image reference")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+    raise SystemExit("Docker returned a malformed image ID")
+try:
+    digests = sorted(set(json.loads(raw_digests)))
+except (TypeError, ValueError):
+    raise SystemExit("Docker returned malformed repository digests") from None
+if not digests or not all(isinstance(item, str) and digest_ref.fullmatch(item) for item in digests):
+    raise SystemExit("The production base image has no canonical repository digest")
+
+
+def repository(ref: str) -> str:
+    base = ref.split("@", 1)[0]
+    leaf = base.rsplit("/", 1)[-1]
+    if ":" in leaf:
+        base = base[: -(len(leaf) - leaf.rfind(":"))]
+    return base
+
+
+if "@sha256:" in tag:
+    candidates = [item for item in digests if item == tag]
+else:
+    target = repository(tag)
+    candidates = [
+        item
+        for item in digests
+        if repository(item) == target or repository(item).endswith("/" + target)
+    ]
+if len(candidates) != 1:
+    raise SystemExit("The production base image did not resolve to exactly one digest")
+
+services = sorted(set(raw_services.splitlines()))
+if not services or not all(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", item) for item in services):
+    raise SystemExit("Docker Compose returned malformed service names")
+if not re.fullmatch(r"[0-9][0-9A-Za-z.+~-]{0,63}", docker_version):
+    raise SystemExit("Docker returned a malformed server version")
+if not re.fullmatch(r"[0-9][0-9A-Za-z.+~-]{0,63}", compose_version):
+    raise SystemExit("Docker Compose returned a malformed version")
+host = socket.gethostname()
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", host):
+    raise SystemExit("Host name is not safe to report")
+
+print("B-UH Alliance Auth guarded runtime fingerprint")
+print("schema_version=1")
+print("generated_utc=" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+print("host=" + host)
+print("aa_docker_tag=" + tag)
+print("production_runtime_base_image=" + candidates[0])
+print("runtime_image_id=" + image_id)
+print("compose_services=" + ",".join(services))
+print("docker_server_version=" + docker_version)
+print("docker_compose_version=" + compose_version)
+PY
+}
+
+if [[ "${mode}" == "fingerprint" ]]; then
+    runtime_fingerprint
+    exit 0
+fi
+
 section() {
     printf '\n===== %s =====\n' "$1"
 }
+
+umask 077
+raw_output="$(mktemp -t buh-diagnostics-raw.XXXXXX)"
+trap 'rm -f -- "${raw_output}"' EXIT
 
 {
     printf 'B-UH Alliance Auth guarded diagnostics\n'
@@ -84,6 +199,6 @@ section() {
 } >"${raw_output}" 2>&1
 
 # Redaction is intentionally performed on the VPS before anything leaves it.
-# The observer never reads .env; this is a second safety layer for secrets that
-# an application may accidentally place in its logs.
+# The observer does not emit environment contents; this is a second safety
+# layer for credentials that an application may accidentally place in its logs.
 python3 /usr/local/libexec/buh-redact-diagnostics "${raw_output}"

@@ -1,0 +1,6 @@
+schema_version = 1
+summary = "Add a read-only allow-listed production runtime fingerprint for Platform v2 promotion."
+
+[[changes]]
+app = "platform"
+kind = "internal"

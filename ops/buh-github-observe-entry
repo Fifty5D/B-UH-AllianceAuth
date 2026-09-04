@@ -4,16 +4,17 @@ set -Eeuo pipefail
 # This is the only command accepted by the observer SSH key. The key itself is
 # additionally forced to this entry point in authorized_keys.
 case "${SSH_ORIGINAL_COMMAND:-}" in
-    "diagnostics 5") minutes=5 ;;
-    "diagnostics 15") minutes=15 ;;
-    "diagnostics 30") minutes=30 ;;
-    "diagnostics 60") minutes=60 ;;
-    "diagnostics 180") minutes=180 ;;
-    "diagnostics 360") minutes=360 ;;
+    "diagnostics 5") request=5 ;;
+    "diagnostics 15") request=15 ;;
+    "diagnostics 30") request=30 ;;
+    "diagnostics 60") request=60 ;;
+    "diagnostics 180") request=180 ;;
+    "diagnostics 360") request=360 ;;
+    "fingerprint platform-v2") request="fingerprint platform-v2" ;;
     *)
-        echo "Denied: unsupported diagnostics window." >&2
+        echo "Denied: unsupported observer command." >&2
         exit 64
         ;;
 esac
 
-printf '%s\n' "${minutes}" | exec sudo -n /usr/local/sbin/buh-github-observe-root
+printf '%s\n' "${request}" | exec sudo -n /usr/local/sbin/buh-github-observe-root
