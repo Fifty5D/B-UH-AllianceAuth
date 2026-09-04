@@ -82,9 +82,11 @@ window.
      /root/receiver.json /absolute/path/to/the/current/legacy-receiver buh-deployer
    ```
 
-   The installer copies only trusted Python modules, installs exact sudo rules,
-   creates private state/backup directories, and preserves the legacy receiver.
-   It deliberately does not read or edit `authorized_keys`.
+   The installer copies only trusted receiver modules and the read-only observer
+   executables, installs exact deploy sudo rules, creates private state/backup
+   directories, and preserves the legacy receiver. It deliberately does not read
+   or edit either identity's `authorized_keys`; observer identity and sudo setup
+   remain the responsibility of the separate one-time observer bootstrap.
 5. Review the existing deploy user's forced-command entry locally. Retain its
    existing public-key material and restrictions, changing only its fixed command
    to invoke:
