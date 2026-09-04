@@ -174,6 +174,14 @@ after a failure. Candidate preparation also preserves the owner and mode of
 mounted settings file is never overwritten, and its bytes, owner, and mode must
 remain unchanged.
 
+Every receiver operation uses the complete, ordered Compose stack declared by
+the production `.env` `COMPOSE_FILE` value. Each entry must be a unique, regular
+file beneath the application directory, and the configured base Compose file
+must be included. The receiver supplies every validated file explicitly to
+Compose, preserving host-specific service extensions, bind mounts, and sockets
+through preflight, replacement, health checks, and rollback. An absent, unsafe,
+or unsupported Compose stack fails before candidate preparation or live changes.
+
 The receiver treats each configured Compose service as one logical service with
 one or more running replicas. Before building, it captures each service's exact
 replica count, image ID, and Compose image reference. Replicas within one service

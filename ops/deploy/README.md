@@ -19,6 +19,11 @@ reviewed host operation.
   repository.
 - The release must name one digest-pinned production base image and the host's
   `AA_DOCKER_TAG` must equal it exactly.
+- Every Compose file declared by the host's literal `.env` `COMPOSE_FILE` value
+  is validated as a unique, regular in-tree file and passed explicitly to every
+  preflight, deployment, health, and rollback command. The configured base file
+  must remain present, so application overlays and their bind mounts cannot be
+  silently dropped during container replacement.
 - A legacy host may start from a newer published Platform v2 release only when
   the release explicitly opts into skipping uninstalled v2 predecessors and
   still names the exact reviewed legacy baseline. Once Platform v2 is live,
