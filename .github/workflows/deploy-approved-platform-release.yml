@@ -108,6 +108,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      pull-requests: write
     steps:
       - name: Publish a machine-readable result comment
         env:
