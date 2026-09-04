@@ -689,6 +689,15 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(preflight["needs"], "release")
         ready = automatic["jobs"]["ready"]
         self.assertEqual(ready["needs"], ["release", "preflight"])
+        self.assertEqual(
+            ready["permissions"],
+            {
+                "actions": "read",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
         self.assertIn("platform_approval.py ready", automatic_text)
         self.assertIn("buh-platform-ready:v1", (
             ROOT / "ops" / "release" / "platform_approval.py"
@@ -716,6 +725,14 @@ class PlatformConfigurationContracts(TestCase):
         self.assertFalse(authorize["steps"][0]["with"]["persist-credentials"])
         deploy = workflow["jobs"]["deploy"]
         self.assertEqual(deploy["needs"], "authorize")
+        self.assertEqual(
+            workflow["jobs"]["report"]["permissions"],
+            {
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
         self.assertEqual(deploy["with"]["mode"], "deploy")
         self.assertEqual(deploy["with"]["confirmation"], "DEPLOY PLATFORM V2")
         for required in (
