@@ -266,6 +266,22 @@ class SyncPrTests(unittest.TestCase):
                 )
             self.assertFalse(any(call[0] == "POST" for call in transport.calls))
 
+    def test_post_denial_names_the_exact_operation(self) -> None:
+        client = sync.GitHubClient(
+            "https://api.github.com",
+            TOKEN,
+            transport=FakeTransport([_json_response(403, {"message": TOKEN})]),
+        )
+        with self.assertRaisesRegex(
+            sync.SyncPrError,
+            "GitHub denied readiness comment publication with HTTP 403",
+        ):
+            client.post(
+                "/repos/Fifty5D/B-UH-AllianceAuth/issues/31/comments",
+                {"body": "safe"},
+                context="readiness comment publication",
+            )
+
     def test_create_denial_fails_without_retry_or_recovery_post(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = self.config(Path(temp) / "report.json")
