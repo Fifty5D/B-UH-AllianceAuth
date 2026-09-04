@@ -131,7 +131,7 @@ jobs:
       actions: read
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Check out the exact tested source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
