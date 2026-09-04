@@ -1,0 +1,4 @@
+schema_version = 1
+summary = "Preserve mounted settings permissions and pin rollback images during preflight."
+app = "platform"
+kind = "fix"

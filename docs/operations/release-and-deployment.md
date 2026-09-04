@@ -164,9 +164,15 @@ immutable build layer because a later non-root layer cannot remove a root-owned
 Production preflight executes the same cached candidate build, per-service
 package-version probes, Django checks, and migration plan as deployment. It then
 restores each service's exact preflight image ID to its prior Compose image
-reference without restarting live containers. A deployment rollback uses those
+reference without restarting live containers. Each live image is first pinned
+under an attempt-scoped rollback tag so a candidate build cannot make the old
+image unreachable; every restored reference is resolved and compared with the
+captured image ID before cleanup succeeds. A deployment rollback uses those
 captured service images as well, so it does not depend on rebuilding old source
-after a failure.
+after a failure. Candidate preparation also preserves the owner and mode of
+`custom.dockerfile`. The private `local.py` copy is verification-only: the live
+mounted settings file is never overwritten, and its bytes, owner, and mode must
+remain unchanged.
 
 The receiver treats each configured Compose service as one logical service with
 one or more running replicas. Before building, it captures each service's exact

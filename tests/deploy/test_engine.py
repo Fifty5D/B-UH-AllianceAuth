@@ -76,6 +76,16 @@ class FakeBackend:
         return f"recovered from {last_state}"
 
 
+class DoubleFailureBackend(FakeBackend):
+    def prepare_candidate(self, bundle):
+        self.calls.append("prepare_candidate")
+        raise DeploymentError("synthetic candidate failure")
+
+    def rollback(self, bundle, last_state):
+        self.calls.append(f"rollback:{last_state}")
+        raise DeploymentError("synthetic cleanup failure")
+
+
 class DeploymentEngineTests(unittest.TestCase):
     def test_preflight_builds_candidate_then_restores_without_mutation_steps(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -111,6 +121,18 @@ class DeploymentEngineTests(unittest.TestCase):
             record = json.loads(journal.path.read_text())
             self.assertEqual(record["result"], "failed")
             self.assertIn("synthetic prepare_candidate failure", record["failure_detail"])
+
+    def test_preflight_records_the_cleanup_failure_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = make_bundle(root)
+            journal = PreflightJournal(root / "state", bundle)
+            backend = DoubleFailureBackend()
+            with self.assertRaisesRegex(DeploymentError, "candidate failure"):
+                PreflightEngine(backend, journal).run(bundle)
+
+            record = json.loads(journal.path.read_text())
+            self.assertIn("synthetic cleanup failure", record["recovery"])
 
     def test_success_records_every_state_before_publishing_current(self):
         with tempfile.TemporaryDirectory() as temporary:

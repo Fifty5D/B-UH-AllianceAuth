@@ -208,6 +208,9 @@ class DockerHostContracts(unittest.TestCase):
             write_host_files(config)
             host = DockerHost(config)
             bundle = make_bundle(root)
+            dockerfile = config.app_dir / config.custom_dockerfile
+            dockerfile.chmod(0o640)
+            original_owner = (dockerfile.stat().st_uid, dockerfile.stat().st_gid)
             block = host._dockerfile_block(bundle)
             self.assertLess(block.index("vendor.whl"), block.index("structure.whl"))
             self.assertLess(block.index("structure.whl"), block.index("moon.whl"))
@@ -234,6 +237,11 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(
                 [line for line in rewritten.splitlines() if line.startswith("RUN printf")],
                 [expected_printf] * 3,
+            )
+            rewritten_details = dockerfile.stat()
+            self.assertEqual(rewritten_details.st_mode & 0o777, 0o640)
+            self.assertEqual(
+                (rewritten_details.st_uid, rewritten_details.st_gid), original_owner
             )
 
     def test_live_image_capture_accepts_scaled_services_and_records_topology(self):
@@ -439,6 +447,73 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(host.candidate_image_ids, candidates)
             self.assertEqual(run.call_count, len(config.auth_services))
 
+    def test_previous_images_are_pinned_before_candidate_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            host = DockerHost(config)
+            bundle = make_bundle(root)
+            host.previous_images = {
+                service: (
+                    "sha256:" + str(index) * 64,
+                    f"aa-docker-{service}:latest",
+                )
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            pins = {
+                service: (
+                    f"buh-platform-v2-rollback:{bundle.request.attempt_id}-{index}"
+                )
+                for index, service in enumerate(config.auth_services)
+            }
+            pin_images = {
+                pins[service]: image
+                for service, (image, _reference) in host.previous_images.items()
+            }
+
+            def pin_image(arguments, **_kwargs):
+                if arguments[:4] == ["docker", "image", "inspect", "--format"]:
+                    return pin_images[arguments[-1]] + "\n"
+                return ""
+
+            with mock.patch.object(host, "_run", side_effect=pin_image) as run:
+                host._pin_previous_images(bundle)
+
+            self.assertEqual(host.previous_image_pins, pins)
+            self.assertEqual(
+                run.call_args_list,
+                [
+                    call
+                    for service in config.auth_services
+                    for call in (
+                        mock.call(
+                            [
+                                "docker",
+                                "image",
+                                "tag",
+                                host.previous_images[service][0],
+                                pins[service],
+                            ],
+                            context=f"Previous image retention for {service}",
+                        ),
+                        mock.call(
+                            [
+                                "docker",
+                                "image",
+                                "inspect",
+                                "--format",
+                                "{{.Id}}",
+                                pins[service],
+                            ],
+                            context=(
+                                "Previous image retention verification for "
+                                f"{service}"
+                            ),
+                        ),
+                    )
+                ],
+            )
+
     def test_rollback_retags_exact_previous_images_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -450,7 +525,21 @@ class DockerHostContracts(unittest.TestCase):
             host.original_dockerfile = host.backup_path / "custom.dockerfile"
             host.original_local_settings = host.backup_path / "local.py"
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
-            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            host.original_local_settings.write_text(
+                (config.app_dir / config.local_settings).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            host.original_local_settings.chmod(0o600)
+            local_settings = config.app_dir / config.local_settings
+            local_settings.chmod(0o640)
+            original_local_owner = (
+                local_settings.stat().st_uid,
+                local_settings.stat().st_gid,
+            )
+            host.original_local_settings_metadata = (
+                *original_local_owner,
+                local_settings.stat().st_mode & 0o777,
+            )
             host.previous_images = {
                 service: (
                     "sha256:" + str(index) * 64,
@@ -458,8 +547,22 @@ class DockerHostContracts(unittest.TestCase):
                 )
                 for index, service in enumerate(config.auth_services, start=1)
             }
+            previous_image_pins = {
+                service: f"buh-platform-v2-rollback:gh-test-{index}"
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            host.previous_image_pins = previous_image_pins.copy()
 
-            with mock.patch.object(host, "_run", return_value="") as run, mock.patch.object(
+            def restore_image(arguments, **_kwargs):
+                if arguments[:4] == ["docker", "image", "inspect", "--format"]:
+                    service = arguments[-1].removeprefix("aa-docker-").removesuffix(
+                        ":latest"
+                    )
+                    index = config.auth_services.index(service) + 1
+                    return "sha256:" + str(index) * 64 + "\n"
+                return ""
+
+            with mock.patch.object(host, "_run", side_effect=restore_image) as run, mock.patch.object(
                 host, "_compose", return_value=""
             ) as compose:
                 recovery = host.rollback(make_bundle(root), "validated")
@@ -468,23 +571,57 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(
                 run.call_args_list,
                 [
-                    mock.call(
-                        [
-                            "docker",
-                            "image",
-                            "tag",
-                            "sha256:" + str(index) * 64,
-                            f"aa-docker-{service}:latest",
-                        ],
-                        context=f"Previous image reference restoration for {service}",
-                    )
+                    call
                     for index, service in enumerate(config.auth_services, start=1)
+                    for call in (
+                        mock.call(
+                            [
+                                "docker",
+                                "image",
+                                "tag",
+                                previous_image_pins[service],
+                                f"aa-docker-{service}:latest",
+                            ],
+                            context=f"Previous image reference restoration for {service}",
+                        ),
+                        mock.call(
+                            [
+                                "docker",
+                                "image",
+                                "inspect",
+                                "--format",
+                                "{{.Id}}",
+                                f"aa-docker-{service}:latest",
+                            ],
+                            context=f"Previous image reference verification for {service}",
+                        ),
+                    )
+                ]
+                + [
+                    mock.call(
+                        ["docker", "image", "rm", previous_image_pins[service]],
+                        context="Temporary rollback image tag cleanup",
+                    )
+                    for service in config.auth_services
                 ],
             )
+            self.assertEqual(host.previous_image_pins, {})
             compose.assert_not_called()
             self.assertEqual(
                 (config.app_dir / config.custom_dockerfile).read_text(), "FROM restored\n"
             )
+            restored_local_details = local_settings.stat()
+            self.assertEqual(restored_local_details.st_mode & 0o777, 0o640)
+            self.assertEqual(
+                (restored_local_details.st_uid, restored_local_details.st_gid),
+                original_local_owner,
+            )
+
+            local_settings.chmod(0o600)
+            with self.assertRaisesRegex(
+                DeploymentError, "ownership or permissions changed"
+            ):
+                host._restore_candidate_configuration()
 
     def test_candidate_restore_retags_a_shared_reference_once(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -497,7 +634,16 @@ class DockerHostContracts(unittest.TestCase):
             host.original_dockerfile = host.backup_path / "custom.dockerfile"
             host.original_local_settings = host.backup_path / "local.py"
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
-            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            host.original_local_settings.write_text(
+                (config.app_dir / config.local_settings).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            local_details = (config.app_dir / config.local_settings).stat()
+            host.original_local_settings_metadata = (
+                local_details.st_uid,
+                local_details.st_gid,
+                local_details.st_mode & 0o777,
+            )
             shared = ("sha256:" + "a" * 64, "aa-docker-allianceauth:latest")
             host.previous_images = {
                 service: (
@@ -511,7 +657,16 @@ class DockerHostContracts(unittest.TestCase):
                 for index, service in enumerate(config.auth_services, start=1)
             }
 
-            with mock.patch.object(host, "_run", return_value="") as run:
+            reference_images = {
+                reference: image for image, reference in host.previous_images.values()
+            }
+
+            def restore_image(arguments, **_kwargs):
+                if arguments[:4] == ["docker", "image", "inspect", "--format"]:
+                    return reference_images[arguments[-1]] + "\n"
+                return ""
+
+            with mock.patch.object(host, "_run", side_effect=restore_image) as run:
                 self.assertTrue(host._restore_candidate_configuration())
 
             self.assertEqual(
@@ -524,19 +679,53 @@ class DockerHostContracts(unittest.TestCase):
                             f"{config.auth_services[0]}"
                         ),
                     ),
+                    mock.call(
+                        [
+                            "docker",
+                            "image",
+                            "inspect",
+                            "--format",
+                            "{{.Id}}",
+                            shared[1],
+                        ],
+                        context=(
+                            "Previous image reference verification for "
+                            f"{config.auth_services[0]}"
+                        ),
+                    ),
                     *[
-                        mock.call(
-                            [
-                                "docker",
-                                "image",
-                                "tag",
-                                "sha256:" + str(index) * 64,
-                                f"aa-docker-{service}:latest",
-                            ],
-                            context=f"Previous image reference restoration for {service}",
-                        )
+                        call
                         for index, service in enumerate(
                             config.auth_services[2:], start=3
+                        )
+                        for call in (
+                            mock.call(
+                                [
+                                    "docker",
+                                    "image",
+                                    "tag",
+                                    "sha256:" + str(index) * 64,
+                                    f"aa-docker-{service}:latest",
+                                ],
+                                context=(
+                                    "Previous image reference restoration for "
+                                    f"{service}"
+                                ),
+                            ),
+                            mock.call(
+                                [
+                                    "docker",
+                                    "image",
+                                    "inspect",
+                                    "--format",
+                                    "{{.Id}}",
+                                    f"aa-docker-{service}:latest",
+                                ],
+                                context=(
+                                    "Previous image reference verification for "
+                                    f"{service}"
+                                ),
+                            ),
                         )
                     ],
                 ],
@@ -553,7 +742,16 @@ class DockerHostContracts(unittest.TestCase):
             host.original_dockerfile = host.backup_path / "custom.dockerfile"
             host.original_local_settings = host.backup_path / "local.py"
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
-            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            host.original_local_settings.write_text(
+                (config.app_dir / config.local_settings).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            local_details = (config.app_dir / config.local_settings).stat()
+            host.original_local_settings_metadata = (
+                local_details.st_uid,
+                local_details.st_gid,
+                local_details.st_mode & 0o777,
+            )
             host.previous_images = {
                 service: (
                     "sha256:" + str(index) * 64,
@@ -592,7 +790,16 @@ class DockerHostContracts(unittest.TestCase):
                 ),
             )
 
-            with mock.patch.object(host, "_run", return_value=""), mock.patch.object(
+            reference_images = {
+                reference: image for image, reference in host.previous_images.values()
+            }
+
+            def restore_image(arguments, **_kwargs):
+                if arguments[:4] == ["docker", "image", "inspect", "--format"]:
+                    return reference_images[arguments[-1]] + "\n"
+                return ""
+
+            with mock.patch.object(host, "_run", side_effect=restore_image), mock.patch.object(
                 host, "_compose", return_value=""
             ) as compose:
                 recovery = host.rollback(make_bundle(root), "migrated")
