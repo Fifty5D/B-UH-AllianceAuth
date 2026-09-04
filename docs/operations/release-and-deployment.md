@@ -119,6 +119,16 @@ The Platform v2 host Dockerfile also installs one verified wheel per layer in a
 stable order: third-party and unchanged wheels first, changed owned wheels last.
 Most application-only releases therefore rebuild only the final small layers.
 The candidate is still built and checked before live containers are replaced.
+Each verified wheel is force-reinstalled from its SHA-256-bound bytes, even when
+the distribution version matches the live image. Wheel files remain in their
+immutable build layer because a later non-root layer cannot remove a root-owned
+`COPY`, and deleting them later would not reduce image size.
+
+Production preflight executes the same cached candidate build, package-version
+probe, Django checks, and migration plan as deployment. It then restores the
+exact preflight image ID to every prior Compose image reference without restarting
+live containers. A deployment rollback uses that captured image ID as well, so it
+does not depend on rebuilding old source after a failure.
 
 ## Database and rollback safety
 
@@ -163,6 +173,11 @@ Diagnostic collection may fail independently of application health, but the
 workflow must remain unsuccessful and the release must not be declared live
 until verification is recovered. Do not automatically restore a healthy database
 solely because the read-only observer path failed.
+
+Every workflow attempt also retrieves exactly its own root-owned, bounded attempt
+journal through the read-only observer. The retained, host-redacted report keeps
+the first-line failure plus a bounded diagnostic tail, avoiding ambiguous
+"build failed" reports without exposing arbitrary host files.
 
 ## Temporary visual preview
 
