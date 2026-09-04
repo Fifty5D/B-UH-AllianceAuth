@@ -298,22 +298,34 @@ jobs:
         run: |
           set -Eeuo pipefail
           : >artifacts/diagnostics.raw.txt
+          : >artifacts/attempt.raw.txt
           set +e
           ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
             "${OBSERVER_USER}@${VPS_HOST}" "diagnostics 15" \
             >artifacts/diagnostics.raw.txt 2>&1
-          code=$?
+          diagnostics_code=$?
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
+            "${OBSERVER_USER}@${VPS_HOST}" \
+            "attempt gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >artifacts/attempt.raw.txt 2>&1
+          attempt_code=$?
           set -e
-          echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
+          echo "diagnostics_exit_code=${diagnostics_code}" >>"${GITHUB_OUTPUT}"
+          echo "attempt_exit_code=${attempt_code}" >>"${GITHUB_OUTPUT}"
 
       - name: Sanitize and validate retained diagnostics
         id: sanitize
         if: always()
         run: |
           set -Eeuo pipefail
-          for source in artifacts/receiver.raw.txt artifacts/diagnostics.raw.txt; do
+          for source in \
+            artifacts/receiver.raw.txt \
+            artifacts/diagnostics.raw.txt \
+            artifacts/attempt.raw.txt; do
             target="${source/.raw/}"
             python3 ops/buh-redact-diagnostics.py "${source}" >"${target}"
             python3 ops/buh-redact-diagnostics.py --validate "${target}"
@@ -346,17 +358,20 @@ jobs:
           path: |
             artifacts/receiver.txt
             artifacts/diagnostics.txt
+            artifacts/attempt.txt
           if-no-files-found: error
           retention-days: 7
 
       - name: Require receiver, observer, and sanitization success
         if: always()
         env:
-          OBSERVER_EXIT: ${{ steps.observer.outputs.exit_code }}
+          DIAGNOSTICS_EXIT: ${{ steps.observer.outputs.diagnostics_exit_code }}
+          ATTEMPT_EXIT: ${{ steps.observer.outputs.attempt_exit_code }}
           RECEIVER_EXIT: ${{ steps.receiver.outputs.exit_code }}
           SANITIZE_OUTCOME: ${{ steps.sanitize.outcome }}
         run: |
           set -Eeuo pipefail
           [[ "${RECEIVER_EXIT}" == "0" ]]
-          [[ "${OBSERVER_EXIT}" == "0" ]]
+          [[ "${DIAGNOSTICS_EXIT}" == "0" ]]
+          [[ "${ATTEMPT_EXIT}" == "0" ]]
           [[ "${SANITIZE_OUTCOME}" == "success" ]]
