@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .contracts import (
     IMAGE_DIGEST_RE,
@@ -41,6 +41,7 @@ SAFE_DATABASE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 SAFE_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SAFE_IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,511}$")
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
+MAX_SERVICE_REPLICAS = 128
 
 
 def _semver(value: str) -> tuple[int, int, int]:
@@ -93,6 +94,8 @@ class DockerHost:
         self.staged_release: Path | None = None
         self.previous_image_id: str | None = None
         self.previous_image_references: tuple[str, ...] = ()
+        self.auth_replica_counts: dict[str, int] = {}
+        self.live_replacement_started = False
 
     @property
     def compose_prefix(self) -> list[str]:
@@ -192,6 +195,41 @@ class DockerHost:
         return self._run(
             [*self.compose_prefix, *arguments], timeout=timeout, context=context
         )
+
+    def _running_service_containers(self, service: str, *, context: str) -> tuple[str, ...]:
+        """Return every running Compose container for a service, fail closed."""
+
+        containers = tuple(
+            line.strip()
+            for line in self._compose("ps", "-q", service, context=context).splitlines()
+            if line.strip()
+        )
+        if not containers:
+            raise DeploymentError(f"{context} found no running containers for {service}")
+        if (
+            len(containers) > MAX_SERVICE_REPLICAS
+            or len(set(containers)) != len(containers)
+            or any(not re.fullmatch(r"[0-9a-f]{12,64}", item) for item in containers)
+        ):
+            raise DeploymentError(
+                f"{context} returned invalid container identities for {service}"
+            )
+        return containers
+
+    def _auth_scale_arguments(self) -> tuple[str, ...]:
+        """Pin the live Auth replica topology during replacement and rollback."""
+
+        if set(self.auth_replica_counts) != set(self.config.auth_services):
+            raise DeploymentError("Live AllianceAuth replica counts were not captured")
+        arguments: list[str] = []
+        for service in self.config.auth_services:
+            count = self.auth_replica_counts[service]
+            if not 1 <= count <= MAX_SERVICE_REPLICAS:
+                raise DeploymentError(
+                    f"Live service {service} has an invalid replica count"
+                )
+            arguments.extend(("--scale", f"{service}={count}"))
+        return tuple(arguments)
 
     def _manage_image(self, *arguments: str, context: str) -> str:
         return self._compose(
@@ -550,65 +588,74 @@ class DockerHost:
             raise DeploymentError(f"Package versions differ in {service}")
 
     def _require_shared_image(self) -> None:
-        image_ids = {}
+        image_ids: set[str] = set()
         for service in self.config.auth_services:
-            image_id = self._compose(
-                "images", "-q", service, context=f"Image identity for {service}"
-            ).strip()
-            if not image_id:
-                raise DeploymentError(f"Compose did not resolve an image for {service}")
-            image_ids[service] = image_id
-        if len(set(image_ids.values())) != 1:
-            raise DeploymentError("AllianceAuth services do not share one candidate image")
+            containers = self._running_service_containers(
+                service, context=f"Live image container discovery for {service}"
+            )
+            expected = self.auth_replica_counts.get(service)
+            if expected is not None and len(containers) != expected:
+                raise DeploymentError(f"Live service {service} changed replica count")
+            for container in containers:
+                image_id = self._run(
+                    ["docker", "inspect", "--format", "{{.Image}}", container],
+                    context=f"Live image identity for {service}",
+                ).strip()
+                if not SAFE_IMAGE_ID_RE.fullmatch(image_id):
+                    raise DeploymentError(
+                        f"Live service {service} returned an unsafe image identity"
+                    )
+                image_ids.add(image_id)
+        if len(image_ids) != 1:
+            raise DeploymentError("Live AllianceAuth replicas do not share one image")
 
     def _capture_live_image(self) -> None:
-        """Remember the exact image and retaggable references used by live Auth."""
+        """Remember the exact image, references, and replica topology used by live Auth."""
 
         image_ids: set[str] = set()
         image_references: set[str] = set()
+        replica_counts: dict[str, int] = {}
+        seen_containers: set[str] = set()
         for service in self.config.auth_services:
-            containers = [
-                line.strip()
-                for line in self._compose(
-                    "ps", "-q", service, context=f"Live container discovery for {service}"
-                ).splitlines()
-                if line.strip()
-            ]
-            if len(containers) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", containers[0]):
-                raise DeploymentError(f"Live service {service} did not resolve to one container")
-            image_id = self._run(
-                [
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.Image}}",
-                    containers[0],
-                ],
-                context=f"Live image discovery for {service}",
-            ).strip()
-            reference = self._run(
-                [
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.Config.Image}}",
-                    containers[0],
-                ],
-                context=f"Live image reference discovery for {service}",
-            ).strip()
-            if not SAFE_IMAGE_ID_RE.fullmatch(image_id):
-                raise DeploymentError(f"Live service {service} returned an unsafe image identity")
-            if (
-                not SAFE_IMAGE_REFERENCE_RE.fullmatch(reference)
-                or "@" in reference
-            ):
-                raise DeploymentError(f"Live service {service} returned an unsafe image reference")
-            image_ids.add(image_id)
-            image_references.add(reference)
+            containers = self._running_service_containers(
+                service, context=f"Live container discovery for {service}"
+            )
+            if seen_containers.intersection(containers):
+                raise DeploymentError(
+                    "A live container resolved to more than one Auth service"
+                )
+            seen_containers.update(containers)
+            replica_counts[service] = len(containers)
+            for container in containers:
+                details = self._run(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        "{{.State.Status}}|{{.Image}}|{{.Config.Image}}",
+                        container,
+                    ],
+                    context=f"Live image discovery for {service}",
+                ).strip()
+                parts = details.split("|")
+                if len(parts) != 3 or parts[0] != "running":
+                    raise DeploymentError(f"Live service {service} has an unstable replica")
+                image_id, reference = parts[1:]
+                if not SAFE_IMAGE_ID_RE.fullmatch(image_id):
+                    raise DeploymentError(
+                        f"Live service {service} returned an unsafe image identity"
+                    )
+                if not SAFE_IMAGE_REFERENCE_RE.fullmatch(reference) or "@" in reference:
+                    raise DeploymentError(
+                        f"Live service {service} returned an unsafe image reference"
+                    )
+                image_ids.add(image_id)
+                image_references.add(reference)
         if len(image_ids) != 1:
-            raise DeploymentError("Live AllianceAuth services do not share one image")
+            raise DeploymentError("Live AllianceAuth replicas do not share one image")
         self.previous_image_id = image_ids.pop()
         self.previous_image_references = tuple(sorted(image_references))
+        self.auth_replica_counts = replica_counts
 
     def _require_candidate_image(self) -> None:
         if not self.previous_image_references:
@@ -623,7 +670,9 @@ class DockerHost:
         if len(image_ids) != 1 or not all(
             SAFE_IMAGE_ID_RE.fullmatch(image_id) for image_id in image_ids
         ):
-            raise DeploymentError("AllianceAuth services do not resolve one safe candidate image")
+            raise DeploymentError(
+                "AllianceAuth services do not resolve one safe candidate image"
+            )
 
     def _restore_candidate_configuration(self) -> bool:
         """Restore host files and retag the exact pre-attempt image without a restart."""
@@ -673,7 +722,6 @@ class DockerHost:
             timeout=self.config.command_timeout_seconds,
         )
         self._require_candidate_image()
-        self._require_shared_image()
         self._version_probe(self.config.gunicorn_service, bundle, live=False)
         self._manage_image("check", "--no-color", context="Candidate Django checks")
         self._manage_image(
@@ -911,11 +959,19 @@ class DockerHost:
             )
 
     def swap(self, bundle: ValidatedBundle) -> None:
+        scale_arguments = self._auth_scale_arguments()
+        # Compose can partially replace containers before returning an error.
+        # Mark the side effect before invoking it so rollback restores the old
+        # image and full replica topology even when the journal is still at
+        # ``migrated``.
+        self.live_replacement_started = True
         self._compose(
             "up",
             "-d",
             "--no-deps",
+            "--no-build",
             "--force-recreate",
+            *scale_arguments,
             *self.config.auth_services,
             context="AllianceAuth container replacement",
         )
@@ -924,53 +980,62 @@ class DockerHost:
         )
 
     def _containers_healthy(
-        self, services: Iterable[str], *, zero_restart_services: set[str]
+        self,
+        expected_replicas: Mapping[str, int],
+        *,
+        zero_restart_services: set[str],
     ) -> bool:
         try:
-            for service in services:
-                ids = [
-                    line.strip()
-                    for line in self._compose(
-                        "ps", "-q", service, context=f"Container discovery for {service}"
-                    ).splitlines()
-                    if line.strip()
-                ]
-                if len(ids) != 1:
+            for service, expected_count in expected_replicas.items():
+                if not 1 <= expected_count <= MAX_SERVICE_REPLICAS:
                     return False
-                state = self._run(
-                    [
-                        "docker",
-                        "inspect",
-                        "--format",
-                        "{{.State.Status}}|{{.RestartCount}}",
-                        ids[0],
-                    ],
-                    context=f"Container health for {service}",
-                ).strip()
-                status, separator, restart_count = state.partition("|")
-                if (
-                    not separator
-                    or status != "running"
-                    or not restart_count.isdigit()
-                    or (
-                        service in zero_restart_services
-                        and restart_count != "0"
-                    )
-                ):
+                ids = self._running_service_containers(
+                    service, context=f"Container discovery for {service}"
+                )
+                if len(ids) != expected_count:
                     return False
+                for container in ids:
+                    state = self._run(
+                        [
+                            "docker",
+                            "inspect",
+                            "--format",
+                            "{{.State.Status}}|{{.RestartCount}}|"
+                            "{{if .State.Health}}{{.State.Health.Status}}"
+                            "{{else}}none{{end}}",
+                            container,
+                        ],
+                        context=f"Container health for {service}",
+                    ).strip()
+                    parts = state.split("|")
+                    if (
+                        len(parts) != 3
+                        or parts[0] != "running"
+                        or not parts[1].isdigit()
+                        or parts[2] not in {"none", "healthy"}
+                        or (
+                            service in zero_restart_services
+                            and parts[1] != "0"
+                        )
+                    ):
+                        return False
             return True
         except DeploymentError:
             return False
 
     def health(self, bundle: ValidatedBundle) -> None:
-        services = [
-            *self.config.auth_services,
-            self.config.database_service,
-            self.config.redis_service,
-        ]
+        # Also validates that every configured Auth service was captured before
+        # replacement. Infrastructure services deliberately remain singleton.
+        self._auth_scale_arguments()
+        expected_replicas = {
+            **self.auth_replica_counts,
+            self.config.database_service: 1,
+            self.config.redis_service: 1,
+            self.config.proxy_service: 1,
+        }
         for _ in range(self.config.health_attempts):
             if self._containers_healthy(
-                services,
+                expected_replicas,
                 zero_restart_services=set(self.config.auth_services),
             ):
                 break
@@ -1050,12 +1115,15 @@ class DockerHost:
     def rollback(self, bundle: ValidatedBundle, last_state: str | None) -> str:
         if not self._restore_candidate_configuration():
             return "No candidate configuration was written; production was unchanged."
-        if last_state in {"swapped", "healthy"}:
+        if self.live_replacement_started or last_state in {"swapped", "healthy"}:
+            scale_arguments = self._auth_scale_arguments()
             self._compose(
                 "up",
                 "-d",
                 "--no-deps",
+                "--no-build",
                 "--force-recreate",
+                *scale_arguments,
                 *self.config.auth_services,
                 context="Rollback container replacement",
             )

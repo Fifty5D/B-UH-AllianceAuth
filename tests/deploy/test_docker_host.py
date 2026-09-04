@@ -27,6 +27,10 @@ RUNTIME_IMAGE = (
 )
 
 
+def container_id(number: int) -> str:
+    return f"{number:064x}"
+
+
 def make_config(root: Path) -> ReceiverConfig:
     source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
     app = root / "app"
@@ -232,6 +236,114 @@ class DockerHostContracts(unittest.TestCase):
                 [expected_printf] * 3,
             )
 
+    def test_live_image_capture_accepts_scaled_services_and_records_topology(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            service_counts = {
+                service: (5 if service == config.worker_service else 1)
+                for service in config.auth_services
+            }
+            service_ids: dict[str, list[str]] = {}
+            next_id = 1
+            for service, count in service_counts.items():
+                service_ids[service] = [
+                    container_id(number) for number in range(next_id, next_id + count)
+                ]
+                next_id += count
+
+            def compose(*arguments, **_kwargs):
+                self.assertEqual(arguments[:2], ("ps", "-q"))
+                return "\n".join(service_ids[arguments[-1]])
+
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host,
+                "_run",
+                return_value=(
+                    "running|sha256:" + "6" * 64 + "|aa-docker-allianceauth:latest\n"
+                ),
+            ) as run:
+                host._capture_live_image()
+
+            self.assertEqual(host.auth_replica_counts, service_counts)
+            self.assertEqual(host.previous_image_id, "sha256:" + "6" * 64)
+            self.assertEqual(
+                host.previous_image_references, ("aa-docker-allianceauth:latest",)
+            )
+            self.assertEqual(run.call_count, sum(service_counts.values()))
+
+    def test_live_image_capture_rejects_mixed_replica_images(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            service_ids = {
+                service: [container_id(index)]
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            service_ids[config.worker_service].append(container_id(99))
+
+            def compose(*arguments, **_kwargs):
+                return "\n".join(service_ids[arguments[-1]])
+
+            def inspect(arguments, **_kwargs):
+                digest = "7" if arguments[-1] == container_id(99) else "6"
+                return (
+                    f"running|sha256:{digest * 64}|aa-docker-allianceauth:latest\n"
+                )
+
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", side_effect=inspect
+            ), self.assertRaisesRegex(DeploymentError, "do not share one image"):
+                host._capture_live_image()
+
+    def test_live_image_capture_rejects_a_missing_or_duplicate_replica(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            with mock.patch.object(host, "_compose", return_value=""), self.assertRaisesRegex(
+                DeploymentError, "found no running containers"
+            ):
+                host._capture_live_image()
+
+            duplicate = container_id(1)
+            with mock.patch.object(
+                host, "_compose", return_value=f"{duplicate}\n{duplicate}\n"
+            ), self.assertRaisesRegex(DeploymentError, "invalid container identities"):
+                host._capture_live_image()
+
+    def test_shared_image_check_covers_every_scaled_replica(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            service_ids = {
+                service: [container_id(index)]
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            service_ids[config.worker_service].extend(
+                container_id(index) for index in range(10, 14)
+            )
+            host.auth_replica_counts = {
+                service: len(ids) for service, ids in service_ids.items()
+            }
+
+            def compose(*arguments, **_kwargs):
+                return "\n".join(service_ids[arguments[-1]])
+
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", return_value="sha256:" + "6" * 64 + "\n"
+            ) as run:
+                host._require_shared_image()
+            self.assertEqual(run.call_count, sum(host.auth_replica_counts.values()))
+
+            def mixed_images(arguments, **_kwargs):
+                digest = "7" if arguments[-1] == container_id(13) else "6"
+                return "sha256:" + digest * 64 + "\n"
+
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", side_effect=mixed_images
+            ), self.assertRaisesRegex(DeploymentError, "do not share one image"):
+                host._require_shared_image()
+
     def test_rollback_retags_exact_previous_image_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -268,43 +380,190 @@ class DockerHostContracts(unittest.TestCase):
                 (config.app_dir / config.custom_dockerfile).read_text(), "FROM restored\n"
             )
 
-    def test_only_recreated_auth_services_require_zero_restarts(self):
+    def test_swap_and_rollback_preserve_every_auth_replica(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            host.original_dockerfile = host.backup_path / "custom.dockerfile"
+            host.original_local_settings = host.backup_path / "local.py"
+            host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
+            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            host.previous_image_id = "sha256:" + "6" * 64
+            host.previous_image_references = ("aa-docker-auth:latest",)
+            host.auth_replica_counts = {
+                service: (5 if service == config.worker_service else 1)
+                for service in config.auth_services
+            }
+            expected_scales = tuple(
+                item
+                for service in config.auth_services
+                for item in (
+                    "--scale",
+                    f"{service}={host.auth_replica_counts[service]}",
+                )
+            )
+
+            with mock.patch.object(host, "_compose", return_value="") as compose:
+                host.swap(make_bundle(root))
+
+            self.assertTrue(host.live_replacement_started)
+            self.assertEqual(
+                compose.call_args_list[0],
+                mock.call(
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "--no-build",
+                    "--force-recreate",
+                    *expected_scales,
+                    *config.auth_services,
+                    context="AllianceAuth container replacement",
+                ),
+            )
+
+            with mock.patch.object(host, "_run", return_value=""), mock.patch.object(
+                host, "_compose", return_value=""
+            ) as compose:
+                recovery = host.rollback(make_bundle(root), "migrated")
+
+            self.assertIn("containers were restored", recovery)
+            compose.assert_any_call(
+                "up",
+                "-d",
+                "--no-deps",
+                "--no-build",
+                "--force-recreate",
+                *expected_scales,
+                *config.auth_services,
+                context="Rollback container replacement",
+            )
+
+    def test_swap_fails_closed_without_captured_replica_counts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            with self.assertRaisesRegex(DeploymentError, "replica counts were not captured"):
+                host.swap(make_bundle(Path(temporary)))
+            self.assertFalse(host.live_replacement_started)
+
+    def test_scaled_auth_health_requires_every_expected_replica(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = make_config(Path(temporary))
             host = DockerHost(config)
+            service_ids = {
+                config.gunicorn_service: [container_id(1)],
+                config.worker_service: [container_id(index) for index in range(2, 7)],
+                config.database_service: [container_id(7)],
+            }
 
             def compose(*arguments, **_kwargs):
-                return f"id-{arguments[2]}"
+                return "\n".join(service_ids[arguments[-1]])
 
             def inspect(arguments, **_kwargs):
                 container = arguments[-1]
-                if container.endswith(config.database_service):
-                    return "running|7\n"
-                return "running|0\n"
+                if container == container_id(7):
+                    return "running|7|healthy\n"
+                return "running|0|healthy\n"
 
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
                 host, "_run", side_effect=inspect
             ):
                 self.assertTrue(
                     host._containers_healthy(
-                        [config.gunicorn_service, config.database_service],
+                        {
+                            config.gunicorn_service: 1,
+                            config.worker_service: 5,
+                            config.database_service: 1,
+                        },
                         zero_restart_services=set(config.auth_services),
                     )
                 )
 
             def restarted_auth(arguments, **_kwargs):
                 container = arguments[-1]
-                return "running|1\n" if container.endswith(config.gunicorn_service) else "running|0\n"
+                if container == container_id(1):
+                    return "running|1|healthy\n"
+                return "running|0|healthy\n"
 
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
                 host, "_run", side_effect=restarted_auth
             ):
                 self.assertFalse(
                     host._containers_healthy(
-                        [config.gunicorn_service],
+                        {config.gunicorn_service: 1},
                         zero_restart_services=set(config.auth_services),
                     )
                 )
+
+            service_ids[config.worker_service].pop()
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", side_effect=inspect
+            ):
+                self.assertFalse(
+                    host._containers_healthy(
+                        {config.worker_service: 5},
+                        zero_restart_services=set(config.auth_services),
+                    )
+                )
+
+            service_ids[config.worker_service].append(container_id(6))
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", return_value="running|0|unhealthy\n"
+            ):
+                self.assertFalse(
+                    host._containers_healthy(
+                        {config.worker_service: 5},
+                        zero_restart_services=set(config.auth_services),
+                    )
+                )
+
+    def test_full_health_gate_includes_proxy_and_captured_topology(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = dataclasses.replace(make_config(root), health_attempts=1)
+            host = DockerHost(config)
+            host.auth_replica_counts = {
+                service: (5 if service == config.worker_service else 1)
+                for service in config.auth_services
+            }
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = 200
+
+            def manage(*arguments, **_kwargs):
+                return "[X] applied\n" if arguments[0] == "showmigrations" else ""
+
+            def compose(*arguments, **_kwargs):
+                return "pong\n" if "celery" in arguments else ""
+
+            with mock.patch.object(
+                host, "_containers_healthy", return_value=True
+            ) as healthy, mock.patch.object(
+                host, "_require_shared_image"
+            ), mock.patch.object(
+                host, "_version_probe"
+            ), mock.patch.object(
+                host, "_manage_live", side_effect=manage
+            ), mock.patch.object(
+                host, "_compose", side_effect=compose
+            ), mock.patch(
+                "ops.deploy.docker_host.urllib.request.urlopen", return_value=response
+            ):
+                host.health(make_bundle(root))
+
+            expected = {
+                **host.auth_replica_counts,
+                config.database_service: 1,
+                config.redis_service: 1,
+                config.proxy_service: 1,
+            }
+            self.assertEqual(healthy.call_args.args[0], expected)
+            self.assertEqual(
+                healthy.call_args.kwargs["zero_restart_services"],
+                set(config.auth_services),
+            )
 
 
 if __name__ == "__main__":
