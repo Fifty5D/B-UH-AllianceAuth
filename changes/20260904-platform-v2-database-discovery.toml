@@ -1,0 +1,4 @@
+schema_version = 1
+summary = "Discover legacy AllianceAuth databases from verified Django migration history."
+app = "platform"
+kind = "fix"

@@ -41,7 +41,10 @@ reviewed host operation.
   definition. Exact per-service images and replica counts are pinned during
   replacement and rollback, and every expected replica must pass the post-swap
   image/running/restart checks.
-- A pre-migration database dump is restored into an isolated, memory-backed
+- The application database is verified from its Django migration history, even
+  on legacy MariaDB containers that do not expose a database-name environment
+  variable. Discovery fails closed if more than one Django database is present.
+  A pre-migration database dump is then restored into an isolated, memory-backed
   MariaDB container using the exact running database image. Accounting-table and
   migration row counts must match before migration begins.
 - Preflight and deployment attempts are journaled atomically with a bounded,

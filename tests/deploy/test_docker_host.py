@@ -135,6 +135,55 @@ class DockerHostContracts(unittest.TestCase):
         self.assertIn('export MYSQL_PWD="$password"', shell)
         self.assertNotIn('MYSQL_PWD="$password" exec', shell)
 
+    def test_database_dump_uses_the_explicitly_discovered_database(self):
+        shell = DockerHost._database_dump_shell()
+        self.assertIn('database="$1"', shell)
+        self.assertNotIn("MARIADB_DATABASE:-${MYSQL_DATABASE", shell)
+
+    def test_database_discovery_accepts_a_verified_declared_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            with mock.patch.object(
+                host, "_database_query", return_value="allianceauth\n"
+            ):
+                self.assertEqual(
+                    host._application_database(
+                        container_id(1), {"MARIADB_DATABASE": "allianceauth"}
+                    ),
+                    "allianceauth",
+                )
+
+    def test_database_discovery_supports_legacy_container_without_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            with mock.patch.object(
+                host, "_database_query", return_value="allianceauth\n"
+            ):
+                self.assertEqual(
+                    host._application_database(container_id(1), {}),
+                    "allianceauth",
+                )
+
+    def test_database_discovery_fails_closed_for_ambiguous_django_schemas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            with mock.patch.object(
+                host,
+                "_database_query",
+                return_value="allianceauth\nother_django\n",
+            ), self.assertRaisesRegex(DeploymentError, "exactly one Django database"):
+                host._application_database(container_id(1), {})
+
+    def test_database_discovery_rejects_unverified_declared_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            with mock.patch.object(
+                host, "_database_query", return_value="allianceauth\n"
+            ), self.assertRaisesRegex(DeploymentError, "no Django migration history"):
+                host._application_database(
+                    container_id(1), {"MYSQL_DATABASE": "wrong_database"}
+                )
+
     def test_preflight_validates_legacy_transition_runtime_and_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

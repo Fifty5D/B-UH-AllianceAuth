@@ -915,6 +915,61 @@ class DockerHost:
             context="Database verification query",
         )
 
+    def _application_database(
+        self, container: str, environment: Mapping[str, str]
+    ) -> str:
+        declared = {
+            value.strip()
+            for name in ("MARIADB_DATABASE", "MYSQL_DATABASE")
+            if (value := environment.get(name, "")).strip()
+        }
+        if any(not SAFE_DATABASE_RE.fullmatch(name) for name in declared):
+            raise DeploymentError("Database container declares an unsafe database name")
+        if len(declared) > 1:
+            raise DeploymentError("Database container declares conflicting database names")
+
+        query = (
+            "SELECT DISTINCT TABLE_SCHEMA FROM information_schema.TABLES "
+            "WHERE TABLE_NAME='django_migrations' AND TABLE_SCHEMA NOT IN "
+            "('information_schema','mysql','performance_schema','sys') "
+            "ORDER BY TABLE_SCHEMA"
+        )
+        candidates = [
+            line.strip()
+            for line in self._database_query(container, query).splitlines()
+            if line.strip()
+        ]
+        if (
+            len(candidates) > 128
+            or len(candidates) != len(set(candidates))
+            or any(not SAFE_DATABASE_RE.fullmatch(name) for name in candidates)
+        ):
+            raise DeploymentError("Application database discovery returned unsafe results")
+
+        if declared:
+            database = next(iter(declared))
+            if database not in candidates:
+                raise DeploymentError(
+                    "Declared application database has no Django migration history"
+                )
+            return database
+        if len(candidates) != 1:
+            raise DeploymentError(
+                "Database container did not resolve to exactly one Django database"
+            )
+        return candidates[0]
+
+    @staticmethod
+    def _database_dump_shell() -> str:
+        return (
+            'database="$1"; '
+            'password="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
+            'test -n "$database"; test -n "$password"; '
+            'export MYSQL_PWD="$password"; exec mariadb-dump --user=root '
+            '--single-transaction --quick --routines --triggers --events --hex-blob '
+            '"$database"'
+        )
+
     def _evidence_counts(self, container: str, database: str) -> dict[str, int]:
         if not SAFE_DATABASE_RE.fullmatch(database):
             raise DeploymentError("Database name is unsafe")
@@ -946,9 +1001,7 @@ class DockerHost:
             raise DeploymentError("Configuration backup was not prepared")
         container = self._database_container()
         environment = self._container_environment(container)
-        database = environment.get("MARIADB_DATABASE") or environment.get("MYSQL_DATABASE")
-        if not database or not SAFE_DATABASE_RE.fullmatch(database):
-            raise DeploymentError("Database container has no safe application database name")
+        database = self._application_database(container, environment)
         image_id = self._run(
             ["docker", "inspect", "--format", "{{.Image}}", container],
             context="Database image discovery",
@@ -957,16 +1010,17 @@ class DockerHost:
             raise DeploymentError("Database container image is not content addressed")
 
         raw_path = self.backup_path / "database.sql"
-        dump_script = (
-            'database="${MARIADB_DATABASE:-${MYSQL_DATABASE:-}}"; '
-            'password="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
-            'test -n "$database"; test -n "$password"; '
-            'export MYSQL_PWD="$password"; exec mariadb-dump --user=root '
-            '--single-transaction --quick --routines --triggers --events --hex-blob '
-            '"$database"'
-        )
         self._run_to_file(
-            ["docker", "exec", container, "sh", "-ceu", dump_script],
+            [
+                "docker",
+                "exec",
+                container,
+                "sh",
+                "-ceu",
+                self._database_dump_shell(),
+                "buh-db-dump",
+                database,
+            ],
             raw_path,
             context="Pre-migration database backup",
         )
