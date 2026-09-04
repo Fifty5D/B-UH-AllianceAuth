@@ -551,6 +551,12 @@ class PlatformConfigurationContracts(TestCase):
         installer = (deploy_dir / "install-receiver.sh").read_text()
         dispatcher = (deploy_dir / "buh-deploy-dispatch").read_text()
         self.assertNotIn("authorized_keys", installer)
+        for observer_target in (
+            "/usr/local/bin/buh-github-observe-entry",
+            "/usr/local/sbin/buh-github-observe-root",
+            "/usr/local/libexec/buh-redact-diagnostics",
+        ):
+            self.assertIn(observer_target, installer)
         self.assertIn('"deploy moon-tax"', dispatcher)
         self.assertIn('"preflight platform-v2"', dispatcher)
         self.assertIn('"deploy platform-v2"', dispatcher)
