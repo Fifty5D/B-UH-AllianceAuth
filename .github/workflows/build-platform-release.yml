@@ -541,7 +541,8 @@ jobs:
     needs: candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Require first-attempt repository-owner confirmation
         env:
@@ -579,6 +580,13 @@ jobs:
             echo "The dispatch source differs from expected_source_sha." >&2
             exit 1
           }
+
+      - name: Check out the exact source for the runtime contract gate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Require a deployable production runtime contract
         run: |
