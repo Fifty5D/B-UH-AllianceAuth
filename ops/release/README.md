@@ -90,16 +90,42 @@ python ops/release/buh_release.py verify --release-dir build/release
 
 python ops/release/buh_release.py validate-install \
   --release-dir build/release
+
+GITHUB_TOKEN="$GITHUB_TOKEN" python ops/release/ledger.py verify \
+  --root . \
+  --source-commit "$GITHUB_SHA" \
+  --remote origin \
+  --release-root releases/platform \
+  --output build/release-ledger.json
 ```
+
+`ledger.py` requires a full-history checkout. It discovers strict immutable
+`release/platform-vX.Y.Z` refs from the authenticated remote, fetches their exact
+commits, verifies their sole-parent and predecessor chain, and requires every
+release directory in the selected source to be byte-identical to its published
+ref. A published release that has not yet been synchronized to `main`, a changed
+old bundle, or an unpublished local release directory fails before dependencies
+are installed or wheels are built. The canonical JSON report is pinned through
+candidate preparation and final publication so a remote-ledger change cannot be
+silently accepted midway through a run.
 
 The assembled directory contains `RELEASE.json`, `INSTALL_PLAN.json`, release
 notes, wheels, and strict SHA-256 sums. The dispatch-only
 `build-platform-release.yml` workflow can optionally add the new directory,
 version-file updates, and consumed-fragment deletions in one new release-branch
-commit whose sole parent is the tested main commit. It never writes main or
-deploys production. Unchanged wheel entries retain their previous
-`git_blob_sha`, allowing later repository operations to reference the existing
-Git object instead of uploading the wheel.
+commit whose sole parent is the tested main commit. The atomic publication also
+creates a disposable `sync/platform-vX.Y.Z` ref at that commit. It never writes
+main or deploys production. After publication it opens, but never merges, the
+exact release-state synchronization PR from the sync ref; the immutable release
+ref is never an updateable PR head. A maintainer approves that PR's queued Source
+CI run and uses a merge commit after all checks pass. Unchanged wheel entries
+retain their previous `git_blob_sha`, allowing later repository operations to
+reference the existing Git object instead of uploading the wheel.
+
+Repository policy is part of this boundary: only the reviewed publisher may
+create `release/platform-v*`, and no identity may update or delete those refs.
+Synchronization must use merge commits (never squash or rebase), while the
+disposable sync ref may move to satisfy up-to-date branch protection.
 
 Git object IDs are only a transport optimization. SHA-256, wheel metadata, and
 wheel `RECORD` validation remain the integrity checks. When a Git object ID is
