@@ -135,7 +135,9 @@ class DockerHostContracts(unittest.TestCase):
                 config.redis_service,
                 config.proxy_service,
             ]
-            with mock.patch.object(host, "_compose", return_value="\n".join(services)):
+            with mock.patch(
+                "ops.deploy.docker_host.os.geteuid", return_value=0
+            ), mock.patch.object(host, "_compose", return_value="\n".join(services)):
                 host.validate(make_bundle(root))
             self.assertEqual(config.state_dir.stat().st_mode & 0o777, 0o700)
             self.assertEqual(config.backup_dir.stat().st_mode & 0o777, 0o700)

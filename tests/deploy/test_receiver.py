@@ -46,10 +46,13 @@ class ReceiverBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             config = dataclasses.replace(source, state_dir=state)
-            first = _open_lock(config)
+            with mock.patch("ops.deploy.receiver.os.geteuid", return_value=0):
+                first = _open_lock(config)
             try:
                 self.assertEqual((state / "deploy.lock").stat().st_mode & 0o777, 0o600)
-                with self.assertRaises(LockBusy):
+                with mock.patch(
+                    "ops.deploy.receiver.os.geteuid", return_value=0
+                ), self.assertRaises(LockBusy):
                     _open_lock(config)
             finally:
                 os.close(first)
@@ -60,7 +63,9 @@ class ReceiverBoundaryTests(unittest.TestCase):
             state = Path(temporary) / "state"
             state.mkdir(mode=0o755)
             config = dataclasses.replace(source, state_dir=state)
-            with self.assertRaisesRegex(DeploymentError, "private"):
+            with mock.patch(
+                "ops.deploy.receiver.os.geteuid", return_value=0
+            ), self.assertRaisesRegex(DeploymentError, "private"):
                 _open_lock(config)
 
 
