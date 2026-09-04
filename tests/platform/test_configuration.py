@@ -569,6 +569,14 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(build_text.count("ops/release/ledger.py verify"), 5)
         self.assertEqual(build_text.count("--target-version"), 4)
         self.assertIn(".previous_release == (", build_text)
+        self.assertIn(
+            "--slurpfile plan build/publish-plan.json",
+            build_text,
+        )
+        self.assertIn(
+            "$candidate.deployment_predecessor",
+            build_text,
+        )
         self.assertIn("manifest_sha256: $state.latest.manifest_sha256", build_text)
         self.assertIn("git \"${git_auth[@]}\" push --atomic --porcelain", build_text)
         self.assertIn("refs/heads/${RELEASE_BRANCH}", build_text)
