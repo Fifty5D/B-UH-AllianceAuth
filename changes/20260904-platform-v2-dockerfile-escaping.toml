@@ -1,0 +1,6 @@
+schema_version = 1
+summary = "Preserve literal shell escapes when rendering Platform v2 Dockerfile layers."
+
+[[changes]]
+app = "platform"
+kind = "internal"
