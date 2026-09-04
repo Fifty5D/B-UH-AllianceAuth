@@ -497,6 +497,27 @@ class PlatformConfigurationContracts(TestCase):
         text = (WORKFLOWS / "build-platform-release.yml").read_text(
             encoding="utf-8"
         )
+        workflow = _load_workflow(WORKFLOWS / "build-platform-release.yml")
+        gate = workflow["jobs"]["publication_gate"]
+        steps = gate["steps"]
+        contract_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step["name"] == "Require a deployable production runtime contract"
+        )
+        checkout_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step["name"]
+            == "Check out the exact source for the runtime contract gate"
+        )
+        checkout = steps[checkout_index]
+        self.assertEqual(gate["permissions"], {"contents": "read"})
+        self.assertLess(checkout_index, contract_index)
+        self.assertEqual(
+            checkout["with"]["ref"], "${{ inputs.expected_source_sha }}"
+        )
+        self.assertFalse(checkout["with"]["persist-credentials"])
         self.assertIn("Require a deployable production runtime contract", text)
         self.assertIn('contract.get("production_runtime")', text)
         self.assertIn("production_runtime.base_image", text)
