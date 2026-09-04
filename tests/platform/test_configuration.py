@@ -476,7 +476,9 @@ class PlatformConfigurationContracts(TestCase):
             "BUH_VPS_KNOWN_HOSTS",
             '"${MODE} platform-v2"',
             '"${RECEIVER_EXIT}" == "0"',
-            '"${OBSERVER_EXIT}" == "0"',
+            '"${DIAGNOSTICS_EXIT}" == "0"',
+            '"${ATTEMPT_EXIT}" == "0"',
+            '"attempt gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
             "ops/buh-redact-diagnostics.py --validate",
         ):
             self.assertIn(required, text)
