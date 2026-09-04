@@ -97,6 +97,33 @@ jobs:
                   print(f"{name}={value}", file=output)
           PY
 
+  release_ledger:
+    name: Immutable release ledger
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out complete source history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require synchronized immutable release history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          python3 ops/release/ledger.py verify \
+            --root . \
+            --source-commit "${SOURCE_SHA}" \
+            --remote origin \
+            --release-root releases/platform \
+            --output "${RUNNER_TEMP}/source-release-state.json" >/dev/null
+
   fast:
     name: Fast source checks
     needs: configuration
@@ -496,7 +523,7 @@ jobs:
   required:
     name: Required source checks
     if: always()
-    needs: [configuration, fast, integration, upgrade, browser]
+    needs: [configuration, release_ledger, fast, integration, upgrade, browser]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -506,6 +533,7 @@ jobs:
           CONFIGURATION_RESULT: ${{ needs.configuration.result }}
           FAST_RESULT: ${{ needs.fast.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          RELEASE_LEDGER_RESULT: ${{ needs.release_ledger.result }}
           UPGRADE_RESULT: ${{ needs.upgrade.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
         run: |
@@ -513,6 +541,7 @@ jobs:
           failed=0
           for entry in \
             "configuration:${CONFIGURATION_RESULT}" \
+            "release-ledger:${RELEASE_LEDGER_RESULT}" \
             "fast:${FAST_RESULT}" \
             "integration:${INTEGRATION_RESULT}" \
             "upgrade:${UPGRADE_RESULT}" \
