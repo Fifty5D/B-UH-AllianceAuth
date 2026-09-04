@@ -39,6 +39,7 @@ FATAL_LOG_RE = re.compile(
 )
 SAFE_DATABASE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 SAFE_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SAFE_IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,511}$")
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
 
 
@@ -90,6 +91,8 @@ class DockerHost:
         self.original_dockerfile: Path | None = None
         self.original_local_settings: Path | None = None
         self.staged_release: Path | None = None
+        self.previous_image_id: str | None = None
+        self.previous_image_references: tuple[str, ...] = ()
 
     @property
     def compose_prefix(self) -> list[str]:
@@ -461,8 +464,8 @@ class DockerHost:
                     f"      '{digest}' '/tmp/buh-platform-v2/{filename}' \\",
                     "      | sha256sum --check --strict - \\",
                     "    && python3 -m pip install --no-cache-dir --no-deps \\",
-                    f"      /tmp/buh-platform-v2/{filename} \\",
-                    f"    && rm -f /tmp/buh-platform-v2/{filename}",
+                    "      --force-reinstall \\",
+                    f"      /tmp/buh-platform-v2/{filename}",
                 ]
             )
         lines.append(
@@ -558,6 +561,93 @@ class DockerHost:
         if len(set(image_ids.values())) != 1:
             raise DeploymentError("AllianceAuth services do not share one candidate image")
 
+    def _capture_live_image(self) -> None:
+        """Remember the exact image and retaggable references used by live Auth."""
+
+        image_ids: set[str] = set()
+        image_references: set[str] = set()
+        for service in self.config.auth_services:
+            containers = [
+                line.strip()
+                for line in self._compose(
+                    "ps", "-q", service, context=f"Live container discovery for {service}"
+                ).splitlines()
+                if line.strip()
+            ]
+            if len(containers) != 1 or not re.fullmatch(r"[0-9a-f]{12,64}", containers[0]):
+                raise DeploymentError(f"Live service {service} did not resolve to one container")
+            image_id = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.Image}}",
+                    containers[0],
+                ],
+                context=f"Live image discovery for {service}",
+            ).strip()
+            reference = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.Config.Image}}",
+                    containers[0],
+                ],
+                context=f"Live image reference discovery for {service}",
+            ).strip()
+            if not SAFE_IMAGE_ID_RE.fullmatch(image_id):
+                raise DeploymentError(f"Live service {service} returned an unsafe image identity")
+            if (
+                not SAFE_IMAGE_REFERENCE_RE.fullmatch(reference)
+                or "@" in reference
+            ):
+                raise DeploymentError(f"Live service {service} returned an unsafe image reference")
+            image_ids.add(image_id)
+            image_references.add(reference)
+        if len(image_ids) != 1:
+            raise DeploymentError("Live AllianceAuth services do not share one image")
+        self.previous_image_id = image_ids.pop()
+        self.previous_image_references = tuple(sorted(image_references))
+
+    def _require_candidate_image(self) -> None:
+        if not self.previous_image_references:
+            raise DeploymentError("Candidate image references were not captured")
+        image_ids = {
+            self._run(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", reference],
+                context="Candidate image identity verification",
+            ).strip()
+            for reference in self.previous_image_references
+        }
+        if len(image_ids) != 1 or not all(
+            SAFE_IMAGE_ID_RE.fullmatch(image_id) for image_id in image_ids
+        ):
+            raise DeploymentError("AllianceAuth services do not resolve one safe candidate image")
+
+    def _restore_candidate_configuration(self) -> bool:
+        """Restore host files and retag the exact pre-attempt image without a restart."""
+
+        if (
+            self.original_dockerfile is None
+            or self.original_local_settings is None
+            or self.backup_path is None
+        ):
+            return False
+        dockerfile = self.config.app_dir / self.config.custom_dockerfile
+        local_settings = self.config.app_dir / self.config.local_settings
+        shutil.copy2(self.original_dockerfile, dockerfile)
+        shutil.copy2(self.original_local_settings, local_settings)
+        if self.previous_image_id is not None:
+            if not self.previous_image_references:
+                raise DeploymentError("The previous image has no restorable reference")
+            for reference in self.previous_image_references:
+                self._run(
+                    ["docker", "image", "tag", self.previous_image_id, reference],
+                    context="Previous AllianceAuth image reference restoration",
+                )
+        return True
+
     def prepare_candidate(self, bundle: ValidatedBundle) -> None:
         self.backup_path = self.config.backup_dir / bundle.request.attempt_id
         self.backup_path.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -570,6 +660,7 @@ class DockerHost:
         self.original_dockerfile.chmod(0o600)
         self.original_local_settings.chmod(0o600)
 
+        self._capture_live_image()
         self.staged_release = self._stage_release(bundle)
         self._write_candidate_dockerfile(bundle)
         self._compose(
@@ -581,6 +672,7 @@ class DockerHost:
             context="Cached candidate image build",
             timeout=self.config.command_timeout_seconds,
         )
+        self._require_candidate_image()
         self._require_shared_image()
         self._version_probe(self.config.gunicorn_service, bundle, live=False)
         self._manage_image("check", "--no-color", context="Candidate Django checks")
@@ -956,22 +1048,9 @@ class DockerHost:
         _atomic_text(path, canonical_json_bytes(marker).decode("ascii"), 0o644)
 
     def rollback(self, bundle: ValidatedBundle, last_state: str | None) -> str:
-        if (
-            self.original_dockerfile is None
-            or self.original_local_settings is None
-            or self.backup_path is None
-        ):
+        if not self._restore_candidate_configuration():
             return "No candidate configuration was written; production was unchanged."
-        dockerfile = self.config.app_dir / self.config.custom_dockerfile
-        local_settings = self.config.app_dir / self.config.local_settings
-        shutil.copy2(self.original_dockerfile, dockerfile)
-        shutil.copy2(self.original_local_settings, local_settings)
         if last_state in {"swapped", "healthy"}:
-            self._compose(
-                "build",
-                *self.config.auth_services,
-                context="Rollback image rebuild",
-            )
             self._compose(
                 "up",
                 "-d",
@@ -984,7 +1063,7 @@ class DockerHost:
                 "restart", self.config.proxy_service, context="Rollback proxy restart"
             )
             return (
-                "Previous application containers were restored. Database migrations were "
+                "Previous application image and containers were restored. Database migrations were "
                 "not reversed; retain and verify the pre-migration backup before any restore."
             )
         if last_state in {"backed_up", "migrated"}:

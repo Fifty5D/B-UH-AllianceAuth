@@ -131,6 +131,14 @@ class PlatformConfigurationContracts(TestCase):
                 self.assertNotRegex(image, r"(?i)(?::|@)latest(?:$|[-.])")
                 self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
 
+    def test_platform_release_fingerprint_covers_observer_boundary(self):
+        with (ROOT / "ops" / "release" / "apps.toml").open("rb") as stream:
+            registry = tomllib.load(stream)
+        inputs = set(registry["platform"]["platform_build_inputs"])
+        self.assertIn("ops/bootstrap-observer.sh", inputs)
+        self.assertIn("ops/buh-github-observe-*", inputs)
+        self.assertIn("ops/deploy/**/*", inputs)
+
     def test_production_runtime_is_pinned_to_the_observed_allianceauth_image(self):
         runtime = self.compatibility["production_runtime"]
         self.assertEqual(set(runtime), {"base_image"})
@@ -468,7 +476,9 @@ class PlatformConfigurationContracts(TestCase):
             "BUH_VPS_KNOWN_HOSTS",
             '"${MODE} platform-v2"',
             '"${RECEIVER_EXIT}" == "0"',
-            '"${OBSERVER_EXIT}" == "0"',
+            '"${DIAGNOSTICS_EXIT}" == "0"',
+            '"${ATTEMPT_EXIT}" == "0"',
+            '"attempt gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
             "ops/buh-redact-diagnostics.py --validate",
         ):
             self.assertIn(required, text)
@@ -541,6 +551,12 @@ class PlatformConfigurationContracts(TestCase):
         installer = (deploy_dir / "install-receiver.sh").read_text()
         dispatcher = (deploy_dir / "buh-deploy-dispatch").read_text()
         self.assertNotIn("authorized_keys", installer)
+        for observer_target in (
+            "/usr/local/bin/buh-github-observe-entry",
+            "/usr/local/sbin/buh-github-observe-root",
+            "/usr/local/libexec/buh-redact-diagnostics",
+        ):
+            self.assertIn(observer_target, installer)
         self.assertIn('"deploy moon-tax"', dispatcher)
         self.assertIn('"preflight platform-v2"', dispatcher)
         self.assertIn('"deploy platform-v2"', dispatcher)

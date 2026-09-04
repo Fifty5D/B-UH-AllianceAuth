@@ -19,7 +19,12 @@ from .contracts import (
     read_bounded_stream,
 )
 from .docker_host import DockerHost
-from .engine import DeploymentEngine, DeploymentJournal
+from .engine import (
+    DeploymentEngine,
+    DeploymentJournal,
+    PreflightEngine,
+    PreflightJournal,
+)
 
 
 COMMANDS = {
@@ -121,7 +126,8 @@ def receive(
                 )
             host = DockerHost(config)
             if forced_mode == "preflight":
-                host.validate(bundle)
+                journal = PreflightJournal(config.state_dir, bundle)
+                PreflightEngine(host, journal).run(bundle)
                 return {
                     "schema_version": 1,
                     "result": "preflight-passed",

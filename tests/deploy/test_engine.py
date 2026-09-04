@@ -14,6 +14,8 @@ from ops.deploy.engine import (
     DEPLOYMENT_STATES,
     DeploymentEngine,
     DeploymentJournal,
+    PreflightEngine,
+    PreflightJournal,
 )
 
 
@@ -75,6 +77,41 @@ class FakeBackend:
 
 
 class DeploymentEngineTests(unittest.TestCase):
+    def test_preflight_builds_candidate_then_restores_without_mutation_steps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = make_bundle(root)
+            journal = PreflightJournal(root / "state", bundle)
+            backend = FakeBackend()
+            PreflightEngine(backend, journal).run(bundle)
+
+            self.assertEqual(
+                backend.calls,
+                ["validate", "prepare_candidate", "rollback:validated"],
+            )
+            record = json.loads(journal.path.read_text())
+            self.assertEqual(record["operation"], "preflight")
+            self.assertEqual(record["state"], "candidate_validated")
+            self.assertEqual(record["result"], "success")
+            self.assertFalse((root / "state/current.json").exists())
+
+    def test_preflight_build_failure_is_retained_and_restored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = make_bundle(root)
+            journal = PreflightJournal(root / "state", bundle)
+            backend = FakeBackend("prepare_candidate")
+            with self.assertRaisesRegex(DeploymentError, "prepare_candidate"):
+                PreflightEngine(backend, journal).run(bundle)
+
+            self.assertEqual(
+                backend.calls,
+                ["validate", "prepare_candidate", "rollback:validated"],
+            )
+            record = json.loads(journal.path.read_text())
+            self.assertEqual(record["result"], "failed")
+            self.assertIn("synthetic prepare_candidate failure", record["failure_detail"])
+
     def test_success_records_every_state_before_publishing_current(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -114,6 +151,7 @@ class DeploymentEngineTests(unittest.TestCase):
                     DeploymentEngine(backend, journal).run(bundle)
                 record = json.loads(journal.path.read_text())
                 self.assertEqual(record["result"], "failed")
+                self.assertIn(f"synthetic {failed_step} failure", record["failure_detail"])
                 self.assertIn("recovered", record["recovery"])
                 self.assertTrue(backend.calls[-1].startswith("rollback:"))
                 self.assertFalse((root / "state/current.json").exists())
