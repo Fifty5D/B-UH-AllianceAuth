@@ -441,6 +441,7 @@ class PlatformConfigurationContracts(TestCase):
         )
         for job in (
             "configuration",
+            "release_ledger",
             "fast",
             "integration",
             "upgrade",
@@ -449,13 +450,151 @@ class PlatformConfigurationContracts(TestCase):
         ):
             self.assertRegex(text, rf"(?m)^  {re.escape(job)}:\s*$")
         self.assertIn(
-            "needs: [configuration, fast, integration, upgrade, browser]",
+            "needs: [configuration, release_ledger, fast, integration, upgrade, browser]",
             text,
         )
+        self.assertIn('"release-ledger:${RELEASE_LEDGER_RESULT}"', text)
         self.assertIn('"upgrade:${UPGRADE_RESULT}"', text)
         self.assertIn('if: always()', text)
         self.assertIn('"${result}" != "success"', text)
         self.assertIn("Multiline workflow output is forbidden", text)
+
+    def test_release_ledger_is_checked_early_and_pinned_through_publication(self):
+        build = _load_workflow(WORKFLOWS / "build-platform-release.yml")
+        self.assertEqual(
+            build["concurrency"],
+            {
+                "group": (
+                    "${{ inputs.publish_release_branch && "
+                    "'buh-platform-release-publication' || "
+                    "format('buh-platform-release-candidate-{0}', github.run_id) }}"
+                ),
+                "queue": "max",
+                "cancel-in-progress": False,
+            },
+        )
+
+        candidate = build["jobs"]["candidate"]
+        candidate_steps = candidate["steps"]
+        candidate_names = [step["name"] for step in candidate_steps]
+        checkout = candidate_steps[0]
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+        ledger_index = candidate_names.index(
+            "Verify the synchronized immutable release ledger"
+        )
+        plan_index = candidate_names.index("Plan changed applications and versions")
+        pin_index = candidate_names.index(
+            "Pin the planned release target to the verified ledger"
+        )
+        setup_index = candidate_names.index("Set up Python")
+        dependency_index = candidate_names.index(
+            "Install bounded native build prerequisites"
+        )
+        self.assertLess(ledger_index, plan_index)
+        self.assertLess(plan_index, pin_index)
+        self.assertLess(pin_index, setup_index)
+        self.assertLess(pin_index, dependency_index)
+        self.assertIn(
+            "build/release-state.json",
+            next(
+                step
+                for step in candidate_steps
+                if step["name"] == "Upload the verified candidate"
+            )["with"]["path"],
+        )
+
+        prepare_names = [
+            step["name"]
+            for step in build["jobs"]["prepare_publication"]["steps"]
+        ]
+        self.assertLess(
+            prepare_names.index("Reverify the candidate's pinned release ledger"),
+            prepare_names.index("Reconstruct and verify the delta candidate"),
+        )
+        publish = build["jobs"]["publish"]
+        self.assertEqual(publish["permissions"], {"contents": "write"})
+        publish_names = [step["name"] for step in publish["steps"]]
+        self.assertLess(
+            publish_names.index("Reverify the pinned release ledger before publication"),
+            publish_names.index(
+                "Validate payload and reconstruct the exact release commit"
+            ),
+        )
+        self.assertEqual(
+            publish_names[-1],
+            "Atomically create the absent release and synchronization branches",
+        )
+        self.assertEqual(
+            set(publish["outputs"]),
+            {"release_branch", "release_commit", "sync_branch"},
+        )
+
+        synchronize = build["jobs"]["synchronize_release"]
+        self.assertEqual(synchronize["needs"], ["candidate", "publish"])
+        self.assertEqual(
+            synchronize["permissions"],
+            {"contents": "read", "pull-requests": "write"},
+        )
+        self.assertEqual(synchronize["steps"][0]["with"]["fetch-depth"], 1)
+        sync_step = synchronize["steps"][1]
+        self.assertEqual(
+            sync_step["name"],
+            "Open or recover the exact synchronization pull request",
+        )
+        self.assertIn("ops/release/open_sync_pr.py", sync_step["run"])
+        self.assertIn("--release-branch", sync_step["run"])
+        self.assertIn("--sync-branch", sync_step["run"])
+        release_tree_step = next(
+            step
+            for step in build["jobs"]["prepare_publication"]["steps"]
+            if step["name"] == "Construct and validate the append-only release tree"
+        )
+        self.assertIn("path.read_bytes()", release_tree_step["run"])
+        self.assertIn('_replace_version(path, update["to"])', release_tree_step["run"])
+        self.assertNotIn("path.read_text(", release_tree_step["run"])
+        self.assertNotIn("path.write_text(", release_tree_step["run"])
+        build_text = (WORKFLOWS / "build-platform-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "sha256sum metadata.json release-state.json release.patch >SHA256SUMS",
+            build_text,
+        )
+        self.assertIn(
+            "expected_files=(SHA256SUMS metadata.json release-state.json release.patch)",
+            build_text,
+        )
+        self.assertEqual(build_text.count("ops/release/ledger.py verify"), 5)
+        self.assertEqual(build_text.count("--target-version"), 4)
+        self.assertIn(".previous_release == (", build_text)
+        self.assertIn("manifest_sha256: $state.latest.manifest_sha256", build_text)
+        self.assertIn("git \"${git_auth[@]}\" push --atomic --porcelain", build_text)
+        self.assertIn("refs/heads/${RELEASE_BRANCH}", build_text)
+        self.assertIn("refs/heads/${SYNC_BRANCH}", build_text)
+        self.assertIn("platform-release-refs-before.tsv", build_text)
+        self.assertIn("platform-release-refs-after.tsv", build_text)
+        self.assertIn("expected_refs_after", build_text)
+        self.assertIn("release_snapshot_failure", build_text)
+        self.assertIn("read_remote_refs()", build_text)
+        self.assertIn("timeout --signal=TERM 30s", build_text)
+        self.assertIn(
+            "timeout --signal=TERM --kill-after=10s 120s", build_text
+        )
+        self.assertIn("trap post_push_unexpected_error ERR TERM", build_text)
+        helper_text = (ROOT / "ops" / "release" / "open_sync_pr.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Merge only after Source CI passes", helper_text)
+        self.assertNotIn("/merges", build_text)
+        self.assertNotIn("/merges", helper_text)
+
+        source = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
+        ledger = source["jobs"]["release_ledger"]
+        self.assertEqual(ledger["permissions"], {"contents": "read"})
+        self.assertEqual(ledger["steps"][0]["with"]["fetch-depth"], 0)
+        self.assertIn(
+            "release_ledger", source["jobs"]["required"]["needs"]
+        )
 
     def test_platform_v2_deploy_remains_manual_guarded_and_fail_closed(self):
         text = (WORKFLOWS / "deploy-platform-v2.yml").read_text(encoding="utf-8")
