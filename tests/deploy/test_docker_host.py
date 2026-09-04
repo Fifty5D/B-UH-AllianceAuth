@@ -130,6 +130,86 @@ def write_host_files(config: ReceiverConfig) -> None:
 
 
 class DockerHostContracts(unittest.TestCase):
+    def test_compose_prefix_preserves_every_host_overlay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            overlay = Path("docker-compose.buh-vps-health.yml")
+            (config.app_dir / overlay).write_text("services: {}\n", encoding="utf-8")
+            (config.app_dir / config.env_file).write_text(
+                f"AA_DOCKER_TAG={RUNTIME_IMAGE}\n"
+                f"COMPOSE_FILE={config.compose_file.as_posix()}:{overlay.as_posix()}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                DockerHost(config).compose_prefix,
+                [
+                    "docker",
+                    "compose",
+                    "--env-file",
+                    str(config.env_file),
+                    "-f",
+                    str(config.compose_file),
+                    "-f",
+                    str(overlay),
+                ],
+            )
+
+    def test_compose_prefix_uses_configured_base_without_compose_file_env(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+
+            self.assertEqual(
+                DockerHost(config).compose_prefix[-2:],
+                ["-f", str(config.compose_file)],
+            )
+
+    def test_compose_stack_rejects_missing_unsafe_or_incomplete_overlays(self):
+        cases = (
+            (
+                "docker-compose.yml:missing.yml",
+                "missing.yml is not a regular in-tree file",
+            ),
+            ("docker-compose.yml:../escape.yml", "unsafe path"),
+            ("docker-compose.yml:docker-compose.yml", "duplicate files"),
+            ("docker-compose.buh-vps-health.yml", "configured base file"),
+            ("docker-compose.yml:", "invalid number of files"),
+        )
+        for compose_files, message in cases:
+            with self.subTest(compose_files=compose_files), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = make_config(root)
+                write_host_files(config)
+                (config.app_dir / "docker-compose.buh-vps-health.yml").write_text(
+                    "services: {}\n", encoding="utf-8"
+                )
+                (config.app_dir / config.env_file).write_text(
+                    f"AA_DOCKER_TAG={RUNTIME_IMAGE}\nCOMPOSE_FILE={compose_files}\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(DeploymentError, message):
+                    DockerHost(config).compose_prefix
+
+    def test_compose_stack_rejects_nonstandard_path_separator(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            (config.app_dir / config.env_file).write_text(
+                f"AA_DOCKER_TAG={RUNTIME_IMAGE}\n"
+                "COMPOSE_FILE=docker-compose.yml;docker-compose.override.yml\n"
+                "COMPOSE_PATH_SEPARATOR=;\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(DeploymentError, "must be ':'"):
+                DockerHost(config).compose_prefix
+
     def test_database_shell_exports_the_discovered_password(self):
         shell = DockerHost._database_shell()
         self.assertIn('export MYSQL_PWD="$password"', shell)

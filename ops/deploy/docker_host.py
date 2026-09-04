@@ -14,7 +14,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from .contracts import (
@@ -38,9 +38,11 @@ FATAL_LOG_RE = re.compile(
     re.IGNORECASE,
 )
 SAFE_DATABASE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+SAFE_COMPOSE_PATH_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._/-]{0,254}$")
 SAFE_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SAFE_IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,511}$")
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
+MAX_COMPOSE_FILES = 8
 MAX_SERVICE_REPLICAS = 128
 
 
@@ -111,14 +113,15 @@ class DockerHost:
 
     @property
     def compose_prefix(self) -> list[str]:
-        return [
+        prefix = [
             "docker",
             "compose",
             "--env-file",
             str(self.config.env_file),
-            "-f",
-            str(self.config.compose_file),
         ]
+        for compose_file in self._compose_files():
+            prefix.extend(("-f", str(compose_file)))
+        return prefix
 
     def _run(
         self,
@@ -315,10 +318,16 @@ class DockerHost:
         if details.st_uid != 0 or stat.S_IMODE(details.st_mode) & 0o077:
             raise DeploymentError(f"{context} must be root-owned with mode 0700")
 
-    def _read_env_value(self, key: str) -> str:
+    def _read_optional_env_value(self, key: str) -> str | None:
         path = self.config.app_dir / self.config.env_file
+        if not path.is_file() or path.is_symlink():
+            raise DeploymentError("Environment file is not a regular file")
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise DeploymentError("Environment file is unreadable") from exc
         found: str | None = None
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
+        for raw_line in contents.splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -333,9 +342,62 @@ class DockerHost:
                     and found[0] in {"'", '"'}
                 ):
                     found = found[1:-1]
+        return found
+
+    def _read_env_value(self, key: str) -> str:
+        found = self._read_optional_env_value(key)
         if not found:
             raise DeploymentError(f"{key} is not configured")
         return found
+
+    def _compose_files(self) -> tuple[Path, ...]:
+        """Resolve and validate the exact host Compose stack, fail closed."""
+
+        configured = self._read_optional_env_value("COMPOSE_FILE")
+        if configured is None:
+            values = (self.config.compose_file.as_posix(),)
+        else:
+            separator = self._read_optional_env_value("COMPOSE_PATH_SEPARATOR")
+            if separator not in {None, ":"}:
+                raise DeploymentError(
+                    "COMPOSE_PATH_SEPARATOR must be ':' on the production host"
+                )
+            values = tuple(configured.split(":"))
+
+        if not values or len(values) > MAX_COMPOSE_FILES or any(not item for item in values):
+            raise DeploymentError("COMPOSE_FILE contains an invalid number of files")
+
+        relative_files: list[Path] = []
+        for value in values:
+            pure = PurePosixPath(value)
+            if (
+                not SAFE_COMPOSE_PATH_RE.fullmatch(value)
+                or value.startswith("/")
+                or not pure.parts
+                or ".." in pure.parts
+                or "//" in value
+            ):
+                raise DeploymentError("COMPOSE_FILE contains an unsafe path")
+            relative_files.append(Path(pure.as_posix()))
+
+        compose_files = tuple(relative_files)
+        if len(set(compose_files)) != len(compose_files):
+            raise DeploymentError("COMPOSE_FILE contains duplicate files")
+        if self.config.compose_file not in compose_files:
+            raise DeploymentError("COMPOSE_FILE does not include the configured base file")
+
+        app_dir = self.config.app_dir.resolve()
+        for relative in compose_files:
+            path = self.config.app_dir / relative
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or not path.resolve().is_relative_to(app_dir)
+            ):
+                raise DeploymentError(
+                    f"Compose file {relative.as_posix()} is not a regular in-tree file"
+                )
+        return compose_files
 
     def _validate_release_transition(self, bundle: ValidatedBundle) -> None:
         current = self._load_current()
@@ -409,7 +471,6 @@ class DockerHost:
         if not app_dir.is_dir() or app_dir.is_symlink():
             raise DeploymentError("AllianceAuth application directory is unavailable")
         for relative, name in (
-            (self.config.compose_file, "Compose file"),
             (self.config.env_file, "environment file"),
             (self.config.custom_dockerfile, "custom Dockerfile"),
             (self.config.local_settings, "local settings"),
@@ -417,6 +478,7 @@ class DockerHost:
             path = app_dir / relative
             if not path.is_file() or path.is_symlink():
                 raise DeploymentError(f"{name} is not a regular file")
+        self._compose_files()
         if self.config.state_dir.resolve().is_relative_to(app_dir.resolve()):
             raise DeploymentError("Deployment state must live outside the build context")
         if self.config.backup_dir.resolve().is_relative_to(app_dir.resolve()):
