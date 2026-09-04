@@ -97,6 +97,12 @@ class PlatformConfigurationContracts(TestCase):
 
     def test_contract_schema_and_required_image_registry(self):
         self.assertEqual(self.compatibility["schema_version"], 1)
+        self.assertIs(
+            self.compatibility["policy"][
+                "legacy_bootstrap_may_skip_uninstalled_v2_releases"
+            ],
+            True,
+        )
         self.assertEqual(
             set(self.compatibility["production_baseline"]),
             {
