@@ -24,6 +24,15 @@ if ! grep -Fq 'config --environment' "${root_script}"; then
     echo "Runtime fingerprint does not use the allow-listed Compose environment view." >&2
     exit 1
 fi
+if ! grep -Fq -- "--format '{{.Id}}'" "${root_script}" || \
+    ! grep -Fq -- "--format '{{json .RepoDigests}}'" "${root_script}"; then
+    echo "Runtime fingerprint must inspect image identity and digests separately." >&2
+    exit 1
+fi
+if grep -Fq "{{.Id}}\\t{{json .RepoDigests}}" "${root_script}"; then
+    echo "Runtime fingerprint must not rely on Go-template escape delimiters." >&2
+    exit 1
+fi
 
 if ! grep -Fq 'restrict,command="/usr/local/bin/buh-github-observe-entry"' "${bootstrap}"; then
     echo "Observer key is not forced and restricted." >&2
