@@ -71,7 +71,18 @@ class ReceiverConfigTests(unittest.TestCase):
         self.assertEqual(config.app_dir, Path("/opt/aa-docker"))
         self.assertEqual(config.legacy_platform_version, "0.3.3")
         self.assertEqual(config.restore_tmpfs_mb, 4096)
-        self.assertIn("allianceauth_gunicorn", config.auth_services)
+        self.assertEqual(config.database_service, "auth_mysql")
+        self.assertEqual(config.redis_service, "redis")
+        self.assertEqual(config.proxy_service, "nginx")
+        self.assertEqual(
+            config.auth_services,
+            (
+                "allianceauth_gunicorn",
+                "allianceauth_worker",
+                "allianceauth_worker_services",
+                "allianceauth_beat",
+            ),
+        )
         self.assertEqual(path.read_bytes(), contracts.canonical_json_bytes(json.loads(path.read_bytes())))
 
     def test_unknown_field_and_noncanonical_json_fail_closed(self):

@@ -6,6 +6,9 @@ release_commit = "e70a8ee713d358e2f0e3c1dc5b23305c863aa628"
 release_path = "releases/moon-tax/v0.3.3"
 deployment_generation = "legacy-v1"
 
+[production_runtime]
+base_image = "registry.gitlab.com/allianceauth/allianceauth/auth@sha256:cc7f6903582ecfb0aaa877edd23c70877136d03d5979543b09ffd815307ab5db"
+
 [runtime]
 python = "3.12.13"
 allianceauth = "5.2.0"
