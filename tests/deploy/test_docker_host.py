@@ -520,6 +520,51 @@ class DockerHostContracts(unittest.TestCase):
                     )
                 )
 
+    def test_full_health_gate_includes_proxy_and_captured_topology(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = dataclasses.replace(make_config(root), health_attempts=1)
+            host = DockerHost(config)
+            host.auth_replica_counts = {
+                service: (5 if service == config.worker_service else 1)
+                for service in config.auth_services
+            }
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = 200
+
+            def manage(*arguments, **_kwargs):
+                return "[X] applied\n" if arguments[0] == "showmigrations" else ""
+
+            def compose(*arguments, **_kwargs):
+                return "pong\n" if "celery" in arguments else ""
+
+            with mock.patch.object(
+                host, "_containers_healthy", return_value=True
+            ) as healthy, mock.patch.object(
+                host, "_require_shared_image"
+            ), mock.patch.object(
+                host, "_version_probe"
+            ), mock.patch.object(
+                host, "_manage_live", side_effect=manage
+            ), mock.patch.object(
+                host, "_compose", side_effect=compose
+            ), mock.patch(
+                "ops.deploy.docker_host.urllib.request.urlopen", return_value=response
+            ):
+                host.health(make_bundle(root))
+
+            expected = {
+                **host.auth_replica_counts,
+                config.database_service: 1,
+                config.redis_service: 1,
+                config.proxy_service: 1,
+            }
+            self.assertEqual(healthy.call_args.args[0], expected)
+            self.assertEqual(
+                healthy.call_args.kwargs["zero_restart_services"],
+                set(config.auth_services),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

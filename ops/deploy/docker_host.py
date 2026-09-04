@@ -1031,6 +1031,7 @@ class DockerHost:
             **self.auth_replica_counts,
             self.config.database_service: 1,
             self.config.redis_service: 1,
+            self.config.proxy_service: 1,
         }
         for _ in range(self.config.health_attempts):
             if self._containers_healthy(
