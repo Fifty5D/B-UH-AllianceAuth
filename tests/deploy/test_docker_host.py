@@ -125,8 +125,8 @@ def write_host_files(config: ReceiverConfig) -> None:
 class DockerHostContracts(unittest.TestCase):
     def test_database_shell_exports_the_discovered_password(self):
         shell = DockerHost._database_shell()
-        self.assertIn('export MARIADB_PWD="$password"', shell)
-        self.assertNotIn('MARIADB_PWD="$password" exec', shell)
+        self.assertIn('export MYSQL_PWD="$password"', shell)
+        self.assertNotIn('MYSQL_PWD="$password" exec', shell)
 
     def test_preflight_validates_legacy_transition_runtime_and_services(self):
         with tempfile.TemporaryDirectory() as temporary:

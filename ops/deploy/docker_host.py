@@ -603,7 +603,7 @@ class DockerHost:
         return (
             'password="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
             'test -n "$password"; '
-            'export MARIADB_PWD="$password"; exec mariadb --user=root --batch '
+            'export MYSQL_PWD="$password"; exec mariadb --user=root --batch '
             '--skip-column-names --execute="$1"'
         )
 
@@ -668,7 +668,7 @@ class DockerHost:
             'database="${MARIADB_DATABASE:-${MYSQL_DATABASE:-}}"; '
             'password="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
             'test -n "$database"; test -n "$password"; '
-            'export MARIADB_PWD="$password"; exec mariadb-dump --user=root '
+            'export MYSQL_PWD="$password"; exec mariadb-dump --user=root '
             '--single-transaction --quick --routines --triggers --events --hex-blob '
             '"$database"'
         )
@@ -728,7 +728,7 @@ class DockerHost:
                 raise DeploymentError("Ephemeral database restore container was not ready")
             restore_script = (
                 'password="${MARIADB_ROOT_PASSWORD:-}"; test -n "$password"; '
-                'export MARIADB_PWD="$password"; '
+                'export MYSQL_PWD="$password"; '
                 'exec mariadb --user=root "$MARIADB_DATABASE"'
             )
             self._run_from_file(

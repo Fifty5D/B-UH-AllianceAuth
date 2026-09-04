@@ -79,7 +79,7 @@ class LegacyBaselineContracts(unittest.TestCase):
             self.assertIn("Refusing", text)
         self.assertIn("mariadb-dump", runner)
         self.assertIn("buh_restore", runner)
-        self.assertGreaterEqual(runner.count("export MARIADB_PWD"), 3)
+        self.assertGreaterEqual(runner.count("export MYSQL_PWD"), 3)
         self.assertGreaterEqual(len(re.findall(r"manage\.py migrate", runner)), 4)
 
 
