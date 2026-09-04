@@ -51,6 +51,9 @@ git -C "${repo_root}" diff --cached --quiet --
 
 install_sources=(
   ops/__init__.py
+  ops/buh-github-observe-entry
+  ops/buh-github-observe-root
+  ops/buh-redact-diagnostics.py
   ops/deploy/__init__.py
   ops/deploy/contracts.py
   ops/deploy/docker_host.py
@@ -94,6 +97,13 @@ install -m 0755 "${script_dir}/buh-platform-v2-receiver" \
   /usr/local/sbin/buh-platform-v2-receiver
 install -m 0755 "${script_dir}/buh-deploy-dispatch" \
   /usr/local/sbin/buh-deploy-dispatch
+install -d -m 0755 /usr/local/libexec
+install -m 0755 "${repo_root}/ops/buh-github-observe-entry" \
+  /usr/local/bin/buh-github-observe-entry
+install -m 0755 "${repo_root}/ops/buh-github-observe-root" \
+  /usr/local/sbin/buh-github-observe-root
+install -m 0755 "${repo_root}/ops/buh-redact-diagnostics.py" \
+  /usr/local/libexec/buh-redact-diagnostics
 
 provenance_tmp="$(mktemp /etc/buh-platform-v2/.install.XXXXXX)"
 python3 - "${repo_root}" "${config_source}" "${source_commit}" \
