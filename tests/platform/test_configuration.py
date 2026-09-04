@@ -22,7 +22,10 @@ SOURCE_WORKFLOWS = (
     "ui-preview.yml",
     "build-platform-release.yml",
 )
-PRODUCTION_V2_WORKFLOWS = ("deploy-platform-v2.yml",)
+PRODUCTION_V2_WORKFLOWS = (
+    "deploy-platform-v2.yml",
+    "production-runtime-fingerprint.yml",
+)
 LEGACY_WORKFLOWS = (
     "ci.yml",
     "deploy-moon-tax.yml",
@@ -454,6 +457,30 @@ class PlatformConfigurationContracts(TestCase):
             "ops/buh-redact-diagnostics.py --validate",
         ):
             self.assertIn(required, text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("StrictHostKeyChecking=no", text)
+
+    def test_production_fingerprint_is_owner_only_and_read_only(self):
+        text = (WORKFLOWS / "production-runtime-fingerprint.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow = _load_workflow(
+            WORKFLOWS / "production-runtime-fingerprint.yml"
+        )
+        self.assertEqual(
+            workflow["permissions"], {"contents": "read", "issues": "write"}
+        )
+        for required in (
+            "/fingerprint platform-v2",
+            "github.repository_owner",
+            "BUH_OBSERVER_SSH_KEY",
+            "StrictHostKeyChecking=yes",
+            '"fingerprint platform-v2"',
+            "production_runtime_base_image",
+            "ops/buh-redact-diagnostics.py --validate",
+        ):
+            self.assertIn(required, text)
+        self.assertNotIn("BUH_DEPLOY_SSH_KEY", text)
         self.assertNotIn("continue-on-error", text)
         self.assertNotIn("StrictHostKeyChecking=no", text)
 

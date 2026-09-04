@@ -44,7 +44,9 @@ See `docs/architecture/source-first-platform.md` for the rollout and safety gate
 Repository issue **#1** is the private diagnostics console. After the one-time
 observer setup, the repository owner can comment `/diagnostics 15` to collect a
 sanitized status and log report. Supported windows are 5, 15, 30, 60, 180, and
-360 minutes.
+360 minutes. Comment `/fingerprint platform-v2` after updating the observer
+bridge to collect only the allow-listed runtime image, image digest, Docker
+versions, and Compose service names required for Platform v2 promotion.
 
 ## Emergency Discord token rotation
 

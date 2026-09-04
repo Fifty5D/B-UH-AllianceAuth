@@ -1,0 +1,156 @@
+name: Production runtime fingerprint
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: buh-production-runtime-fingerprint
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fingerprint:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.number == 1 &&
+       github.event.comment.user.login == github.repository_owner &&
+       github.event.comment.body == '/fingerprint platform-v2')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require the repository owner
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ACTOR}" == "${OWNER}" ]]
+          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+
+      - name: Check out the trusted sanitizer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Configure guarded observer SSH
+        env:
+          KNOWN_HOSTS: ${{ secrets.BUH_VPS_KNOWN_HOSTS }}
+          OBSERVER_KEY: ${{ secrets.BUH_OBSERVER_SSH_KEY }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${OBSERVER_KEY}" || { echo "BUH_OBSERVER_SSH_KEY is not configured." >&2; exit 78; }
+          test -n "${KNOWN_HOSTS}" || { echo "BUH_VPS_KNOWN_HOSTS is not configured." >&2; exit 78; }
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${OBSERVER_KEY}" >"${HOME}/.ssh/buh_observer"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/buh_observer" "${HOME}/.ssh/known_hosts"
+
+      - name: Collect the allow-listed runtime fingerprint
+        env:
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER || 'buh-observer' }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52' }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
+            "${OBSERVER_USER}@${VPS_HOST}" "fingerprint platform-v2" \
+            >fingerprint.raw.txt
+          test -s fingerprint.raw.txt
+
+      - name: Sanitize and validate the fingerprint
+        run: |
+          set -Eeuo pipefail
+          python3 ops/buh-redact-diagnostics.py fingerprint.raw.txt >fingerprint.txt
+          rm -f -- fingerprint.raw.txt
+          python3 ops/buh-redact-diagnostics.py --validate fingerprint.txt
+          python3 - <<'PY'
+          import datetime
+          import re
+          from pathlib import Path
+
+          lines = Path("fingerprint.txt").read_text(encoding="utf-8").splitlines()
+          if not lines or lines[0] != "B-UH Alliance Auth guarded runtime fingerprint":
+              raise SystemExit("Unexpected runtime-fingerprint heading")
+          values = {}
+          for line in lines[1:]:
+              key, separator, value = line.partition("=")
+              if not separator or not key or not value or key in values:
+                  raise SystemExit("Malformed or duplicate runtime-fingerprint field")
+              values[key] = value
+          expected = {
+              "schema_version",
+              "generated_utc",
+              "host",
+              "aa_docker_tag",
+              "production_runtime_base_image",
+              "runtime_image_id",
+              "compose_services",
+              "docker_server_version",
+              "docker_compose_version",
+          }
+          if set(values) != expected or values["schema_version"] != "1":
+              raise SystemExit("Runtime-fingerprint schema differs")
+          datetime.datetime.strptime(values["generated_utc"], "%Y-%m-%dT%H:%M:%SZ")
+          digest = re.compile(
+              r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}"
+          )
+          if not digest.fullmatch(values["production_runtime_base_image"]):
+              raise SystemExit("Production runtime is not digest pinned")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", values["runtime_image_id"]):
+              raise SystemExit("Runtime image ID is malformed")
+          if not re.fullmatch(
+              r"[a-z0-9][a-z0-9_-]{0,62}(?:,[a-z0-9][a-z0-9_-]{0,62})*",
+              values["compose_services"],
+          ):
+              raise SystemExit("Compose service inventory is malformed")
+          PY
+
+      - name: Upload the reviewed fingerprint
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-runtime-fingerprint-${{ github.run_id }}
+          path: fingerprint.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Post the fingerprint to the diagnostics console
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          {
+            printf '## Production runtime fingerprint\n\n'
+            printf '[Workflow run and retained artifact](%s)\n\n' "${RUN_URL}"
+            printf '```text\n'
+            cat fingerprint.txt
+            printf '```\n'
+          } >fingerprint-comment.md
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" \
+            --body-file fingerprint-comment.md
+
+      - name: Report a fingerprint failure
+        if: failure() && github.event_name == 'issue_comment'
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${GH_REPO}" \
+            --body "Runtime fingerprint failed safely. [Open the workflow run](${RUN_URL})."

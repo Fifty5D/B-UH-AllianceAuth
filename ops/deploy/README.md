@@ -52,9 +52,13 @@ Do this only after the pull request and hosted checks pass. It changes the SSH
 forced-command boundary and therefore requires a separately reviewed maintenance
 window.
 
-1. Use read-only host inspection to confirm the Compose filename, service names,
-   existing legacy receiver path, and current `AA_DOCKER_TAG`. Do not copy
-   environment contents or credentials into GitHub, chat, or diagnostics.
+1. Update the existing observer bridge from the exact reviewed `main` checkout,
+   then comment `/fingerprint platform-v2` in diagnostics issue #1. The guarded
+   command reports only the Compose service names, current `AA_DOCKER_TAG`, its
+   resolved repository digest, and Docker versions. It never emits other
+   environment values. Confirm the Compose filename, service names, existing
+   legacy receiver path, and runtime result without copying environment contents
+   or credentials into GitHub, chat, or diagnostics.
 2. Resolve the current production image to its immutable repository digest.
    Add that exact `name:tag@sha256:...` as
    `production_runtime.base_image` in `platform/compatibility.toml`, run all

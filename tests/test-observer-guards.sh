@@ -16,6 +16,14 @@ if grep -Eq '(^|[^A-Za-z])source[[:space:]]+.*\.env|cat[[:space:]]+.*\.env' "${r
     echo "Observer must never print or source .env." >&2
     exit 1
 fi
+if grep -Eq '(grep|sed|awk)[^\n]*\.env' "${root_script}"; then
+    echo "Observer must let Compose isolate the one allow-listed environment value." >&2
+    exit 1
+fi
+if ! grep -Fq 'config --environment' "${root_script}"; then
+    echo "Runtime fingerprint does not use the allow-listed Compose environment view." >&2
+    exit 1
+fi
 
 if ! grep -Fq 'restrict,command="/usr/local/bin/buh-github-observe-entry"' "${bootstrap}"; then
     echo "Observer key is not forced and restricted." >&2
@@ -63,8 +71,11 @@ for minutes in 5 15 30 60 180 360; do
     output="$(PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="diagnostics ${minutes}" "${entry}")"
     [[ "${output}" == "sudo_target=-n /usr/local/sbin/buh-github-observe-root stdin=${minutes}" ]]
 done
+output="$(PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="fingerprint platform-v2" "${entry}")"
+[[ "${output}" == "sudo_target=-n /usr/local/sbin/buh-github-observe-root stdin=fingerprint platform-v2" ]]
 
-for denied in "" "bash" "diagnostics 120" "diagnostics 15; id" "diagnostics"; do
+for denied in "" "bash" "diagnostics 120" "diagnostics 15; id" "diagnostics" \
+    "fingerprint" "fingerprint platform-v2; id"; do
     if PATH="${fake_bin}:${PATH}" SSH_ORIGINAL_COMMAND="${denied}" "${entry}" >/dev/null 2>&1; then
         echo "Observer accepted forbidden command: ${denied}" >&2
         exit 1
