@@ -90,7 +90,10 @@ def make_bundle(root: Path, *, image: str = RUNTIME_IMAGE) -> ValidatedBundle:
                     "deployment_generation": "legacy-v1",
                 },
                 "production_runtime": {"base_image": image},
-                "policy": {"database_migrations_must_be_rollback_compatible": True},
+                "policy": {
+                    "database_migrations_must_be_rollback_compatible": True,
+                    "legacy_bootstrap_may_skip_uninstalled_v2_releases": True,
+                },
             }
         },
         "artifacts": artifacts,
@@ -150,6 +153,34 @@ class DockerHostContracts(unittest.TestCase):
                 host.validate(make_bundle(root))
             self.assertEqual(config.state_dir.stat().st_mode & 0o777, 0o700)
             self.assertEqual(config.backup_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_legacy_bootstrap_requires_explicit_policy_to_skip_uninstalled_releases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            host = DockerHost(config)
+            bundle = make_bundle(root)
+            manifest = dict(bundle.manifest)
+            manifest["previous_release"] = {
+                "platform_version": "0.4.0",
+                "source_commit": "d" * 40,
+                "manifest_sha256": "e" * 64,
+            }
+            successor = dataclasses.replace(bundle, manifest=manifest)
+
+            host._validate_release_transition(successor)
+
+            compatibility = dict(manifest["compatibility"])
+            values = dict(compatibility["values"])
+            policy = dict(values["policy"])
+            policy["legacy_bootstrap_may_skip_uninstalled_v2_releases"] = False
+            values["policy"] = policy
+            compatibility["values"] = values
+            blocked_manifest = dict(manifest)
+            blocked_manifest["compatibility"] = compatibility
+            blocked = dataclasses.replace(bundle, manifest=blocked_manifest)
+            with self.assertRaisesRegex(DeploymentError, "not authorized"):
+                host._validate_release_transition(blocked)
 
     def test_runtime_digest_or_host_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

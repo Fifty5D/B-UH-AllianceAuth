@@ -291,6 +291,7 @@ class DockerHost:
             baseline = bundle.manifest["compatibility"]["values"].get(
                 "production_baseline"
             )
+            policy = bundle.manifest["compatibility"]["values"].get("policy")
             expected = {
                 "platform_version": self.config.legacy_platform_version,
                 "release_commit": self.config.legacy_release_commit,
@@ -300,8 +301,23 @@ class DockerHost:
                 baseline.get(key) != value for key, value in expected.items()
             ):
                 raise DeploymentError("First Platform v2 release targets the wrong legacy baseline")
-            if previous is not None:
-                raise DeploymentError("First Platform v2 release unexpectedly names a v2 predecessor")
+            if _semver(bundle.request.platform_version) <= _semver(
+                self.config.legacy_platform_version
+            ):
+                raise DeploymentError(
+                    "First Platform v2 release must be newer than the legacy baseline"
+                )
+            if previous is not None and not (
+                isinstance(policy, dict)
+                and policy.get(
+                    "legacy_bootstrap_may_skip_uninstalled_v2_releases"
+                )
+                is True
+            ):
+                raise DeploymentError(
+                    "First Platform v2 release with a predecessor is not authorized "
+                    "for legacy bootstrap"
+                )
             return
         if _semver(bundle.request.platform_version) <= _semver(
             current["platform_version"]

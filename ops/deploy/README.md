@@ -19,6 +19,10 @@ reviewed host operation.
   repository.
 - The release must name one digest-pinned production base image and the host's
   `AA_DOCKER_TAG` must equal it exactly.
+- A legacy host may start from a newer published Platform v2 release only when
+  the release explicitly opts into skipping uninstalled v2 predecessors and
+  still names the exact reviewed legacy baseline. Once Platform v2 is live,
+  every release must name the verified live release as its direct predecessor.
 - Existing and third-party wheels are installed in stable Docker layers before
   changed owned wheels, so normal releases reuse most of the image cache.
 - Candidate package versions, Django checks, and the migration plan pass before
