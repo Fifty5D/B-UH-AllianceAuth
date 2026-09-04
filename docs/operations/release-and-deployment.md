@@ -161,18 +161,22 @@ the distribution version matches the live image. Wheel files remain in their
 immutable build layer because a later non-root layer cannot remove a root-owned
 `COPY`, and deleting them later would not reduce image size.
 
-Production preflight executes the same cached candidate build, package-version
-probe, Django checks, and migration plan as deployment. It then restores the
-exact preflight image ID to every prior Compose image reference without restarting
-live containers. A deployment rollback uses that captured image ID as well, so it
-does not depend on rebuilding old source after a failure.
+Production preflight executes the same cached candidate build, per-service
+package-version probes, Django checks, and migration plan as deployment. It then
+restores each service's exact preflight image ID to its prior Compose image
+reference without restarting live containers. A deployment rollback uses those
+captured service images as well, so it does not depend on rebuilding old source
+after a failure.
 
 The receiver treats each configured Compose service as one logical service with
-one or more running replicas. Before building, it captures the exact replica count
-and common image across every Auth container. Swap and rollback pass those counts
-back to Compose explicitly, preventing an update from silently shrinking a scaled
-worker pool. Health succeeds only when every expected replica is running on the
-shared image and every replaced Auth replica has a zero restart count.
+one or more running replicas. Before building, it captures each service's exact
+replica count, image ID, and Compose image reference. Replicas within one service
+must agree, but services may have distinct BuildKit image IDs even when Compose
+inherits one anchored build definition. Swap and rollback pass those counts back
+to Compose explicitly, preventing an update from silently shrinking a scaled
+worker pool. Health succeeds only when every expected replica is running on its
+expected per-service candidate image and every replaced Auth replica has a zero
+restart count.
 
 ## Database and rollback safety
 

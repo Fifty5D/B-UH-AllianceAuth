@@ -251,28 +251,47 @@ class DockerHostContracts(unittest.TestCase):
                     container_id(number) for number in range(next_id, next_id + count)
                 ]
                 next_id += count
+            container_services = {
+                container: service
+                for service, containers in service_ids.items()
+                for container in containers
+            }
+            service_images = {
+                service: "sha256:" + str(index) * 64
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            service_references = {
+                service: f"aa-docker-{service}:latest"
+                for service in config.auth_services
+            }
 
             def compose(*arguments, **_kwargs):
                 self.assertEqual(arguments[:2], ("ps", "-q"))
                 return "\n".join(service_ids[arguments[-1]])
 
+            def inspect(arguments, **_kwargs):
+                service = container_services[arguments[-1]]
+                return (
+                    f"running|{service_images[service]}|"
+                    f"{service_references[service]}\n"
+                )
+
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
-                host,
-                "_run",
-                return_value=(
-                    "running|sha256:" + "6" * 64 + "|aa-docker-allianceauth:latest\n"
-                ),
+                host, "_run", side_effect=inspect
             ) as run:
-                host._capture_live_image()
+                host._capture_live_images()
 
             self.assertEqual(host.auth_replica_counts, service_counts)
-            self.assertEqual(host.previous_image_id, "sha256:" + "6" * 64)
             self.assertEqual(
-                host.previous_image_references, ("aa-docker-allianceauth:latest",)
+                host.previous_images,
+                {
+                    service: (service_images[service], service_references[service])
+                    for service in config.auth_services
+                },
             )
             self.assertEqual(run.call_count, sum(service_counts.values()))
 
-    def test_live_image_capture_rejects_mixed_replica_images(self):
+    def test_live_image_capture_rejects_mixed_images_within_one_service(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = make_config(Path(temporary))
             host = DockerHost(config)
@@ -293,8 +312,40 @@ class DockerHostContracts(unittest.TestCase):
 
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
                 host, "_run", side_effect=inspect
-            ), self.assertRaisesRegex(DeploymentError, "do not share one image"):
-                host._capture_live_image()
+            ), self.assertRaisesRegex(
+                DeploymentError, "replicas for service allianceauth_worker"
+            ):
+                host._capture_live_images()
+
+    def test_live_image_capture_rejects_one_reference_for_different_images(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            service_ids = {
+                service: [container_id(index)]
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            container_services = {
+                container: service
+                for service, containers in service_ids.items()
+                for container in containers
+            }
+
+            def compose(*arguments, **_kwargs):
+                return "\n".join(service_ids[arguments[-1]])
+
+            def inspect(arguments, **_kwargs):
+                service = container_services[arguments[-1]]
+                digest = str(config.auth_services.index(service) + 1)
+                return (
+                    f"running|sha256:{digest * 64}|"
+                    "aa-docker-allianceauth:latest\n"
+                )
+
+            with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
+                host, "_run", side_effect=inspect
+            ), self.assertRaisesRegex(DeploymentError, "one image reference"):
+                host._capture_live_images()
 
     def test_live_image_capture_rejects_a_missing_or_duplicate_replica(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -303,15 +354,15 @@ class DockerHostContracts(unittest.TestCase):
             with mock.patch.object(host, "_compose", return_value=""), self.assertRaisesRegex(
                 DeploymentError, "found no running containers"
             ):
-                host._capture_live_image()
+                host._capture_live_images()
 
             duplicate = container_id(1)
             with mock.patch.object(
                 host, "_compose", return_value=f"{duplicate}\n{duplicate}\n"
             ), self.assertRaisesRegex(DeploymentError, "invalid container identities"):
-                host._capture_live_image()
+                host._capture_live_images()
 
-    def test_shared_image_check_covers_every_scaled_replica(self):
+    def test_live_image_check_covers_every_scaled_replica_per_service(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = make_config(Path(temporary))
             host = DockerHost(config)
@@ -325,26 +376,70 @@ class DockerHostContracts(unittest.TestCase):
             host.auth_replica_counts = {
                 service: len(ids) for service, ids in service_ids.items()
             }
+            container_services = {
+                container: service
+                for service, containers in service_ids.items()
+                for container in containers
+            }
+            expected_images = {
+                service: "sha256:" + str(index) * 64
+                for index, service in enumerate(config.auth_services, start=1)
+            }
 
             def compose(*arguments, **_kwargs):
                 return "\n".join(service_ids[arguments[-1]])
 
+            def inspect(arguments, **_kwargs):
+                service = container_services[arguments[-1]]
+                return expected_images[service] + "\n"
+
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
-                host, "_run", return_value="sha256:" + "6" * 64 + "\n"
+                host, "_run", side_effect=inspect
             ) as run:
-                host._require_shared_image()
+                host._require_live_images(expected_images)
             self.assertEqual(run.call_count, sum(host.auth_replica_counts.values()))
 
             def mixed_images(arguments, **_kwargs):
-                digest = "7" if arguments[-1] == container_id(13) else "6"
-                return "sha256:" + digest * 64 + "\n"
+                if arguments[-1] == container_id(13):
+                    return "sha256:" + "f" * 64 + "\n"
+                service = container_services[arguments[-1]]
+                return expected_images[service] + "\n"
 
             with mock.patch.object(host, "_compose", side_effect=compose), mock.patch.object(
                 host, "_run", side_effect=mixed_images
-            ), self.assertRaisesRegex(DeploymentError, "do not share one image"):
-                host._require_shared_image()
+            ), self.assertRaisesRegex(DeploymentError, "does not use its expected image"):
+                host._require_live_images(expected_images)
 
-    def test_rollback_retags_exact_previous_image_without_rebuilding(self):
+    def test_candidate_image_capture_records_each_service_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            host.previous_images = {
+                service: (
+                    "sha256:" + str(index) * 64,
+                    f"aa-docker-{service}:latest",
+                )
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            candidates = {
+                service: "sha256:" + format(index + 8, "x") * 64
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            references = {
+                reference: service
+                for service, (_image, reference) in host.previous_images.items()
+            }
+
+            def inspect(arguments, **_kwargs):
+                return candidates[references[arguments[-1]]] + "\n"
+
+            with mock.patch.object(host, "_run", side_effect=inspect) as run:
+                host._capture_candidate_images()
+
+            self.assertEqual(host.candidate_image_ids, candidates)
+            self.assertEqual(run.call_count, len(config.auth_services))
+
+    def test_rollback_retags_exact_previous_images_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = make_config(root)
@@ -356,8 +451,13 @@ class DockerHostContracts(unittest.TestCase):
             host.original_local_settings = host.backup_path / "local.py"
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
             host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
-            host.previous_image_id = "sha256:" + "6" * 64
-            host.previous_image_references = ("aa-docker-auth:latest",)
+            host.previous_images = {
+                service: (
+                    "sha256:" + str(index) * 64,
+                    f"aa-docker-{service}:latest",
+                )
+                for index, service in enumerate(config.auth_services, start=1)
+            }
 
             with mock.patch.object(host, "_run", return_value="") as run, mock.patch.object(
                 host, "_compose", return_value=""
@@ -365,19 +465,81 @@ class DockerHostContracts(unittest.TestCase):
                 recovery = host.rollback(make_bundle(root), "validated")
 
             self.assertIn("never replaced", recovery)
-            run.assert_called_once_with(
+            self.assertEqual(
+                run.call_args_list,
                 [
-                    "docker",
-                    "image",
-                    "tag",
-                    "sha256:" + "6" * 64,
-                    "aa-docker-auth:latest",
+                    mock.call(
+                        [
+                            "docker",
+                            "image",
+                            "tag",
+                            "sha256:" + str(index) * 64,
+                            f"aa-docker-{service}:latest",
+                        ],
+                        context=f"Previous image reference restoration for {service}",
+                    )
+                    for index, service in enumerate(config.auth_services, start=1)
                 ],
-                context="Previous AllianceAuth image reference restoration",
             )
             compose.assert_not_called()
             self.assertEqual(
                 (config.app_dir / config.custom_dockerfile).read_text(), "FROM restored\n"
+            )
+
+    def test_candidate_restore_retags_a_shared_reference_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            host.original_dockerfile = host.backup_path / "custom.dockerfile"
+            host.original_local_settings = host.backup_path / "local.py"
+            host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
+            host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
+            shared = ("sha256:" + "a" * 64, "aa-docker-allianceauth:latest")
+            host.previous_images = {
+                service: (
+                    shared
+                    if index <= 2
+                    else (
+                        "sha256:" + str(index) * 64,
+                        f"aa-docker-{service}:latest",
+                    )
+                )
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+
+            with mock.patch.object(host, "_run", return_value="") as run:
+                self.assertTrue(host._restore_candidate_configuration())
+
+            self.assertEqual(
+                run.call_args_list,
+                [
+                    mock.call(
+                        ["docker", "image", "tag", shared[0], shared[1]],
+                        context=(
+                            "Previous image reference restoration for "
+                            f"{config.auth_services[0]}"
+                        ),
+                    ),
+                    *[
+                        mock.call(
+                            [
+                                "docker",
+                                "image",
+                                "tag",
+                                "sha256:" + str(index) * 64,
+                                f"aa-docker-{service}:latest",
+                            ],
+                            context=f"Previous image reference restoration for {service}",
+                        )
+                        for index, service in enumerate(
+                            config.auth_services[2:], start=3
+                        )
+                    ],
+                ],
             )
 
     def test_swap_and_rollback_preserve_every_auth_replica(self):
@@ -392,8 +554,13 @@ class DockerHostContracts(unittest.TestCase):
             host.original_local_settings = host.backup_path / "local.py"
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
             host.original_local_settings.write_text("RESTORED = True\n", encoding="utf-8")
-            host.previous_image_id = "sha256:" + "6" * 64
-            host.previous_image_references = ("aa-docker-auth:latest",)
+            host.previous_images = {
+                service: (
+                    "sha256:" + str(index) * 64,
+                    f"aa-docker-{service}:latest",
+                )
+                for index, service in enumerate(config.auth_services, start=1)
+            }
             host.auth_replica_counts = {
                 service: (5 if service == config.worker_service else 1)
                 for service in config.auth_services
@@ -529,6 +696,10 @@ class DockerHostContracts(unittest.TestCase):
                 service: (5 if service == config.worker_service else 1)
                 for service in config.auth_services
             }
+            host.candidate_image_ids = {
+                service: "sha256:" + str(index) * 64
+                for index, service in enumerate(config.auth_services, start=1)
+            }
             response = mock.MagicMock()
             response.__enter__.return_value.status = 200
 
@@ -541,10 +712,10 @@ class DockerHostContracts(unittest.TestCase):
             with mock.patch.object(
                 host, "_containers_healthy", return_value=True
             ) as healthy, mock.patch.object(
-                host, "_require_shared_image"
-            ), mock.patch.object(
+                host, "_require_live_images"
+            ) as images, mock.patch.object(
                 host, "_version_probe"
-            ), mock.patch.object(
+            ) as versions, mock.patch.object(
                 host, "_manage_live", side_effect=manage
             ), mock.patch.object(
                 host, "_compose", side_effect=compose
@@ -563,6 +734,14 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(
                 healthy.call_args.kwargs["zero_restart_services"],
                 set(config.auth_services),
+            )
+            images.assert_called_once_with(host.candidate_image_ids)
+            self.assertEqual(
+                versions.call_args_list,
+                [
+                    mock.call(service, mock.ANY, live=True)
+                    for service in config.auth_services
+                ],
             )
 
 

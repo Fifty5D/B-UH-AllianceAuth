@@ -92,8 +92,8 @@ class DockerHost:
         self.original_dockerfile: Path | None = None
         self.original_local_settings: Path | None = None
         self.staged_release: Path | None = None
-        self.previous_image_id: str | None = None
-        self.previous_image_references: tuple[str, ...] = ()
+        self.previous_images: dict[str, tuple[str, str]] = {}
+        self.candidate_image_ids: dict[str, str] = {}
         self.auth_replica_counts: dict[str, int] = {}
         self.live_replacement_started = False
 
@@ -587,9 +587,17 @@ class DockerHost:
         if actual != expected:
             raise DeploymentError(f"Package versions differ in {service}")
 
-    def _require_shared_image(self) -> None:
-        image_ids: set[str] = set()
+    def _require_live_images(self, expected_images: Mapping[str, str]) -> None:
+        if set(expected_images) != set(self.config.auth_services):
+            raise DeploymentError(
+                "Expected AllianceAuth service images were not captured"
+            )
         for service in self.config.auth_services:
+            expected_image = expected_images[service]
+            if not SAFE_IMAGE_ID_RE.fullmatch(expected_image):
+                raise DeploymentError(
+                    f"Expected image identity for {service} is unsafe"
+                )
             containers = self._running_service_containers(
                 service, context=f"Live image container discovery for {service}"
             )
@@ -605,18 +613,21 @@ class DockerHost:
                     raise DeploymentError(
                         f"Live service {service} returned an unsafe image identity"
                     )
-                image_ids.add(image_id)
-        if len(image_ids) != 1:
-            raise DeploymentError("Live AllianceAuth replicas do not share one image")
+                if image_id != expected_image:
+                    raise DeploymentError(
+                        f"Live service {service} does not use its expected image"
+                    )
 
-    def _capture_live_image(self) -> None:
-        """Remember the exact image, references, and replica topology used by live Auth."""
+    def _capture_live_images(self) -> None:
+        """Remember each service image, reference, and live replica count."""
 
-        image_ids: set[str] = set()
-        image_references: set[str] = set()
+        service_images: dict[str, tuple[str, str]] = {}
+        reference_images: dict[str, str] = {}
         replica_counts: dict[str, int] = {}
         seen_containers: set[str] = set()
         for service in self.config.auth_services:
+            image_ids: set[str] = set()
+            image_references: set[str] = set()
             containers = self._running_service_containers(
                 service, context=f"Live container discovery for {service}"
             )
@@ -651,28 +662,41 @@ class DockerHost:
                     )
                 image_ids.add(image_id)
                 image_references.add(reference)
-        if len(image_ids) != 1:
-            raise DeploymentError("Live AllianceAuth replicas do not share one image")
-        self.previous_image_id = image_ids.pop()
-        self.previous_image_references = tuple(sorted(image_references))
+            if len(image_ids) != 1:
+                raise DeploymentError(
+                    f"Live replicas for service {service} do not share one image"
+                )
+            if len(image_references) != 1:
+                raise DeploymentError(
+                    f"Live replicas for service {service} do not share one image reference"
+                )
+            image_id = image_ids.pop()
+            reference = image_references.pop()
+            prior_image = reference_images.setdefault(reference, image_id)
+            if prior_image != image_id:
+                raise DeploymentError(
+                    "Live AllianceAuth services use one image reference for different images"
+                )
+            service_images[service] = (image_id, reference)
+        self.previous_images = service_images
         self.auth_replica_counts = replica_counts
 
-    def _require_candidate_image(self) -> None:
-        if not self.previous_image_references:
-            raise DeploymentError("Candidate image references were not captured")
-        image_ids = {
-            self._run(
+    def _capture_candidate_images(self) -> None:
+        if set(self.previous_images) != set(self.config.auth_services):
+            raise DeploymentError("Prior service image references were not captured")
+        candidate_images: dict[str, str] = {}
+        for service in self.config.auth_services:
+            _previous_image, reference = self.previous_images[service]
+            image_id = self._run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", reference],
-                context="Candidate image identity verification",
+                context=f"Candidate image identity verification for {service}",
             ).strip()
-            for reference in self.previous_image_references
-        }
-        if len(image_ids) != 1 or not all(
-            SAFE_IMAGE_ID_RE.fullmatch(image_id) for image_id in image_ids
-        ):
-            raise DeploymentError(
-                "AllianceAuth services do not resolve one safe candidate image"
-            )
+            if not SAFE_IMAGE_ID_RE.fullmatch(image_id):
+                raise DeploymentError(
+                    f"Candidate image identity for {service} is unsafe"
+                )
+            candidate_images[service] = image_id
+        self.candidate_image_ids = candidate_images
 
     def _restore_candidate_configuration(self) -> bool:
         """Restore host files and retag the exact pre-attempt image without a restart."""
@@ -687,13 +711,25 @@ class DockerHost:
         local_settings = self.config.app_dir / self.config.local_settings
         shutil.copy2(self.original_dockerfile, dockerfile)
         shutil.copy2(self.original_local_settings, local_settings)
-        if self.previous_image_id is not None:
-            if not self.previous_image_references:
-                raise DeploymentError("The previous image has no restorable reference")
-            for reference in self.previous_image_references:
+        if self.previous_images:
+            if set(self.previous_images) != set(self.config.auth_services):
+                raise DeploymentError(
+                    "The previous service images are incomplete"
+                )
+            restored_references: dict[str, str] = {}
+            for service in self.config.auth_services:
+                image_id, reference = self.previous_images[service]
+                restored_image = restored_references.get(reference)
+                if restored_image is not None:
+                    if restored_image != image_id:
+                        raise DeploymentError(
+                            "One previous image reference resolves to different service images"
+                        )
+                    continue
+                restored_references[reference] = image_id
                 self._run(
-                    ["docker", "image", "tag", self.previous_image_id, reference],
-                    context="Previous AllianceAuth image reference restoration",
+                    ["docker", "image", "tag", image_id, reference],
+                    context=f"Previous image reference restoration for {service}",
                 )
         return True
 
@@ -709,7 +745,7 @@ class DockerHost:
         self.original_dockerfile.chmod(0o600)
         self.original_local_settings.chmod(0o600)
 
-        self._capture_live_image()
+        self._capture_live_images()
         self.staged_release = self._stage_release(bundle)
         self._write_candidate_dockerfile(bundle)
         self._compose(
@@ -721,8 +757,9 @@ class DockerHost:
             context="Cached candidate image build",
             timeout=self.config.command_timeout_seconds,
         )
-        self._require_candidate_image()
-        self._version_probe(self.config.gunicorn_service, bundle, live=False)
+        self._capture_candidate_images()
+        for service in self.config.auth_services:
+            self._version_probe(service, bundle, live=False)
         self._manage_image("check", "--no-color", context="Candidate Django checks")
         self._manage_image(
             "migrate", "--plan", "--no-color", context="Candidate migration plan"
@@ -962,7 +999,7 @@ class DockerHost:
         scale_arguments = self._auth_scale_arguments()
         # Compose can partially replace containers before returning an error.
         # Mark the side effect before invoking it so rollback restores the old
-        # image and full replica topology even when the journal is still at
+        # images and full replica topology even when the journal is still at
         # ``migrated``.
         self.live_replacement_started = True
         self._compose(
@@ -1043,8 +1080,9 @@ class DockerHost:
         else:
             raise DeploymentError("Required containers did not become stable")
 
-        self._require_shared_image()
-        self._version_probe(self.config.gunicorn_service, bundle, live=True)
+        self._require_live_images(self.candidate_image_ids)
+        for service in self.config.auth_services:
+            self._version_probe(service, bundle, live=True)
         self._manage_live("check", "--no-color", context="Live Django checks")
         migrations = self._manage_live(
             "showmigrations", "--plan", "--no-color", context="Live migration state"
