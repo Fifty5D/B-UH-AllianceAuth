@@ -1,4 +1,7 @@
 import {expect, test} from "./offline-ui";
+import {registerThemeChecks} from "./theme-checks";
+
+registerThemeChecks(false);
 
 test("shared console style matches Moon Tax and leaves existing controls available", async ({page}) => {
   const response = await page.request.post("/__test__/login/", {form: {role: "director"}});

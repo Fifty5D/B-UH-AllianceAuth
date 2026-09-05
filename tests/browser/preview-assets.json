@@ -58,5 +58,15 @@
     "file": "jquery_3.7.1_jquery.min.js",
     "sha512": "v2CJ7UaYy4JwqLDIrZUI/4hqeoQieOmAZNXBeQyjo21dadnwR+8ZaIJVT8EE2iyI61OV8e6M8PP2/4hpQINQ/g==",
     "size": 87533
+  },
+  {
+    "url": "https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css",
+    "file": "bootstrap_5.3.3_css_bootstrap.min.css",
+    "sha512": "jnSuA4Ss2PkkikSOLtYs8BlYIeeIK1h99ty4YfvRPAlzr377vr3CXDb7sb7eEEBYjDtcYj+AjBH3FLv5uSJuXg=="
+  },
+  {
+    "url": "https://cdnjs.cloudflare.com/ajax/libs/bootswatch/5.3.3/materia/bootstrap.min.css",
+    "file": "bootswatch_5.3.3_materia_bootstrap.min.css",
+    "sha512": "2S9Do+uTmZmmJpdmAcOKdUrK/YslcvAuRfIF2ws8+BW9AvZXMRZM+o8Wq+PZrfISD6ZlIaeCWWZAdeprXIoYuQ=="
   }
 ]
