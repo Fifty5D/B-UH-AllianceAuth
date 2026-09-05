@@ -94,6 +94,40 @@ async function checkStickyHeaders(page: Page, root: string) {
   }
 }
 
+async function checkChartLabels(page: Page) {
+  // The legacy chart uses canvas text. Inspect the rendered pixels so the check
+  // covers CSS filters and antialiasing, which DOM text colors cannot describe.
+  await expect(page.locator("#vh-chart-empty")).toBeHidden();
+  const pixels = await page.locator("#vh-history-chart").screenshot();
+  const contrast = await page.evaluate(async (encoded) => {
+    const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], {type: "image/png"}));
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d")!;
+    context.drawImage(bitmap, 0, 0);
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    const luminance = (offset: number) => [0, 1, 2].reduce((sum, channel) => {
+      const value = image.data[offset + channel] / 255;
+      const linear = value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
+      return sum + linear * [.2126, .7152, .0722][channel];
+    }, 0);
+    const background = luminance(image.data.length - 4);
+    let strongest = 1;
+    // The left 38 pixels contain percentage labels; plotted data starts at 42.
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < Math.min(38, canvas.width); x++) {
+        const text = luminance((y * canvas.width + x) * 4);
+        strongest = Math.max(strongest, (Math.max(text, background) + .05) / (Math.min(text, background) + .05));
+      }
+    }
+    bitmap.close();
+    return strongest;
+  }, pixels.toString("base64"));
+  expect(contrast, "rendered chart axis text remains readable").toBeGreaterThanOrEqual(4.5);
+}
+
 export function registerThemeChecks(capture: boolean) {
   for (const theme of authThemes) {
     test(`console readability and sticky tables in ${theme.name}`, async ({page}) => {
@@ -113,6 +147,7 @@ export function registerThemeChecks(capture: boolean) {
           await expect(page.locator(root)).toHaveCSS("color-scheme", theme.light ? "light" : "dark");
           await checkReadableText(page, root);
           if (app === "vps") {
+            await checkChartLabels(page);
             await page.getByRole("button", {name: /Restart Auth services$/}).first().click();
             await expect(page.locator("#vh-restart-submit")).toBeDisabled();
             await expect(page.locator(".vh-modal")).toHaveCSS("background-color", theme.light ? "rgb(255, 255, 255)" : "rgb(25, 29, 38)");

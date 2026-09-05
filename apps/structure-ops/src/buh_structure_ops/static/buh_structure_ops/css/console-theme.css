@@ -430,6 +430,9 @@ html #moon-tax-app {
 #buh-ops-schedule .schedule-day.outside { opacity: 1; color: var(--console-muted); }
 #buh-ops-schedule .schedule-filter-chip:not(.active) { opacity: 1; color: var(--console-muted); border-style: dashed; }
 html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"], [data-bs-theme="light"]):not([data-bs-theme="dark"]) #buh-ops-schedule :is(.schedule-event-pill, .schedule-week-card) time { color: var(--console-text); }
+/* The installed VPS chart paints fixed pale colors onto a transparent canvas.
+ * Darken those pixels on light panels without changing its data or drawing code. */
+html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"], [data-bs-theme="light"]):not([data-bs-theme="dark"]) #vh-history-chart { filter: brightness(.55); }
 
 /* Keep the familiar Moon Tax banner in light themes as well. Its children use
  * a complete dark palette so inherited light-theme text cannot disappear. */
@@ -460,6 +463,10 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --tax-green: #45d38a;
     --tax-border: rgba(255, 255, 255, .09);
     --ar-muted: rgba(255, 255, 255, .75);
+    --ar-green: #45d38a;
+    --ar-red: #ff6277;
+    --vh-green: #45d38a;
+    --vh-red: #ff6277;
     --vh-muted: rgba(255, 255, 255, .75);
     color: #fff;
     border-color: var(--console-border);
