@@ -64,6 +64,8 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
 html #moon-tax-app {
     --tax-teal: var(--console-teal);
     --tax-violet: var(--console-violet);
+    --tax-violet-label: var(--console-violet-label);
+    --tax-danger-hover: var(--console-red);
     --tax-blue: var(--console-blue);
     --tax-red: var(--console-red);
     --tax-gold: var(--console-gold);
@@ -418,6 +420,11 @@ html #moon-tax-app {
     opacity: 1;
 }
 #moon-tax-app :is(.tax-policy-mode, .btn-tax-action:hover) { color: var(--console-violet-label); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-secondary, .badge.bg-secondary, .badge.text-bg-light, .badge.bg-light) { background-color: var(--console-secondary) !important; color: var(--console-text) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-danger, .badge.bg-danger) { background-color: rgba(255, 98, 119, .15) !important; color: var(--console-red) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-success, .badge.bg-success) { background-color: rgba(69, 211, 138, .15) !important; color: var(--console-green) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-warning, .badge.bg-warning) { background-color: rgba(240, 188, 83, .15) !important; color: var(--console-gold) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-info, .badge.bg-info) { background-color: rgba(82, 168, 255, .15) !important; color: var(--console-blue) !important; }
 #moon-tax-app .tax-bulk-toolbar { background: var(--console-solid); color: var(--console-text); }
 #moon-tax-app .tax-hero-strip { color: #fff; }
 #buh-ops-schedule .schedule-day.outside { opacity: 1; color: var(--console-muted); }
@@ -430,6 +437,13 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --console-text: #fff;
     --console-muted: rgba(255, 255, 255, .75);
     --console-teal: #27d3bd;
+    --console-violet: #8b7cff;
+    --console-violet-label: #b8afff;
+    --console-blue: #52a8ff;
+    --console-red: #ff6277;
+    --console-gold: #f0bc53;
+    --console-green: #45d38a;
+    --console-link-hover: #35dec7;
     --console-border: rgba(255, 255, 255, .09);
     --console-solid: #191d26;
     --bs-body-color: #fff;
@@ -438,6 +452,12 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --bs-link-color-rgb: 39, 211, 189;
     --bs-link-hover-color-rgb: 53, 222, 199;
     --tax-teal: #27d3bd;
+    --tax-violet: #8b7cff;
+    --tax-violet-label: #b8afff;
+    --tax-blue: #52a8ff;
+    --tax-red: #ff6277;
+    --tax-gold: #f0bc53;
+    --tax-green: #45d38a;
     --tax-border: rgba(255, 255, 255, .09);
     --ar-muted: rgba(255, 255, 255, .75);
     --vh-muted: rgba(255, 255, 255, .75);

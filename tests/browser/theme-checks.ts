@@ -36,7 +36,7 @@ async function checkReadableText(page: Page, root: string) {
     };
     const failures: string[] = [];
     let checked = 0;
-    const selectors = 'h1,h2,h3,p,small,label,th,td,a,button,input,select,[class*="-status"],[class*="-state"],[class*="-kicker"],[class*="-tag"],.ar-stats strong,.ops-kpi strong';
+    const selectors = 'h1,h2,h3,p,small,em,summary,label,th,td,a,button,input,select,.badge,[class*="-status"],[class*="-state"],[class*="-kicker"],[class*="-tag"],.ar-stats strong,.ops-kpi strong';
     for (const element of scope.querySelectorAll(selectors)) {
       const style = getComputedStyle(element);
       if (!element.getClientRects().length || style.visibility !== "visible" || style.opacity === "0"
@@ -108,7 +108,7 @@ export function registerThemeChecks(capture: boolean) {
           await page.setViewportSize({width: 390, height: 844});
           await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
         }
-        for (const app of ["moon-tax", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
+        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-payments", "moon-tax-policy", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
           const root = await openConsole(page, app);
           await expect(page.locator(root)).toHaveCSS("color-scheme", theme.light ? "light" : "dark");
           await checkReadableText(page, root);
