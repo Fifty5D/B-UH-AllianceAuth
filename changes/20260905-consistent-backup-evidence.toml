@@ -1,3 +1,0 @@
-app = "platform"
-kind = "fix"
-summary = "Keep database dumps and backup evidence counts consistent under concurrent writes, with a bounded lock and unchanged independent restore verification."

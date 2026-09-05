@@ -1,3 +1,0 @@
-app = "structure-ops"
-kind = "fix"
-summary = "Keep console table headers visible while scrolling and adapt Moon Tax, Structure Operations, Schedule, ESI Archive, and VPS Health to Auth's light and dark themes."
