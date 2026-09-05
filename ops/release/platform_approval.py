@@ -560,9 +560,28 @@ def _verify_source_run(
         or run.get("head_branch") != config.sync_branch
         or _workflow_path(run) != ".github/workflows/source-ci.yml"
         or _repo_name(run.get("head_repository")) != config.repository
-        or number not in _run_pr_numbers(run)
     ):
         raise ApprovalError("Recorded sync PR Source CI evidence is invalid")
+    if number in _run_pr_numbers(run):
+        return
+    if run.get("pull_requests") != []:
+        raise ApprovalError("Recorded Source CI pull-request association is invalid")
+
+    # GitHub can clear a run's pull_requests array after merge. Readiness already
+    # bound this exact run/attempt to the open PR, and authorize() has checked the
+    # approval-bearing merge. Use the durable commit-to-PR association only here;
+    # never relax readiness or accept a missing, malformed, or conflicting list.
+    pulls = _pages(
+        client, _path(config.repository, f"commits/{config.release_commit}/pulls")
+    )
+    matches = [
+        pr for pr in pulls
+        if isinstance(pr, dict) and pr.get("number") == number
+    ]
+    if len(matches) != 1:
+        raise ApprovalError("Source CI release lacks one exact merged PR association")
+    merged_pr = _validate_pr(matches[0], config, number, state="closed")
+    _timestamp("Source CI associated PR merge timestamp", merged_pr.get("merged_at"))
 
 
 def _verify_merge_commit(

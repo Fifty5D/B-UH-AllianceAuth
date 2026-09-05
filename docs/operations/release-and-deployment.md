@@ -134,6 +134,15 @@ A release is never rebuilt after publication. A correction receives new app and
 platform versions. Publication and synchronization do not deploy or authorize a
 deployment.
 
+GitHub can return an empty `pull_requests` array on a successful Source CI run
+after its PR is merged. Post-merge authorization verifies the recorded run ID,
+attempt, workflow, event, repository, branch, and exact release commit first.
+Only for an explicitly empty array, it then uses the release commit's associated
+PRs endpoint and revalidates the exact closed, merged synchronization PR. Missing,
+malformed, or conflicting associations still fail. Readiness continues to require
+the direct run-to-open-PR association before the owner approves the release.
+The approval marker, preflight, release lineage, and artifact checks are unchanged.
+
 ## Required production controls
 
 Platform v2 must retain or strengthen the legacy controls:
