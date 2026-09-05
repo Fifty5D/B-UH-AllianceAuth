@@ -1,4 +1,0 @@
-app = "platform"
-kind = "fix"
-summary = "Verify merged Source CI evidence when GitHub clears the run pull-request association."
-deployment_predecessor = "0.4.8"
