@@ -121,6 +121,11 @@
     font-size: .82rem;
 }
 #buh-structure-ops .ops-hero-strip i { color: var(--console-teal); }
+#buh-structure-ops .ops-hero-main > div:first-child { min-width: 0; }
+#buh-structure-ops .ops-hero-actions { flex-shrink: 0; }
+#buh-structure-ops .ops-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); }
+#buh-structure-ops .ops-kpi small,
+#buh-structure-ops .ops-kpi em { white-space: normal; overflow: visible; line-height: 1.4; }
 :is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-panel, .ops-jump-nav, .schedule-toolbar, .schedule-filter-panel, .schedule-calendar-panel, .schedule-next-panel, .schedule-tip-panel, .ar-panel, .vh-section) {
     border-color: var(--console-border);
     border-radius: 13px;

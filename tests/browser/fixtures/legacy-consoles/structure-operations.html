@@ -1,0 +1,169 @@
+
+<main id="buh-structure-ops">
+    <section class="ops-hero mb-3">
+        <div class="ops-hero-main">
+            <div>
+                <div class="ops-eyebrow"><span></span> LIVE CORPORATION INFRASTRUCTURE</div>
+                <h1>Structure Operations</h1>
+                <p>Fuel forecasts, moon pulls, fittings, timers, wars, and synchronization health in one command center.</p>
+            </div>
+            <div class="ops-hero-actions">
+
+                    <form method="post" action="/mock/buh_structure_ops:refresh_now">
+                        <input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only">
+                        <button class="btn btn-ops-ghost" type="submit"><i class="fa-solid fa-rotate me-1"></i> Sync now</button>
+                    </form>
+                    <a class="btn btn-ops-primary" href="/mock/buh_structure_ops:export_csv?"><i class="fa-solid fa-file-arrow-down me-1"></i> Export</a>
+
+            </div>
+        </div>
+        <div class="ops-hero-strip">
+            <span><i class="fa-solid fa-building"></i> <strong>3</strong> structures</span>
+            <span><i class="fa-solid fa-satellite-dish"></i> 30m structures · 10m extractions · 5m alerts</span>
+            <span><i class="fa-solid fa-shield-halved"></i> Admin-only visibility</span>
+            <span><i class="fa-regular fa-clock"></i> All times UTC</span>
+        </div>
+    </section>
+
+
+
+    <section class="ops-kpi-grid mb-3" aria-label="Operational summary">
+        <article class="ops-kpi"><span class="ops-kpi-icon teal"><i class="fa-solid fa-industry"></i></span><div><small>Tracked structures</small><strong>3</strong><em>3/3 corporations ready</em></div></article>
+        <article class="ops-kpi danger"><span class="ops-kpi-icon red"><i class="fa-solid fa-gas-pump"></i></span><div><small>Fuel critical</small><strong>1</strong><em>1 warning under 14 days</em></div></article>
+        <article class="ops-kpi"><span class="ops-kpi-icon gold"><i class="fa-solid fa-moon"></i></span><div><small>Next extraction</small><strong class="ops-kpi-time">14 hours, 59 minutes</strong><em>2026-09-05 17:52</em></div></article>
+        <article class="ops-kpi "><span class="ops-kpi-icon red"><i class="fa-solid fa-shield-halved"></i></span><div><small>Threat state</small><strong>0 / 0</strong><em>reinforced / active wars</em></div></article>
+        <article class="ops-kpi"><span class="ops-kpi-icon blue"><i class="fa-solid fa-bell"></i></span><div><small>Open alerts</small><strong>1</strong><em>1 unacknowledged</em></div></article>
+    </section>
+
+    <nav class="ops-jump-nav mb-3" aria-label="Dashboard sections">
+        <a href="#structures"><i class="fa-solid fa-building"></i> Structures</a>
+        <a href="#alerts"><i class="fa-solid fa-bell"></i> Alerts <span>1</span></a>
+        <a href="#wars"><i class="fa-solid fa-shield-halved"></i> Wars <span>0</span></a>
+        <a href="#setup"><i class="fa-solid fa-key"></i> Setup & access</a>
+    </nav>
+
+    <section id="structures" class="ops-panel mb-3">
+        <div class="ops-panel-heading">
+            <div><span class="ops-section-kicker">FLEET-WIDE VIEW</span><h2>Structure board</h2></div>
+            <span class="text-body-secondary">30-day refill target by default</span>
+        </div>
+        <form class="ops-filter-grid" method="get">
+            <div><label for="corp-filter">Corporation</label><select class="form-select" id="corp-filter" name="corporation"><option value="">All corporations</option></select></div>
+            <div><label for="fuel-filter">Fuel state</label><select class="form-select" id="fuel-filter" name="fuel"><option value="">All fuel states</option><option value="critical" >Critical (&lt;7d)</option><option value="warning" >Warning (7–14d)</option><option value="healthy" >Healthy</option><option value="unknown" >Unknown</option></select></div>
+            <div class="ops-search"><label for="structure-search">Search</label><input class="form-control" id="structure-search" name="search" value="" placeholder="Structure, system, or corporation"></div>
+            <label class="ops-check"><input class="form-check-input" type="checkbox" name="attention" value="1" > Attention only</label>
+            <button class="btn btn-outline-secondary" type="submit"><i class="fa-solid fa-filter me-1"></i> Apply</button>
+            <a class="btn btn-link" href="/mock/buh_structure_ops:dashboard#structures">Clear</a>
+        </form>
+        <div class="table-responsive">
+            <table class="table ops-table align-middle mb-0">
+                <thead><tr><th>Structure</th><th>Fuel forecast</th><th>30-day refill</th><th>Extraction / timer</th><th>Threat</th><th>Sync</th><th></th></tr></thead>
+                <tbody>
+
+                    <tr class="ops-structure-row fuel-healthy">
+                        <td><div class="ops-structure-name"><i class="fa-solid fa-building-shield"></i><div><strong>Northstar Foundry</strong><small>Synthetic Industry Corporation · Ainsan · Athanor</small><span class="badge text-bg-secondary">Full Power</span></div></div></td>
+                        <td>
+                            <div class="ops-fuel-top"><strong>36.7 days</strong><span class="ops-status-pill healthy">healthy</span></div>
+                            <div class="progress ops-fuel-progress" role="progressbar"><div class="progress-bar" style="width:100%"></div></div>
+                            <small>4,404 blocks · 120/day</small>
+                        </td>
+                        <td><strong>0 blocks</strong><small>to 30 days</small></td>
+                        <td>
+                            <div class="ops-deadline"><i class="fa-solid fa-moon"></i><strong data-countdown="2026-09-06T02:52:10.331543+00:00">23 hours, 59 minutes</strong><small>Started · Sep 06 02:52</small></div>
+
+                        </td>
+                        <td><span class="ops-threat clear"><i class="fa-solid fa-shield"></i> Clear</span></td>
+                        <td><small>5 minutes ago</small></td>
+                        <td><button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#structure-1" aria-expanded="false"><i class="fa-solid fa-chevron-down"></i></button></td>
+                    </tr>
+                    <tr class="ops-detail-row"><td colspan="7"><div class="collapse" id="structure-1"><div class="ops-detail-grid">
+                        <article><h3>Fuel history</h3><canvas class="ops-sparkline" width="420" height="120" data-history="[{&quot;quantity&quot;: 3600, &quot;at&quot;: &quot;2026-09-05T02:52:10.331543+00:00&quot;}]"></canvas><div class="ops-detail-stats"><span>Expires <strong>Unknown</strong></span><span>Observed use <strong>120/day</strong></span></div></article>
+                        <article><h3>Services & rigs</h3><div class="ops-tag-list"><span class="service"><i class="fa-solid fa-bolt"></i> Moon Drill</span></div><div class="ops-tag-list mt-2"><span class="rig"><i class="fa-solid fa-gears"></i> Moon Drilling Efficiency I</span></div></article>
+                        <article><h3>Operations links</h3><div class="d-grid gap-2"><a class="btn btn-sm btn-outline-info" href="/mock/structures:structure_details"><i class="fa-solid fa-magnifying-glass me-1"></i> Full fitting & assets</a><a class="btn btn-sm btn-outline-info" href="/mock/moonmining:extraction_details"><i class="fa-solid fa-moon me-1"></i> Extraction details</a></div></article>
+                        <article><h3>Manager notes & target</h3><form method="post" action="/mock/buh_structure_ops:update_preference"><input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only"><label>Fuel target days</label><input class="form-control form-control-sm mb-2" type="number" min="7" max="180" name="target_fuel_days" value="30"><label>Notes</label><textarea class="form-control form-control-sm mb-2" rows="2" name="notes">Synthetic preview</textarea><button class="btn btn-sm btn-ops-primary" type="submit">Save</button></form></article>
+                    </div></div></td></tr>
+
+                    <tr class="ops-structure-row fuel-warning">
+                        <td><div class="ops-structure-name"><i class="fa-solid fa-building-shield"></i><div><strong>Orion Prospecting</strong><small>Synthetic Industry Corporation · Ainsan · Athanor</small><span class="badge text-bg-secondary">Full Power</span></div></div></td>
+                        <td>
+                            <div class="ops-fuel-top"><strong>11.2 days</strong><span class="ops-status-pill warning">warning</span></div>
+                            <div class="progress ops-fuel-progress" role="progressbar"><div class="progress-bar" style="width:37%"></div></div>
+                            <small>1,344 blocks · 120/day</small>
+                        </td>
+                        <td><strong>2,256 blocks</strong><small>to 30 days</small></td>
+                        <td>
+                            <div class="ops-deadline"><i class="fa-solid fa-moon"></i><strong data-countdown="2026-09-07T02:52:10.331543+00:00">1 day, 23 hours</strong><small>Started · Sep 07 02:52</small></div>
+
+                        </td>
+                        <td><span class="ops-threat clear"><i class="fa-solid fa-shield"></i> Clear</span></td>
+                        <td><small>5 minutes ago</small></td>
+                        <td><button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#structure-2" aria-expanded="false"><i class="fa-solid fa-chevron-down"></i></button></td>
+                    </tr>
+                    <tr class="ops-detail-row"><td colspan="7"><div class="collapse" id="structure-2"><div class="ops-detail-grid">
+                        <article><h3>Fuel history</h3><canvas class="ops-sparkline" width="420" height="120" data-history="[{&quot;quantity&quot;: 3600, &quot;at&quot;: &quot;2026-09-05T02:52:10.331543+00:00&quot;}]"></canvas><div class="ops-detail-stats"><span>Expires <strong>Unknown</strong></span><span>Observed use <strong>120/day</strong></span></div></article>
+                        <article><h3>Services & rigs</h3><div class="ops-tag-list"><span class="service"><i class="fa-solid fa-bolt"></i> Moon Drill</span></div><div class="ops-tag-list mt-2"><span class="rig"><i class="fa-solid fa-gears"></i> Moon Drilling Efficiency I</span></div></article>
+                        <article><h3>Operations links</h3><div class="d-grid gap-2"><a class="btn btn-sm btn-outline-info" href="/mock/structures:structure_details"><i class="fa-solid fa-magnifying-glass me-1"></i> Full fitting & assets</a><a class="btn btn-sm btn-outline-info" href="/mock/moonmining:extraction_details"><i class="fa-solid fa-moon me-1"></i> Extraction details</a></div></article>
+                        <article><h3>Manager notes & target</h3><form method="post" action="/mock/buh_structure_ops:update_preference"><input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only"><label>Fuel target days</label><input class="form-control form-control-sm mb-2" type="number" min="7" max="180" name="target_fuel_days" value="30"><label>Notes</label><textarea class="form-control form-control-sm mb-2" rows="2" name="notes">Synthetic preview</textarea><button class="btn btn-sm btn-ops-primary" type="submit">Save</button></form></article>
+                    </div></div></td></tr>
+
+                    <tr class="ops-structure-row fuel-critical">
+                        <td><div class="ops-structure-name"><i class="fa-solid fa-building-shield"></i><div><strong>Horizon Refinery</strong><small>Synthetic Industry Corporation · Ainsan · Athanor</small><span class="badge text-bg-secondary">Full Power</span></div></div></td>
+                        <td>
+                            <div class="ops-fuel-top"><strong>4.5 days</strong><span class="ops-status-pill critical">critical</span></div>
+                            <div class="progress ops-fuel-progress" role="progressbar"><div class="progress-bar" style="width:15%"></div></div>
+                            <small>540 blocks · 120/day</small>
+                        </td>
+                        <td><strong>3,060 blocks</strong><small>to 30 days</small></td>
+                        <td>
+                            <div class="ops-deadline"><i class="fa-solid fa-moon"></i><strong data-countdown="2026-09-08T02:52:10.331543+00:00">2 days, 23 hours</strong><small>Started · Sep 08 02:52</small></div>
+
+                        </td>
+                        <td><span class="ops-threat clear"><i class="fa-solid fa-shield"></i> Clear</span></td>
+                        <td><small>5 minutes ago</small></td>
+                        <td><button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#structure-3" aria-expanded="false"><i class="fa-solid fa-chevron-down"></i></button></td>
+                    </tr>
+                    <tr class="ops-detail-row"><td colspan="7"><div class="collapse" id="structure-3"><div class="ops-detail-grid">
+                        <article><h3>Fuel history</h3><canvas class="ops-sparkline" width="420" height="120" data-history="[{&quot;quantity&quot;: 3600, &quot;at&quot;: &quot;2026-09-05T02:52:10.331543+00:00&quot;}]"></canvas><div class="ops-detail-stats"><span>Expires <strong>Unknown</strong></span><span>Observed use <strong>120/day</strong></span></div></article>
+                        <article><h3>Services & rigs</h3><div class="ops-tag-list"><span class="service"><i class="fa-solid fa-bolt"></i> Moon Drill</span></div><div class="ops-tag-list mt-2"><span class="rig"><i class="fa-solid fa-gears"></i> Moon Drilling Efficiency I</span></div></article>
+                        <article><h3>Operations links</h3><div class="d-grid gap-2"><a class="btn btn-sm btn-outline-info" href="/mock/structures:structure_details"><i class="fa-solid fa-magnifying-glass me-1"></i> Full fitting & assets</a><a class="btn btn-sm btn-outline-info" href="/mock/moonmining:extraction_details"><i class="fa-solid fa-moon me-1"></i> Extraction details</a></div></article>
+                        <article><h3>Manager notes & target</h3><form method="post" action="/mock/buh_structure_ops:update_preference"><input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only"><label>Fuel target days</label><input class="form-control form-control-sm mb-2" type="number" min="7" max="180" name="target_fuel_days" value="30"><label>Notes</label><textarea class="form-control form-control-sm mb-2" rows="2" name="notes">Synthetic preview</textarea><button class="btn btn-sm btn-ops-primary" type="submit">Save</button></form></article>
+                    </div></div></td></tr>
+
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <div class="ops-two-column mb-3">
+        <section id="alerts" class="ops-panel">
+            <div class="ops-panel-heading"><div><span class="ops-section-kicker">ACTION QUEUE</span><h2>Alerts</h2></div><span class="badge text-bg-danger">1 new</span></div>
+            <div class="ops-alert-list">
+                <div class="ops-empty compact"><i class="fa-solid fa-circle-check"></i><strong>No active alerts</strong></div>
+            </div>
+        </section>
+        <section id="wars" class="ops-panel">
+            <div class="ops-panel-heading"><div><span class="ops-section-kicker">CONCORD & COMBAT</span><h2>War and timer watch</h2></div></div>
+            <div class="ops-empty compact"><i class="fa-solid fa-shield"></i><strong>No active wars found</strong><span>War declarations and end events are derived from the dedicated directors’ EVE notifications.</span></div>
+
+        </section>
+    </div>
+
+
+    <section id="setup" class="ops-panel mb-4">
+        <div class="ops-panel-heading"><div><span class="ops-section-kicker">FULL ADMINISTRATORS</span><h2>Authorization and access</h2></div><a class="btn btn-sm btn-outline-secondary" href="/mock/admin:buh_structure_ops_structureopsaccessgroup_changelist"><i class="fa-solid fa-users-gear me-1"></i> Manage access groups</a></div>
+        <div class="ops-setup-grid">
+            <div>
+                <h3>Required corporations</h3>
+                <p class="text-body-secondary">A character can authorize only the corporation it currently belongs to. Repeat both authorizations for B-UH and every holding corporation.</p>
+                <div class="table-responsive"><table class="table table-sm ops-setup-table"><thead><tr><th>Corporation</th><th>Structures director</th><th>Refinery director</th><th>Ready</th><th></th></tr></thead><tbody><tr><td colspan="5">Add B-UH and every holding corporation below.</td></tr></tbody></table></div>
+                <div class="ops-auth-buttons"><a class="btn btn-outline-info" href=""><i class="fa-solid fa-building-circle-check me-1"></i> Authorize Structures director</a><a class="btn btn-outline-info" href=""><i class="fa-solid fa-moon me-1"></i> Authorize Moon Mining director</a></div>
+            </div>
+            <div>
+                <h3>Add required corporation</h3>
+                <form class="ops-add-corp" method="post" action="/mock/buh_structure_ops:add_tracked_corporation"><input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only"><label>Corporation ID</label><label>Corporation name</label><label>Note (optional)</label><button class="btn btn-ops-primary mt-2" type="submit">Add corporation</button></form>
+                <div class="ops-access-levels mt-3"><h3>Access levels</h3><div><strong>Viewers</strong><span>Read-only full dashboard</span></div><div><strong>Managers</strong><span>Refresh, acknowledge, notes, targets, export</span></div><div><strong>Full administrators</strong><span>Owner setup and access control</span></div></div>
+            </div>
+        </div>
+    </section>
+
+</main>

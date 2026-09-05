@@ -17,6 +17,11 @@ for (const viewport of [
       expect(response.ok()).toBeTruthy();
       const legacy = app === "archive" || app === "vps";
       await page.goto(app === "schedule" ? "/structure-operations/schedule/" : "/structure-operations/");
+      if (app === "structure-operations") {
+        await page.locator("#buh-structure-ops").evaluate((element, html) => {
+          element.outerHTML = html;
+        }, readFileSync(join(fixtures, "structure-operations.html"), "utf8"));
+      }
       if (legacy) {
         // Use actual released legacy markup and scripts with synthetic data.
         // They are not installed in, or connected to, production by these tests.
@@ -39,7 +44,7 @@ for (const viewport of [
       await expect(page.locator(root)).toBeVisible();
       if (app === "vps") {
         await expect(page.locator("#vh-connection-label")).toHaveText("Live");
-        await page.getByRole("button", {name: "Restart Auth services", exact: true}).first().click();
+        await page.getByRole("button", {name: /Restart Auth services$/}).first().click();
         await expect(page.locator("#vh-restart-submit")).toBeDisabled();
         await expect(page.locator(".vh-modal")).toHaveCSS("background-color", "rgb(25, 29, 38)");
         await page.getByRole("button", {name: "Cancel", exact: true}).click();

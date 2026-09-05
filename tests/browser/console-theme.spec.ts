@@ -24,20 +24,20 @@ test("shared console style matches Moon Tax and leaves existing controls availab
     (element) => getComputedStyle(element).backgroundColor,
   )).toBe(panelBackground);
   await expect(page.getByRole("button", {name: "Sync now"})).toBeEnabled();
-  await expect(page.getByRole("link", {name: "Export", exact: true})).toHaveAttribute(
+  await expect(page.getByRole("link", {name: /Export$/})).toHaveAttribute(
     "href", /\/export\.csv/,
   );
   await page.getByLabel("Fuel state", {exact: true}).selectOption("warning");
-  await page.getByRole("button", {name: "Apply", exact: true}).click();
+  await page.getByRole("button", {name: /Apply$/}).click();
   await expect(page).toHaveURL(/fuel=warning/);
   await expect(page.getByLabel("Fuel state", {exact: true})).toHaveValue("warning");
 
-  await page.getByRole("link", {name: "Schedule", exact: true}).click();
+  await page.getByRole("link", {name: /Schedule$/}).click();
   await expect(page.getByRole("heading", {name: "Operations Schedule"})).toBeVisible();
   expect(await page.locator(".schedule-hero").evaluate(
     (element) => getComputedStyle(element).backgroundImage,
   )).toBe(reference.background);
-  await page.getByRole("button", {name: "Add event", exact: true}).click();
+  await page.getByRole("button", {name: /Add event$/}).click();
   await expect(page.getByRole("heading", {name: "Add to the schedule"})).toBeVisible();
   await expect(page.getByLabel("Title", {exact: true})).toBeEditable();
   await page.getByRole("button", {name: "Cancel", exact: true}).click();
