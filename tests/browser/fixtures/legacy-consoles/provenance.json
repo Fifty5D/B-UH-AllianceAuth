@@ -1,0 +1,14 @@
+[
+  {
+    "app": "buh_max_history",
+    "version": "2.0.0",
+    "wheel_sha256": "0c3edb62c93e734f3b248b52965d93a1785748a16909a1605f29abd69dad72bf",
+    "data": "synthetic; rendered from unchanged release templates"
+  },
+  {
+    "app": "buh_vps_health",
+    "version": "0.2.0",
+    "wheel_sha256": "b2f10c7b25d7134e83c32abb75fcf85198a4de829a59d4da81d199bebfce67dc",
+    "data": "synthetic; rendered from unchanged release templates"
+  }
+]

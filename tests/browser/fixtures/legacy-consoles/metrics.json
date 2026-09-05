@@ -1,0 +1,340 @@
+{
+  "buh_vps_health:live_metrics": {
+    "ok": true,
+    "generated_at": "2026-09-05T02:41:38.608289+00:00",
+    "host": {
+      "cpu_percent": 12.4,
+      "cpu_count": 4,
+      "memory_percent": 48.7,
+      "memory_used_bytes": 4000000000,
+      "memory_total_bytes": 8200000000,
+      "disk_percent": 4.2,
+      "disk_used_bytes": 10000000000,
+      "disk_total_bytes": 249000000000,
+      "load_average": [
+        0.11,
+        0.36,
+        0.36
+      ],
+      "uptime_seconds": 440000
+    },
+    "workload": {
+      "queue_depth": 0,
+      "active": 0,
+      "reserved": 0,
+      "scheduled": 0
+    },
+    "docker": {
+      "containers": []
+    },
+    "workers": {
+      "workers": []
+    },
+    "alerts": [],
+    "actions": []
+  },
+  "buh_vps_health:history": {
+    "points": [
+      {
+        "captured_at": "2026-09-04T01:41:38.608289+00:00",
+        "cpu_percent": 8.0,
+        "memory_percent": 48.0,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T02:11:38.608289+00:00",
+        "cpu_percent": 11.365883939231587,
+        "memory_percent": 48.19866933079506,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T02:41:38.608289+00:00",
+        "cpu_percent": 11.637189707302728,
+        "memory_percent": 48.38941834230865,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T03:11:38.608289+00:00",
+        "cpu_percent": 8.56448003223947,
+        "memory_percent": 48.56464247339503,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T03:41:38.608289+00:00",
+        "cpu_percent": 4.972790018768287,
+        "memory_percent": 48.71735609089952,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T04:11:38.608289+00:00",
+        "cpu_percent": 4.164302901347446,
+        "memory_percent": 48.8414709848079,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T04:41:38.608289+00:00",
+        "cpu_percent": 6.882338007204297,
+        "memory_percent": 48.932039085967226,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T05:11:38.608289+00:00",
+        "cpu_percent": 10.627946394875156,
+        "memory_percent": 48.98544972998846,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T05:41:38.608289+00:00",
+        "cpu_percent": 11.957432986493528,
+        "memory_percent": 48.999573603041505,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T06:11:38.608289+00:00",
+        "cpu_percent": 9.648473940967026,
+        "memory_percent": 48.9738476308782,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T06:41:38.608289+00:00",
+        "cpu_percent": 5.823915556442521,
+        "memory_percent": 48.90929742682568,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T07:11:38.608289+00:00",
+        "cpu_percent": 4.000039173797186,
+        "memory_percent": 48.80849640381959,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T07:41:38.608289+00:00",
+        "cpu_percent": 5.853708327998261,
+        "memory_percent": 48.67546318055115,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T08:11:38.608289+00:00",
+        "cpu_percent": 9.680668147306564,
+        "memory_percent": 48.515501371821465,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T08:41:38.608289+00:00",
+        "cpu_percent": 11.962429422779481,
+        "memory_percent": 48.33498815015591,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T09:11:38.608289+00:00",
+        "cpu_percent": 10.601151360628467,
+        "memory_percent": 48.141120008059865,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T09:41:38.608289+00:00",
+        "cpu_percent": 6.848386733339739,
+        "memory_percent": 47.94162585657242,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T10:11:38.608289+00:00",
+        "cpu_percent": 4.154410032481772,
+        "memory_percent": 47.74445889797317,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T10:41:38.608289+00:00",
+        "cpu_percent": 4.996051012913296,
+        "memory_percent": 47.55747955670515,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T11:11:38.608289+00:00",
+        "cpu_percent": 8.59950883865181,
+        "memory_percent": 47.388142109057284,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T11:41:38.608289+00:00",
+        "cpu_percent": 11.65178100291051,
+        "memory_percent": 47.24319750469207,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T12:11:38.608289+00:00",
+        "cpu_percent": 11.346622554144224,
+        "memory_percent": 47.128424227586414,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T12:41:38.608289+00:00",
+        "cpu_percent": 7.964594762838384,
+        "memory_percent": 47.04839792611048,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T13:11:38.608289+00:00",
+        "cpu_percent": 4.6151183832993175,
+        "memory_percent": 47.006308996366535,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T13:41:38.608289+00:00",
+        "cpu_percent": 4.377686551973504,
+        "memory_percent": 47.00383539116416,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T14:11:38.608289+00:00",
+        "cpu_percent": 7.4705929996089075,
+        "memory_percent": 47.04107572533686,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T14:41:38.608289+00:00",
+        "cpu_percent": 11.050233801918411,
+        "memory_percent": 47.11654534427985,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T15:11:38.608289+00:00",
+        "cpu_percent": 11.825503713618012,
+        "memory_percent": 47.22723551244401,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T15:41:38.608289+00:00",
+        "cpu_percent": 9.083623153231477,
+        "memory_percent": 47.36873336212768,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T16:11:38.608289+00:00",
+        "cpu_percent": 5.345464463148129,
+        "memory_percent": 47.53539782058624,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T16:41:38.608289+00:00",
+        "cpu_percent": 4.047873503628553,
+        "memory_percent": 47.72058450180107,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T17:11:38.608289+00:00",
+        "cpu_percent": 6.38384941870774,
+        "memory_percent": 47.9169105971825,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T17:41:38.608289+00:00",
+        "cpu_percent": 10.205706724966763,
+        "memory_percent": 48.11654920485049,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T18:11:38.608289+00:00",
+        "cpu_percent": 11.999647440429069,
+        "memory_percent": 48.31154136351338,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T18:41:38.608289+00:00",
+        "cpu_percent": 10.116330744480095,
+        "memory_percent": 48.49411335113861,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T19:11:38.608289+00:00",
+        "cpu_percent": 6.287269322015396,
+        "memory_percent": 48.65698659871879,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T19:41:38.608289+00:00",
+        "cpu_percent": 4.032884586227537,
+        "memory_percent": 48.79366786384915,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T20:11:38.608289+00:00",
+        "cpu_percent": 5.425847466572002,
+        "memory_percent": 48.89870809581163,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T20:41:38.608289+00:00",
+        "cpu_percent": 9.185474314837542,
+        "memory_percent": 48.967919672031485,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T21:11:38.608289+00:00",
+        "cpu_percent": 11.85518154513635,
+        "memory_percent": 48.99854334537461,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T21:41:38.608289+00:00",
+        "cpu_percent": 10.980452641917395,
+        "memory_percent": 48.98935824662338,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T22:11:38.608289+00:00",
+        "cpu_percent": 7.365509324781164,
+        "memory_percent": 48.940730556679775,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T22:41:38.608289+00:00",
+        "cpu_percent": 4.333913808337465,
+        "memory_percent": 48.85459890808828,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T23:11:38.608289+00:00",
+        "cpu_percent": 4.672901029485606,
+        "memory_percent": 48.734397097874115,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-04T23:41:38.608289+00:00",
+        "cpu_percent": 8.070807700421655,
+        "memory_percent": 48.58491719289176,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-05T00:11:38.608289+00:00",
+        "cpu_percent": 11.403614098136474,
+        "memory_percent": 48.412118485241756,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-05T00:41:38.608289+00:00",
+        "cpu_percent": 11.607153390595236,
+        "memory_percent": 48.22288991410025,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-05T01:11:38.608289+00:00",
+        "cpu_percent": 8.494292490980897,
+        "memory_percent": 48.024775425453356,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-05T01:41:38.608289+00:00",
+        "cpu_percent": 4.926981354705333,
+        "memory_percent": 47.82567321877702,
+        "disk_percent": 4.2
+      },
+      {
+        "captured_at": "2026-09-05T02:11:38.608289+00:00",
+        "cpu_percent": 4.184989388962112,
+        "memory_percent": 47.63352087074807,
+        "disk_percent": 4.2
+      }
+    ]
+  }
+}

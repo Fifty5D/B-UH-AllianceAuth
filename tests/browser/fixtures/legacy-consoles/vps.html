@@ -1,0 +1,95 @@
+
+<main id="buh-vps-health"
+      data-live-url="/mock/buh_vps_health:live_metrics"
+      data-history-url="/mock/buh_vps_health:history"
+      data-restart-url="/mock/buh_vps_health:restart_auth"
+      data-workers-url="/mock/buh_vps_health:set_workers"
+      data-updates-url="/mock/buh_vps_health:check_updates"
+      data-refresh-seconds="30"
+      data-worker-min="1"
+      data-worker-max="8">
+    <section class="vh-hero">
+        <div>
+            <p class="vh-eyebrow"><span class="vh-live-dot"></span> Live operations telemetry</p>
+            <h1>VPS Health</h1>
+            <p class="vh-subtitle">Host pressure, Docker state, Celery workload, queue depth, and guarded recovery controls in one place.</p>
+        </div>
+        <div class="vh-connection" aria-live="polite">
+            <span id="vh-connection-dot" class="vh-status-dot pending"></span>
+            <span><strong id="vh-connection-label">Connecting…</strong><small id="vh-updated-at">Waiting for first sample</small></span>
+        </div>
+    </section>
+
+    <div id="vh-agent-error" class="alert alert-danger d-none" role="alert"></div>
+    <section id="vh-alerts" class="vh-alerts" aria-live="polite">
+
+    </section>
+
+
+    <section class="vh-section">
+        <div class="vh-section-heading"><div><p class="vh-kicker">Physical host</p><h2>Resource pressure</h2></div><span id="vh-uptime" class="vh-chip">Uptime —</span></div>
+        <div class="vh-metric-grid">
+            <article class="vh-metric" data-metric="cpu"><div class="vh-metric-top"><span>CPU</span><i class="fa-solid fa-microchip"></i></div><strong id="vh-cpu">—</strong><div class="vh-meter"><i id="vh-cpu-bar"></i></div><small id="vh-cpu-detail">—</small></article>
+            <article class="vh-metric" data-metric="memory"><div class="vh-metric-top"><span>Memory</span><i class="fa-solid fa-memory"></i></div><strong id="vh-memory">—</strong><div class="vh-meter"><i id="vh-memory-bar"></i></div><small id="vh-memory-detail">—</small></article>
+            <article class="vh-metric" data-metric="disk"><div class="vh-metric-top"><span>Disk</span><i class="fa-solid fa-hard-drive"></i></div><strong id="vh-disk">—</strong><div class="vh-meter"><i id="vh-disk-bar"></i></div><small id="vh-disk-detail">—</small></article>
+            <article class="vh-metric" data-metric="load"><div class="vh-metric-top"><span>Load average</span><i class="fa-solid fa-wave-square"></i></div><strong id="vh-load">—</strong><div class="vh-load-steps"><i></i><i></i><i></i></div><small id="vh-load-detail">1 / 5 / 15 minute</small></article>
+            <article class="vh-metric" data-metric="network"><div class="vh-metric-top"><span>Network</span><i class="fa-solid fa-arrow-right-arrow-left"></i></div><strong id="vh-network">—</strong><small id="vh-network-detail">Receive / transmit</small></article>
+            <article class="vh-metric" data-metric="queue"><div class="vh-metric-top"><span>Task queue</span><i class="fa-solid fa-list-check"></i></div><strong id="vh-queue">—</strong><small id="vh-queue-detail">Waiting for workers</small></article>
+        </div>
+    </section>
+
+    <section class="vh-section vh-chart-shell">
+        <div class="vh-section-heading vh-chart-heading"><div><p class="vh-kicker">Stored history</p><h2>Pressure over time</h2></div><div class="vh-range" role="group" aria-label="History range"><button type="button" data-hours="1">1h</button><button type="button" data-hours="6">6h</button><button class="active" type="button" data-hours="24">24h</button><button type="button" data-hours="168">7d</button><button type="button" data-hours="720">30d</button></div></div>
+        <div class="vh-chart-wrap"><canvas id="vh-history-chart" height="260" aria-label="CPU, memory, and disk use history"></canvas><div id="vh-chart-empty" class="vh-chart-empty d-none">History will appear after the first scheduled snapshots.</div></div>
+        <div class="vh-chart-legend"><span><i class="cpu"></i>CPU</span><span><i class="memory"></i>Memory</span><span><i class="disk"></i>Disk</span></div>
+    </section>
+
+
+
+    <section class="vh-section">
+        <div class="vh-section-heading"><div><p class="vh-kicker">Docker Compose</p><h2>Container health</h2></div><div id="vh-container-summary" class="vh-chip">—</div></div>
+        <div class="table-responsive vh-table-shell"><table class="table table-hover align-middle mb-0"><thead><tr><th>Container</th><th>Service</th><th>Status</th><th>CPU</th><th>Memory</th><th>Restarts</th></tr></thead><tbody id="vh-containers"><tr><td colspan="6" class="vh-empty">Loading container state…</td></tr></tbody></table></div>
+    </section>
+
+
+
+    <section class="vh-section">
+        <div class="vh-section-heading"><div><p class="vh-kicker">Celery</p><h2>Worker workload</h2></div><div id="vh-worker-summary" class="vh-chip">—</div></div>
+        <div class="vh-workload-summary">
+            <div><span>Active now</span><strong id="vh-active-tasks">—</strong></div><div><span>Reserved</span><strong id="vh-reserved-tasks">—</strong></div><div><span>Scheduled</span><strong id="vh-scheduled-tasks">—</strong></div><div><span>Queued</span><strong id="vh-queued-tasks">—</strong></div>
+        </div>
+
+        <div id="vh-workload-error" class="vh-inline-warning d-none"></div>
+        <div class="table-responsive vh-table-shell"><table class="table table-hover align-middle mb-0"><thead><tr><th>Worker node</th><th>Concurrency</th><th>Active</th><th>Reserved</th><th>Scheduled</th><th>Running tasks</th></tr></thead><tbody id="vh-workers"><tr><td colspan="6" class="vh-empty">Inspecting workers…</td></tr></tbody></table></div>
+
+    </section>
+
+
+
+    <section class="vh-section vh-controls">
+        <div class="vh-section-heading"><div><p class="vh-kicker">Guarded operations</p><h2>Recovery controls</h2></div><span class="vh-chip safe"><i class="fa-solid fa-shield-halved"></i> Whitelisted actions only</span></div>
+        <div class="vh-control-grid">
+            <article><div><h3>Alliance Auth workers</h3><p>Add capacity when the queue grows, or remove idle workers. The selected count survives restarts and updates.</p></div><div class="vh-stepper"><button id="vh-worker-minus" type="button" aria-label="Remove one worker"><i class="fa-solid fa-minus"></i></button><output id="vh-worker-target">2</output><button id="vh-worker-plus" type="button" aria-label="Add one worker"><i class="fa-solid fa-plus"></i></button></div><button id="vh-apply-workers" class="btn btn-primary" type="button">Apply worker count</button><small>Allowed range: 1–8</small></article>
+            <article class="updates"><div><h3>Check everything for updates</h3><p>Read-only scan of Ubuntu packages, Auth Python packages, B-UH wheels, and registry-backed Docker images.</p></div><button id="vh-check-updates" class="btn btn-outline-info" type="button"><i class="fa-solid fa-arrows-rotate me-1"></i> Check for updates</button><small>No package, image, or application is installed or pulled by this scan.</small></article>
+            <article class="danger"><div><h3>Restart Auth containers</h3><p>Restarts Gunicorn, every current/future Auth worker, Beat, worker-services, and nginx. MariaDB, Redis, proxy, Grafana, and the Docker daemon stay online.</p></div><button class="btn btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#vh-restart-modal"><i class="fa-solid fa-rotate me-1"></i> Restart Auth services</button><small>Users may see a brief interruption while Gunicorn returns.</small></article>
+        </div>
+    </section>
+
+
+
+    <section class="vh-section" id="vh-update-section"><div class="vh-section-heading"><div><p class="vh-kicker">Read-only inventory</p><h2>Software updates</h2></div><span id="vh-update-stamp" class="vh-chip">Not checked yet</span></div><div id="vh-update-body" class="vh-update-empty"><i class="fa-solid fa-magnifying-glass"></i><p>Run “Check for updates” to compare the host, Auth environment, local B-UH release wheels, and Docker image registries.</p></div></section>
+
+
+
+    <section class="vh-section"><div class="vh-section-heading"><div><p class="vh-kicker">Audit trail</p><h2>Operational actions</h2></div></div><div id="vh-actions" class="vh-actions"><p class="vh-empty">No guarded operations have been requested.</p></div></section>
+
+
+    <footer class="vh-footer">B-UH VPS Health preview · Times are UTC · Live samples are ephemeral; historical snapshots follow the configured retention.</footer>
+</main>
+
+
+<div class="modal fade" id="vh-restart-modal" tabindex="-1" aria-labelledby="vh-restart-title" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><div class="modal-content vh-modal"><div class="modal-header"><h2 class="modal-title fs-5" id="vh-restart-title">Restart Alliance Auth services?</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><p>This performs a controlled Docker Compose restart of the Auth application tier. It does not restart the database, Redis, proxy, Grafana, or Docker daemon.</p><label for="vh-restart-confirm">Type <strong>RESTART AUTH</strong> to confirm</label><input id="vh-restart-confirm" class="form-control" autocomplete="off"></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button id="vh-restart-submit" type="button" class="btn btn-danger" disabled>Restart Auth services</button></div></div></div></div>
+
+
+<div id="vh-toast" class="vh-toast" role="status" aria-live="polite"></div>
+<form id="vh-csrf" class="d-none"><input type="hidden" name="csrfmiddlewaretoken" value="synthetic-preview-only"></form>

@@ -1,0 +1,3 @@
+app = "platform"
+kind = "internal"
+summary = "Verify the shared console appearance against Moon Tax in the browser and exercise existing filter and schedule-dialog controls."

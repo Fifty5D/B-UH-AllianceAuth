@@ -1,4 +1,5 @@
-import {expect, Page, test} from "@playwright/test";
+import {Page} from "@playwright/test";
+import {expect, test} from "./offline-ui";
 import {mkdirSync} from "node:fs";
 import {join} from "node:path";
 

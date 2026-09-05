@@ -153,7 +153,7 @@ services:
       BUH_BROWSER_BASE_URL: http://web:8000
     depends_on:
       web: {condition: service_healthy}
-    command: ["npx", "playwright", "test", "moon-tax.spec.ts"]
+    command: ["npx", "playwright", "test", "moon-tax.spec.ts", "console-theme.spec.ts"]
     networks: [test-internal]
 
 networks:

@@ -7,5 +7,6 @@ COPY tests/browser/package.json tests/browser/package-lock.json ./
 RUN npm ci --ignore-scripts
 
 COPY tests/browser/ ./
+RUN node cache-preview-assets.mjs
 
-CMD ["npx", "playwright", "test", "moon-tax.spec.ts"]
+CMD ["npx", "playwright", "test", "moon-tax.spec.ts", "console-theme.spec.ts"]
