@@ -1,0 +1,3 @@
+app = "platform"
+kind = "internal"
+summary = "Cover Mining Analytics theme contrast and sticky headers with scoped synthetic access, populated structured rows, and explicit loading completion before browser checks."

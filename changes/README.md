@@ -12,6 +12,19 @@ Supported kinds are `fix`, `security`, `performance`, `internal`, `feature`,
 and `breaking`. The release builder chooses the highest required version bump.
 Fragments are consumed only when an immutable release is published.
 
+Changes to registered platform inputs, including browser tests, synthetic test
+setup, CI, and release tooling, require a separate platform fragment even when
+an application fragment is already present:
+
+```toml
+app = "platform"
+kind = "internal"
+summary = "Expand synthetic browser coverage for the updated application."
+```
+
+Run the release planner against the latest synchronized release manifest before
+merging so missing or stale application and platform fragments are caught early.
+
 An exceptional, platform-only recovery may declare
 `deployment_predecessor = "X.Y.Z"` on a single `kind = "fix"` fragment.
 The builder accepts it only when the named immutable release, every skipped

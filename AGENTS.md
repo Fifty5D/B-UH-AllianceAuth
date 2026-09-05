@@ -18,6 +18,10 @@ production-critical paths.
 
 - Add focused regression tests for changed behavior and one schema-v1
   `changes/*.toml` fragment for every affected app.
+- Browser tests, synthetic test setup, CI, and other registered platform build
+  inputs also require an `app = "platform"` fragment. Before merging, validate the
+  release plan against the latest synchronized `RELEASE.json`; passing source
+  tests does not by itself prove that release metadata is complete.
 - Run `platform/testenv/run-fast.sh` before pushing. Let the complete Source CI suite
   validate MariaDB, Redis, Celery, fake ESI, migrations, backup restoration, and
   browser behavior.
