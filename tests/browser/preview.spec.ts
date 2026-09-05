@@ -1,4 +1,5 @@
-import {expect, Page, test} from "@playwright/test";
+import {devices, Page} from "@playwright/test";
+import {expect, test} from "./offline-ui";
 import {mkdirSync} from "node:fs";
 import {join} from "node:path";
 
@@ -69,6 +70,9 @@ test.describe("synthetic visual preview", () => {
     for (const previewPage of pages) {
       test(`${previewPage.name} at ${viewport.name}`, async ({page}) => {
         await page.setViewportSize(viewport);
+        if (viewport.name === "mobile") {
+          await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
+        }
         await loginAs(page, previewPage.role);
         await page.goto(previewPage.path, {waitUntil: "networkidle"});
         await expect(page.locator("#moon-tax-app")).toBeVisible();

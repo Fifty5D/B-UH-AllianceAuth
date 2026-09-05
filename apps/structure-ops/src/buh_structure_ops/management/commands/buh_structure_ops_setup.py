@@ -10,6 +10,7 @@ from buh_structure_ops.access_roles import (
     permissions,
     resolve_access_configuration,
 )
+from buh_structure_ops.console_theme import sync_console_theme
 from buh_structure_ops.services import synchronize_tracked_corporations
 
 LEGACY_GROUP_NAMES = (
@@ -136,6 +137,15 @@ class Command(BaseCommand):
 
         imported = synchronize_tracked_corporations()
         self.stdout.write(f"Imported {imported} newly connected corporation(s).")
+        try:
+            theme_changed = sync_console_theme(dry_run=dry_run)
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
+        if theme_changed:
+            self.stdout.write(
+                "Would apply the shared console style."
+                if dry_run else "Applied the shared console style."
+            )
         if dry_run:
             transaction.set_rollback(True)
             self.stdout.write(

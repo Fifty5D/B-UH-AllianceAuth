@@ -294,7 +294,7 @@ class PlatformConfigurationContracts(TestCase):
                 self.assertEqual(service.get("networks"), ["test-internal"])
         self.assertEqual(
             compose["services"]["browser"]["command"],
-            ["npx", "playwright", "test", "moon-tax.spec.ts"],
+            ["npx", "playwright", "test", "moon-tax.spec.ts", "console-theme.spec.ts"],
         )
         self.assertNotIn("ports", compose["services"]["redis"])
         self.assertEqual(

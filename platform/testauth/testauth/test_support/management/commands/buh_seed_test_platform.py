@@ -11,6 +11,7 @@ from django.contrib.auth.models import Permission
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from buh_structure_ops.console_theme import sync_console_theme
 from buh_moon_tax.models import (
     AssessmentAdjustment,
     AuditRun,
@@ -61,6 +62,7 @@ class Command(BaseCommand):
         # Rebuild only the reserved synthetic namespace on every run. This makes the
         # command safe to retry after a partially completed CI job.
         self._clear_synthetic_data()
+        sync_console_theme()
 
         director = self._user("test-director", 99000001, "Director Pilot")
         member = self._user(
@@ -82,6 +84,9 @@ class Command(BaseCommand):
             content_type__app_label="buh_moon_tax"
         )
         director.user_permissions.add(*all_tax_permissions)
+        director.user_permissions.add(
+            *Permission.objects.filter(content_type__app_label="buh_structure_ops")
+        )
         member_permissions = all_tax_permissions.filter(
             codename__in=(
                 "view_moon_tax",
