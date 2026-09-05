@@ -21,6 +21,11 @@ trap cleanup EXIT
 
 "${COMPOSE[@]}" up -d --wait db redis fake-esi
 
+# Verify backup evidence with a real concurrent writer and lock-failure paths.
+# Only the disposable Compose database is supplied to this regression drill.
+BUH_TEST_DATABASE_CONTAINER="$("${COMPOSE[@]}" ps -q db)" \
+    PYTHONPATH="${ROOT}" python3 "${ROOT}/tests/deploy/rehearse_snapshot_backup.py"
+
 # Recreate the exact deployed application schema and evidence from immutable
 # v0.3.3 wheels before current source is allowed to touch the database.
 "${COMPOSE[@]}" run --rm baseline \

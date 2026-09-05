@@ -5,6 +5,29 @@ does not replace or modify the legacy Moon Tax receiver during repository tests,
 release building, or installation. Production activation is a distinct,
 reviewed host operation.
 
+## Consistent backup evidence
+
+The receiver holds a MariaDB global read lock while it takes the database dump
+and reads the evidence-table counts. Background capture, retention and user writes
+wait during this short phase. It releases the lock before restoring the dump in
+the isolated verification container; the restored table set and row counts must
+still match exactly. This avoids comparing a transaction snapshot with later
+live counts.
+
+Lock acquisition waits at most 15 seconds. An independent watchdog inside the
+database container limits the client lifetime to 120 seconds, with a five-second
+forced-termination grace period. A lost connection or expired lock rejects the
+backup. The client cannot silently reconnect, and every normal/error path closes
+the session. MariaDB documents the lock and release behavior in
+[FLUSH](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/flush-commands/flush)
+and [UNLOCK TABLES](https://mariadb.com/docs/server/reference/sql-statements/transactions/transactions-unlock-tables).
+
+The upgrade CI lane rehearses concurrent writes, independent restoration, a real
+restore mismatch, capture errors and watchdog expiry using synthetic records.
+Receiver fixes require the existing root-only `install-receiver.sh` operation;
+merging application source or publishing a release does not update the host
+receiver. A failed production attempt is not automatically retried.
+
 ## What the receiver guarantees
 
 - Only the exact forced commands `preflight platform-v2` and
