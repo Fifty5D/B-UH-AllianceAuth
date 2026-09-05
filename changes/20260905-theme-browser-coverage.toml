@@ -1,3 +1,0 @@
-app = "platform"
-kind = "internal"
-summary = "Exercise Auth's five built-in theme choices, panel text contrast, sticky headers, horizontal scrolling, and VPS dialog behavior on desktop and mobile with synthetic data."

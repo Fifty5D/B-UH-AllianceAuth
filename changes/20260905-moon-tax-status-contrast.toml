@@ -1,3 +1,0 @@
-app = "moon-tax"
-kind = "fix"
-summary = "Allow Moon Tax's pending statuses, policy state labels, and hover text to use the shared readable theme palette while retaining standalone color fallbacks."
