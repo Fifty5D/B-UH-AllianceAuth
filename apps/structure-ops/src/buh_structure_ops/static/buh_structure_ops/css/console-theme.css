@@ -1,8 +1,8 @@
-/* Moon Tax is the visual reference. Every rule is scoped to the other consoles.
+/* Moon Tax is the visual reference. Every rule is scoped to these consoles.
  * Keep rules flat: Alliance Auth's CustomCSS compressor does not support nested
  * at-rules. The applications retain their existing responsive layout rules.
  */
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) {
     --console-teal: #27d3bd;
     --console-violet: #8b7cff;
     --console-blue: #52a8ff;
@@ -10,20 +10,69 @@
     --console-gold: #f0bc53;
     --console-green: #45d38a;
     --console-panel: rgba(25, 29, 38, .94);
+    --console-solid: #191d26;
+    --console-secondary: #222733;
+    --console-input: #141820;
+    --console-violet-label: #b8afff;
+    --console-heading-bg: #222733;
+    --console-soft-bg: rgba(0, 0, 0, .12);
+    --console-link-hover: #35dec7;
+    --console-select-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23bfc2c8' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
     --console-border: rgba(255, 255, 255, .09);
     --console-text: #fff;
     --console-muted: rgba(255, 255, 255, .75);
     --bs-body-color: var(--console-text);
+    --bs-heading-color: var(--console-text);
+    --bs-emphasis-color: var(--console-text);
     --bs-secondary-color: var(--console-muted);
-    --bs-body-bg: #191d26;
-    --bs-secondary-bg: #222733;
+    --bs-body-bg: var(--console-solid);
+    --bs-secondary-bg: var(--console-secondary);
     --bs-border-color: var(--console-border);
     --bs-link-color: var(--console-teal);
-    --bs-link-hover-color: #35dec7;
+    --bs-link-hover-color: var(--console-link-hover);
+    --bs-link-color-rgb: 39, 211, 189;
+    --bs-link-hover-color-rgb: 53, 222, 199;
     color: var(--console-text);
     color-scheme: dark;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) { max-width: 1780px; margin: 0 auto; padding: 0; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) { max-width: 1780px; margin: 0 auto; padding: 0; }
+/* Follow Auth's selected theme, including Bootstrap's explicit dark mode.
+ * The dark palette remains the default for Darkly and custom dark themes. */
+html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"], [data-bs-theme="light"]):not([data-bs-theme="dark"]) :is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) {
+    --console-teal: #08786d;
+    --console-violet: #6750c8;
+    --console-violet-label: #6750c8;
+    --console-blue: #1d67b5;
+    --console-red: #b32643;
+    --console-gold: #80520a;
+    --console-green: #17673e;
+    --console-panel: #fff;
+    --console-solid: #fff;
+    --console-secondary: #eef2f8;
+    --console-input: #f9fbfd;
+    --console-heading-bg: #edf1f7;
+    --console-soft-bg: rgba(34, 48, 72, .045);
+    --console-border: #c9d1de;
+    --console-text: #1b2333;
+    --console-muted: #536174;
+    --console-link-hover: #065f57;
+    --bs-link-color-rgb: 8, 120, 109;
+    --bs-link-hover-color-rgb: 6, 95, 87;
+    --console-select-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23536174' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+    color-scheme: light;
+}
+html #moon-tax-app {
+    --tax-teal: var(--console-teal);
+    --tax-violet: var(--console-violet);
+    --tax-violet-label: var(--console-violet-label);
+    --tax-danger-hover: var(--console-red);
+    --tax-blue: var(--console-blue);
+    --tax-red: var(--console-red);
+    --tax-gold: var(--console-gold);
+    --tax-green: var(--console-green);
+    --tax-panel: var(--console-panel);
+    --tax-border: var(--console-border);
+}
 #buh-structure-ops {
     --ops-teal: var(--console-teal);
     --ops-gold: var(--console-gold);
@@ -68,7 +117,7 @@
 }
 
 /* Headers, panels and metric cards. */
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-hero, .schedule-hero, .ar-hero, .vh-hero) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-hero, .schedule-hero, .ar-hero, .vh-hero) {
     border: 1px solid var(--console-border);
     border-radius: 14px;
     background: radial-gradient(circle at 90% -10%, rgba(139, 124, 255, .28), transparent 38%), linear-gradient(135deg, #161b27, #11151e);
@@ -83,26 +132,26 @@
 :is(#buh-archive, #buh-vps-health) :is(.ar-hero, .vh-hero)::after {
     background: none;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) h1 {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) h1 {
     font-size: clamp(1.8rem, 4vw, 2.7rem);
     font-weight: 750;
     letter-spacing: -.03em;
     margin: 0;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-hero p, .schedule-hero p, .ar-hero p:not(.ar-eyebrow), .vh-subtitle) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-hero p, .schedule-hero p, .ar-hero p:not(.ar-eyebrow), .vh-subtitle) {
     color: var(--console-muted);
     max-width: 760px;
     font-size: 1rem;
     margin: .45rem 0 0;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-eyebrow, .schedule-eyebrow, .ar-eyebrow, .vh-eyebrow) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-eyebrow, .schedule-eyebrow, .ar-eyebrow, .vh-eyebrow) {
     color: var(--console-teal);
     font-size: .72rem;
     font-weight: 800;
     letter-spacing: .14em;
     margin-bottom: .45rem;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-eyebrow span, .schedule-eyebrow span, .ar-eyebrow span, .vh-live-dot) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-eyebrow span, .schedule-eyebrow span, .ar-eyebrow span, .vh-live-dot) {
     display: inline-block;
     width: 28px;
     height: 2px;
@@ -126,7 +175,7 @@
 #buh-structure-ops .ops-kpi-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); }
 #buh-structure-ops .ops-kpi small,
 #buh-structure-ops .ops-kpi em { white-space: normal; overflow: visible; line-height: 1.4; }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-panel, .ops-jump-nav, .schedule-toolbar, .schedule-filter-panel, .schedule-calendar-panel, .schedule-next-panel, .schedule-tip-panel, .ar-panel, .vh-section) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-panel, .ops-jump-nav, .schedule-toolbar, .schedule-filter-panel, .schedule-calendar-panel, .schedule-next-panel, .schedule-tip-panel, .ar-panel, .vh-section) {
     border-color: var(--console-border);
     border-radius: 13px;
     background: var(--console-panel);
@@ -135,19 +184,19 @@
 :is(#buh-archive, #buh-vps-health) :is(.ar-panel, .vh-section) {
     padding: clamp(.9rem, 1.5vw, 1.1rem);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-panel-heading h2, .schedule-panel-heading h2, .ar-heading h2, .vh-section-heading h2) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-panel-heading h2, .schedule-panel-heading h2, .ar-heading h2, .vh-section-heading h2) {
     font-size: 1.1rem;
     font-weight: 700;
     margin: 0;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-section-kicker, .schedule-panel-heading span, .ar-kicker, .vh-kicker) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.ops-section-kicker, .schedule-panel-heading span, .ar-kicker, .vh-kicker) {
     color: var(--console-teal);
     font-size: .68rem;
     font-weight: 800;
     letter-spacing: .13em;
 }
 #buh-archive .ar-kicker.warning { color: var(--console-gold); }
-:is(#buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-kpi, .ar-stats article, .vh-metric, .ar-control-grid article, .ar-datasets article, .vh-control-grid article, .vh-workload-summary > div, .vh-update-summary > div, .ar-jobs article, .ar-issues article, .vh-actions article) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-kpi, .ar-stats article, .vh-metric, .ar-control-grid article, .ar-datasets article, .vh-control-grid article, .vh-workload-summary > div, .vh-update-summary > div, .ar-jobs article, .ar-issues article, .vh-actions article) {
     background: var(--console-panel);
     border-color: var(--console-border);
     border-radius: 12px;
@@ -197,58 +246,58 @@
 #buh-archive .ar-stats small { font-size: .75rem; }
 
 /* Existing buttons, inputs and focus states retain their actions and sizing. */
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-primary, .btn-schedule-primary, .btn-primary) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-primary, .btn-schedule-primary, .btn-primary) {
     background: linear-gradient(135deg, #00b89c, #21d0b7);
     border-color: transparent;
     color: #071713;
     font-weight: 700;
     box-shadow: 0 8px 24px rgba(39, 211, 189, .17);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-primary, .btn-schedule-primary, .btn-primary):hover {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-primary, .btn-schedule-primary, .btn-primary):hover {
     background: #35dec7;
     color: #071713;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-ghost, .btn-schedule-ghost, .btn-outline-secondary, .btn-outline-light, .btn-outline-info) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-ghost, .btn-schedule-ghost, .btn-outline-secondary, .btn-outline-light, .btn-outline-info) {
     border-color: var(--console-border);
     background: rgba(255, 255, 255, .04);
     color: var(--console-text);
     box-shadow: none;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-ghost, .btn-schedule-ghost, .btn-outline-secondary, .btn-outline-light, .btn-outline-info):hover {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-ops-ghost, .btn-schedule-ghost, .btn-outline-secondary, .btn-outline-light, .btn-outline-info):hover {
     border-color: var(--console-teal);
     color: var(--console-teal);
     background: rgba(39, 211, 189, .08);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-danger, .btn-outline-danger) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-danger, .btn-outline-danger) {
     border-color: rgba(255, 98, 119, .32);
     background: rgba(255, 98, 119, .08);
     color: var(--console-red);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-danger, .btn-outline-danger):hover {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-danger, .btn-outline-danger):hover {
     border-color: var(--console-red);
     background: rgba(255, 98, 119, .16);
-    color: #ff9aaa;
+    color: var(--console-red);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-warning, .btn-outline-warning) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.btn-warning, .btn-outline-warning) {
     border-color: rgba(240, 188, 83, .32);
     background: rgba(240, 188, 83, .1);
     color: var(--console-gold);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.form-control, .form-select) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.form-control, .form-select) {
     color: var(--console-text);
-    background-color: #141820;
+    background-color: var(--console-input);
     border-color: var(--console-border);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) .form-control::placeholder { color: var(--console-muted); opacity: 1; }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.form-control, .form-select):focus {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) .form-control::placeholder { color: var(--console-muted); opacity: 1; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(.form-control, .form-select):focus {
     border-color: var(--console-teal);
     box-shadow: 0 0 0 .18rem rgba(39, 211, 189, .12);
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(button, a, input, select, textarea):focus-visible {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) :is(button, a, input, select, textarea):focus-visible {
     outline: 2px solid var(--console-teal);
     outline-offset: 2px;
 }
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) input[type=checkbox] { accent-color: var(--console-teal); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal, #vh-toast, #ar-toast) input[type=checkbox] { accent-color: var(--console-teal); }
 #buh-structure-ops .ops-jump-nav a:hover,
 #buh-ops-schedule .schedule-view-switch .btn.active,
 #buh-vps-health .vh-range button.active,
@@ -259,7 +308,7 @@
 }
 
 /* Tables and status colors. Red, amber and green keep their existing meaning. */
-:is(#buh-structure-ops, #buh-archive, #buh-vps-health) .table {
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) .table {
     --bs-table-color: var(--console-text);
     --bs-table-bg: transparent;
     --bs-table-border-color: var(--console-border);
@@ -270,17 +319,17 @@
     color: var(--console-text);
     font-size: .86rem;
 }
-:is(#buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) thead {
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) thead {
     background: transparent;
     color: var(--console-muted);
 }
-:is(#buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) th {
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) th {
     color: var(--console-muted);
     font-size: .72rem;
     letter-spacing: .05em;
     border-color: var(--console-border);
 }
-:is(#buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) td { border-color: var(--console-border); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.ops-table, .ar-table, .vh-table-shell) td { border-color: var(--console-border); }
 #buh-structure-ops .ops-status-pill { font-size: .7rem; padding: .22rem .55rem; letter-spacing: .04em; }
 #buh-structure-ops .ops-status-pill.healthy,
 #buh-vps-health .vh-state { color: var(--console-green); background: rgba(69, 211, 138, .15); }
@@ -296,10 +345,10 @@
 #buh-structure-ops .ops-alert.warning .ops-alert-icon { color: var(--console-gold); background: rgba(240, 188, 83, .14); }
 #buh-structure-ops .ops-alert.success .ops-alert-icon { color: var(--console-green); background: rgba(69, 211, 138, .15); }
 #buh-structure-ops .ops-setup-alert { background: rgba(240, 188, 83, .09); color: var(--console-gold); border-color: rgba(240, 188, 83, .35); box-shadow: none; }
-#buh-structure-ops .ops-detail-grid { background: rgba(0, 0, 0, .12); }
-#buh-archive .ar-tag.private { color: #b8afff; background: rgba(139, 124, 255, .16); }
+#buh-structure-ops .ops-detail-grid { background: var(--console-soft-bg); }
+#buh-archive .ar-tag.private { color: var(--console-violet-label); background: rgba(139, 124, 255, .16); }
 #buh-archive .ar-tag.public { color: var(--console-teal); background: rgba(39, 211, 189, .14); }
-:is(#buh-archive, #buh-vps-health) :is(.ar-state, .vh-connection, .ar-pill, .vh-chip, .ar-toast, .vh-toast) { background: #191d26; border-color: var(--console-border); border-radius: 12px; }
+:is(#buh-archive, #buh-vps-health) :is(.ar-state, .vh-connection, .ar-pill, .vh-chip, .ar-toast, .vh-toast) { background: var(--console-solid); border-color: var(--console-border); border-radius: 12px; }
 :is(#buh-archive, #buh-vps-health) :is(.ar-pill, .vh-chip) { border-radius: 999px; }
 #buh-vps-health .vh-alert { background: linear-gradient(120deg, rgba(255, 98, 119, .1), var(--console-panel)); }
 #buh-vps-health .vh-alert-danger { border-color: rgba(255, 98, 119, .45); }
@@ -307,8 +356,8 @@
 #buh-vps-health .vh-alert-warning i { color: var(--console-gold); }
 #buh-vps-health .vh-status-dot.pending { background: var(--console-gold); }
 #buh-vps-health .vh-stepper button { background: rgba(255, 255, 255, .04); }
-#vh-restart-modal .vh-modal { background: #191d26; }
-#vh-restart-modal .vh-modal input { background: #141820; }
+#vh-restart-modal .vh-modal { background: var(--console-solid); }
+#vh-restart-modal .vh-modal input { background: var(--console-input); }
 #buh-vps-health .vh-task-list span,
 #buh-vps-health .vh-update-result code { color: var(--console-blue); }
 #buh-vps-health .vh-meter i { background: var(--console-teal); }
@@ -316,17 +365,113 @@
 #buh-vps-health .vh-meter i.danger { background: var(--console-red); }
 
 /* Schedule surfaces use the same panels; event-specific colors stay distinct. */
-#buh-ops-schedule :is(.schedule-month-weekdays, .schedule-week-heading) { background: rgba(0, 0, 0, .12); }
+#buh-ops-schedule :is(.schedule-month-weekdays, .schedule-week-heading) { background: var(--console-soft-bg); }
 #buh-ops-schedule .schedule-day { background: transparent; }
-#buh-ops-schedule .schedule-day.outside { background: rgba(0, 0, 0, .12); }
+#buh-ops-schedule .schedule-day.outside { background: var(--console-soft-bg); }
 #buh-ops-schedule .schedule-day.today { background: rgba(39, 211, 189, .08); }
 #buh-ops-schedule .schedule-day.today::before { border-color: rgba(39, 211, 189, .5); }
 #buh-ops-schedule .today .schedule-date-number { background: rgba(39, 211, 189, .2); color: var(--console-teal); }
 #buh-ops-schedule :is(.schedule-modal-kind, .schedule-event-time i, .schedule-event-location i, .schedule-loading i, .schedule-panel-heading > i, .schedule-tip-panel > i) { color: var(--console-teal); }
-#buh-ops-schedule .schedule-modal-content { background: #191d26; border-color: var(--console-border); }
+#buh-ops-schedule .schedule-modal-content { background: var(--console-solid); border-color: var(--console-border); }
 
-:is(#ar-toast, #vh-toast) { background: #191d26; border-color: var(--console-border); }
+:is(#ar-toast, #vh-toast) { background: var(--console-solid); border-color: var(--console-border); }
 
-:is(#buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) .form-select {
-    --bs-form-select-bg-img: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23bfc2c8' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) .form-select {
+    --bs-form-select-bg-img: var(--console-select-image);
+}
+
+/* Solid header cells stay aligned with their original sortable columns.
+ * Only long tables gain a vertical scrollbar; horizontal scrolling is retained. */
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) .table-responsive:has(> table > thead) {
+    max-height: 70vh;
+    overflow: auto;
+    position: relative;
+    scrollbar-color: var(--console-muted) var(--console-solid);
+}
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) .table-responsive > table > thead {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--console-heading-bg);
+    box-shadow: 0 1px 0 var(--console-border);
+}
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) .table-responsive > table > thead > tr > th {
+    --bs-table-bg: var(--console-heading-bg);
+    background-color: var(--console-heading-bg);
+    color: var(--console-muted);
+}
+
+/* Headings, form hints and Bootstrap utilities must use their panel palette. */
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) :is(h1, h2, h3, h4, h5, h6) { color: var(--console-text); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) :is(.text-muted, .text-secondary, .form-text) { color: var(--console-muted) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .text-danger { color: var(--console-red) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .text-success { color: var(--console-green) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .text-warning { color: var(--console-gold) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-secondary {
+    color: var(--console-text);
+    background: var(--console-secondary);
+    border-color: var(--console-border);
+}
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-link { color: var(--console-teal); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-link:hover { color: var(--console-link-hover); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-close {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath stroke='%23798598' stroke-width='2' d='m2 2 12 12M14 2 2 14'/%3e%3c/svg%3e");
+    filter: none;
+    opacity: 1;
+}
+#moon-tax-app :is(.tax-policy-mode, .btn-tax-action:hover) { color: var(--console-violet-label); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-secondary, .badge.bg-secondary, .badge.text-bg-light, .badge.bg-light) { background-color: var(--console-secondary) !important; color: var(--console-text) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-danger, .badge.bg-danger) { background-color: rgba(255, 98, 119, .15) !important; color: var(--console-red) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-success, .badge.bg-success) { background-color: rgba(69, 211, 138, .15) !important; color: var(--console-green) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-warning, .badge.bg-warning) { background-color: rgba(240, 188, 83, .15) !important; color: var(--console-gold) !important; }
+:is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-info, .badge.bg-info) { background-color: rgba(82, 168, 255, .15) !important; color: var(--console-blue) !important; }
+#moon-tax-app .tax-bulk-toolbar { background: var(--console-solid); color: var(--console-text); }
+#moon-tax-app .tax-payment-summary article { background: var(--console-panel); }
+#moon-tax-app .tax-preview-banner { background: linear-gradient(120deg, rgba(240, 188, 83, .14), var(--console-solid)); }
+#moon-tax-app .tax-hero-strip { color: #fff; }
+#buh-ops-schedule .schedule-day.outside { opacity: 1; color: var(--console-muted); }
+#buh-ops-schedule .schedule-filter-chip:not(.active) { opacity: 1; color: var(--console-muted); border-style: dashed; }
+html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"], [data-bs-theme="light"]):not([data-bs-theme="dark"]) #buh-ops-schedule :is(.schedule-event-pill, .schedule-week-card) time { color: var(--console-text); }
+/* The installed VPS chart paints fixed pale colors onto a transparent canvas.
+ * Darken those pixels on light panels without changing its data or drawing code. */
+html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"], [data-bs-theme="light"]):not([data-bs-theme="dark"]) #vh-history-chart { filter: brightness(.55); }
+
+/* Keep the familiar Moon Tax banner in light themes as well. Its children use
+ * a complete dark palette so inherited light-theme text cannot disappear. */
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) :is(.tax-hero, .tax-page-head, .tax-period-hero, .tax-person-hero, .ops-hero, .schedule-hero, .ar-hero, .vh-hero) {
+    --console-text: #fff;
+    --console-muted: rgba(255, 255, 255, .75);
+    --console-teal: #27d3bd;
+    --console-violet: #8b7cff;
+    --console-violet-label: #b8afff;
+    --console-blue: #52a8ff;
+    --console-red: #ff6277;
+    --console-gold: #f0bc53;
+    --console-green: #45d38a;
+    --console-link-hover: #35dec7;
+    --console-border: rgba(255, 255, 255, .09);
+    --console-solid: #191d26;
+    --bs-body-color: #fff;
+    --bs-heading-color: #fff;
+    --bs-secondary-color: rgba(255, 255, 255, .75);
+    --bs-link-color-rgb: 39, 211, 189;
+    --bs-link-hover-color-rgb: 53, 222, 199;
+    --tax-teal: #27d3bd;
+    --tax-violet: #8b7cff;
+    --tax-violet-label: #b8afff;
+    --tax-blue: #52a8ff;
+    --tax-red: #ff6277;
+    --tax-gold: #f0bc53;
+    --tax-green: #45d38a;
+    --tax-border: rgba(255, 255, 255, .09);
+    --ar-muted: rgba(255, 255, 255, .75);
+    --ar-green: #45d38a;
+    --ar-red: #ff6277;
+    --vh-green: #45d38a;
+    --vh-red: #ff6277;
+    --vh-muted: rgba(255, 255, 255, .75);
+    color: #fff;
+    border-color: var(--console-border);
+    background-color: #11151e;
+    color-scheme: dark;
 }

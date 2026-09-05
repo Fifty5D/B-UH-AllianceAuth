@@ -13,7 +13,8 @@ for (const asset of assets) {
   const response = await fetch(url, {signal: AbortSignal.timeout(30_000)});
   if (!response.ok) throw new Error(`Preview asset download failed: ${response.status}`);
   const body = Buffer.from(await response.arrayBuffer());
-  if (body.length !== asset.size || createHash("sha512").update(body).digest("base64") !== asset.sha512) {
+  if (body.length > 1_048_576 || (asset.size !== undefined && body.length !== asset.size)
+      || createHash("sha512").update(body).digest("base64") !== asset.sha512) {
     throw new Error(`Preview asset checksum mismatch: ${asset.file}`);
   }
   await writeFile(new URL(asset.file, directory), body);
