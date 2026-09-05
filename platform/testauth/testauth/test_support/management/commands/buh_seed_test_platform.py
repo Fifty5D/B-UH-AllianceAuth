@@ -87,6 +87,9 @@ class Command(BaseCommand):
         director.user_permissions.add(
             *Permission.objects.filter(content_type__app_label="buh_structure_ops")
         )
+        director.user_permissions.add(
+            *Permission.objects.filter(content_type__app_label="buh_mining_analytics")
+        )
         member_permissions = all_tax_permissions.filter(
             codename__in=(
                 "view_moon_tax",

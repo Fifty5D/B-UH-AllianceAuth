@@ -18,18 +18,28 @@ const pages = [
     role: "director" as PreviewRole,
     path: "/moon-tax/",
     heading: "Moon Tax",
+    root: "#moon-tax-app",
   },
   {
     name: "moon-tax-payments-director",
     role: "director" as PreviewRole,
     path: "/moon-tax/payments/",
     heading: "Payment review",
+    root: "#moon-tax-app",
   },
   {
     name: "moon-tax-overview-member",
     role: "member" as PreviewRole,
     path: "/moon-tax/",
     heading: "Moon Tax",
+    root: "#moon-tax-app",
+  },
+  {
+    name: "mining-analytics-director",
+    role: "director" as PreviewRole,
+    path: "/mining-analytics/",
+    heading: "Mining Analytics",
+    root: "#buh-mining-app",
   },
 ] as const;
 
@@ -75,7 +85,7 @@ test.describe("synthetic visual preview", () => {
         }
         await loginAs(page, previewPage.role);
         await page.goto(previewPage.path, {waitUntil: "networkidle"});
-        await expect(page.locator("#moon-tax-app")).toBeVisible();
+        await expect(page.locator(previewPage.root)).toBeVisible();
         await expect(
           page.getByRole("heading", {name: previewPage.heading, exact: true}),
         ).toBeVisible();
