@@ -1,3 +1,0 @@
-app = "structure-ops"
-kind = "fix"
-summary = "Match Structure Operations, its schedule, ESI History Archive, and VPS Health to Moon Tax's palette, cards, typography, and controls without changing application behavior."
