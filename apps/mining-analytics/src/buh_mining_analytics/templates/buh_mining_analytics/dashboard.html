@@ -24,12 +24,12 @@
                 </div>
                 <div class="mining-hero__actions">
                     {% if can_refresh %}
-                        <button class="btn btn-mining-ghost" id="mining-refresh" type="button">
+                        <button class="btn btn-mining-primary" id="mining-refresh" type="button">
                             <i class="fa-solid fa-rotate me-1"></i> Queue refresh
                         </button>
                     {% endif %}
                     {% if can_export %}
-                        <button class="btn btn-mining-primary" id="mining-export" type="button">
+                        <button class="btn btn-mining-ghost" id="mining-export" type="button">
                             <i class="fa-solid fa-file-arrow-down me-1"></i> Export CSV
                         </button>
                     {% endif %}
@@ -151,7 +151,7 @@
         </section>
         <div class="mining-alert d-none" id="mining-alert" role="alert"></div>
         <section class="mining-kpi-grid mb-3" aria-label="Mining totals">
-            <article class="mining-kpi mining-kpi--primary">
+            <article class="mining-kpi mining-kpi--primary mining-kpi--violet">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-coins"></i>
                 </div>
@@ -159,7 +159,7 @@
                 <div class="mining-kpi__value" id="kpi-value">—</div>
                 <div class="mining-kpi__sub" id="kpi-value-change">Current EVE average prices</div>
             </article>
-            <article class="mining-kpi">
+            <article class="mining-kpi mining-kpi--blue">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-cubes-stacked"></i>
                 </div>
@@ -167,7 +167,7 @@
                 <div class="mining-kpi__value" id="kpi-volume">—</div>
                 <div class="mining-kpi__sub" id="kpi-volume-change">Before compression</div>
             </article>
-            <article class="mining-kpi">
+            <article class="mining-kpi mining-kpi--green">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-hashtag"></i>
                 </div>
@@ -175,7 +175,7 @@
                 <div class="mining-kpi__value" id="kpi-units">—</div>
                 <div class="mining-kpi__sub" id="kpi-unit-change">Across all ore types</div>
             </article>
-            <article class="mining-kpi">
+            <article class="mining-kpi mining-kpi--teal">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-calendar-day"></i>
                 </div>
@@ -183,7 +183,7 @@
                 <div class="mining-kpi__value" id="kpi-active-days">—</div>
                 <div class="mining-kpi__sub" id="kpi-active-days-sub">—</div>
             </article>
-            <article class="mining-kpi">
+            <article class="mining-kpi mining-kpi--gold">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-gauge-high"></i>
                 </div>
@@ -191,7 +191,7 @@
                 <div class="mining-kpi__value" id="kpi-pace">—</div>
                 <div class="mining-kpi__sub">Calendar-day projection</div>
             </article>
-            <article class="mining-kpi">
+            <article class="mining-kpi mining-kpi--red">
                 <div class="mining-kpi__icon">
                     <i class="fa-solid fa-fire-flame-curved"></i>
                 </div>

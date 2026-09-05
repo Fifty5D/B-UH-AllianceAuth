@@ -64,6 +64,7 @@ async function checkReadableText(page: Page, root: string) {
 async function checkStickyHeaders(page: Page, root: string) {
   const wrapper = page.locator(`${root} .table-responsive:has(> table > thead)`).first();
   if (!await wrapper.count()) return;
+  if (!await wrapper.locator("tbody tr").count()) return;
   // Repeat only synthetic rows to reproduce a long production ledger.
   await wrapper.locator("tbody").first().evaluate((body) => {
     const rows = [...body.children];
@@ -142,7 +143,7 @@ export function registerThemeChecks(capture: boolean) {
           await page.setViewportSize({width: 390, height: 844});
           await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
         }
-        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-person", "moon-tax-payments", "moon-tax-policy", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
+        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-person", "moon-tax-payments", "moon-tax-policy", "mining-analytics", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
           const root = await openConsole(page, app);
           await expect(page.locator(root)).toHaveCSS("color-scheme", theme.light ? "light" : "dark");
           await checkReadableText(page, root);

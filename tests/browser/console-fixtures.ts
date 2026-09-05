@@ -2,14 +2,14 @@ import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {Page, expect} from "@playwright/test";
 
-export type ConsoleApp = "moon-tax" | "moon-tax-period" | "moon-tax-person" | "moon-tax-payments" | "moon-tax-policy" | "structure-operations" | "schedule" | "archive" | "vps";
+export type ConsoleApp = "moon-tax" | "moon-tax-period" | "moon-tax-person" | "moon-tax-payments" | "moon-tax-policy" | "mining-analytics" | "structure-operations" | "schedule" | "archive" | "vps";
 const fixtures = join(__dirname, "fixtures", "legacy-consoles");
 const metrics = JSON.parse(readFileSync(join(fixtures, "metrics.json"), "utf8"));
 
 export async function openConsole(page: Page, app: ConsoleApp) {
   const legacy = app === "archive" || app === "vps";
   const path = app === "moon-tax" || app === "moon-tax-period" || app === "moon-tax-person" ? "/moon-tax/" : app === "moon-tax-payments" ? "/moon-tax/payments/"
-    : app === "moon-tax-policy" ? "/moon-tax/policy/" : app === "schedule"
+    : app === "moon-tax-policy" ? "/moon-tax/policy/" : app === "mining-analytics" ? "/mining-analytics/" : app === "schedule"
     ? "/structure-operations/schedule/" : "/structure-operations/";
   await page.goto(path);
   if (app === "moon-tax-period") {
@@ -42,7 +42,7 @@ export async function openConsole(page: Page, app: ConsoleApp) {
     });
     await page.addScriptTag({content: readFileSync(join(fixtures, `${app}.js`), "utf8")});
   }
-  const root = app.startsWith("moon-tax") ? "#moon-tax-app" : app === "archive" ? "#buh-archive"
+  const root = app.startsWith("moon-tax") ? "#moon-tax-app" : app === "mining-analytics" ? "#buh-mining-app" : app === "archive" ? "#buh-archive"
     : app === "vps" ? "#buh-vps-health" : app === "schedule" ? "#buh-ops-schedule" : "#buh-structure-ops";
   await expect(page.locator(root)).toBeVisible();
   if (app === "vps") await expect(page.locator("#vh-connection-label")).toHaveText("Live");
