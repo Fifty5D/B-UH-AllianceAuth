@@ -52,5 +52,11 @@
     "file": "bootswatch_5.3.3_flatly_bootstrap.min.css",
     "sha512": "qoT4KwnRpAQ9uczPsw7GunsNmhRnYwSlE2KRCUPRQHSkDuLulCtDXuC2P/P6oqr3M5hoGagUG9pgHDPkD2zCDA==",
     "size": 233429
+  },
+  {
+    "url": "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js",
+    "file": "jquery_3.7.1_jquery.min.js",
+    "sha512": "v2CJ7UaYy4JwqLDIrZUI/4hqeoQieOmAZNXBeQyjo21dadnwR+8ZaIJVT8EE2iyI61OV8e6M8PP2/4hpQINQ/g==",
+    "size": 87533
   }
 ]

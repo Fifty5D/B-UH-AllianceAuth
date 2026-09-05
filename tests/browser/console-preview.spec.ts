@@ -1,5 +1,6 @@
 import {mkdirSync, readFileSync} from "node:fs";
 import {join} from "node:path";
+import {devices} from "@playwright/test";
 import {expect, test} from "./offline-ui";
 
 const fixtures = join(__dirname, "fixtures", "legacy-consoles");
@@ -13,6 +14,10 @@ for (const viewport of [
   for (const app of ["structure-operations", "schedule", "archive", "vps"] as const) {
     test(`${app} console preview at ${viewport.name}`, async ({page}) => {
       await page.setViewportSize(viewport);
+      if (viewport.name === "mobile") {
+        // Auth chooses the initial sidebar state from the request's device type.
+        await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
+      }
       const response = await page.request.post("/__test__/login/", {form: {role: "director"}});
       expect(response.ok()).toBeTruthy();
       const legacy = app === "archive" || app === "vps";
