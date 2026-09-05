@@ -1,3 +1,0 @@
-app = "mining-analytics"
-kind = "fix"
-summary = "Match Mining Analytics to Moon Tax's palette, panel styling, action hierarchy, and semantic KPI colors across Auth themes."
