@@ -23,7 +23,10 @@ locks are regenerated and reviewed.
 
 Change kinds are `fix`, `security`, `performance`, `internal`, `feature`, and
 `breaking`. The release planner owns version increments and fails closed when a
-changed application lacks an explicit fragment.
+changed application lacks an explicit fragment. Changes to registered platform
+inputs (including browser tests and synthetic test setup) also require an
+`app = "platform"` fragment. Validate the release plan against the latest
+synchronized `RELEASE.json` before merging, not just after Source CI passes.
 
 ## Safety rules
 
