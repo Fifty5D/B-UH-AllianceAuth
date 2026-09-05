@@ -30,6 +30,8 @@
     --bs-border-color: var(--console-border);
     --bs-link-color: var(--console-teal);
     --bs-link-hover-color: var(--console-link-hover);
+    --bs-link-color-rgb: 39, 211, 189;
+    --bs-link-hover-color-rgb: 53, 222, 199;
     color: var(--console-text);
     color-scheme: dark;
 }
@@ -54,6 +56,8 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --console-text: #1b2333;
     --console-muted: #536174;
     --console-link-hover: #065f57;
+    --bs-link-color-rgb: 8, 120, 109;
+    --bs-link-hover-color-rgb: 6, 95, 87;
     --console-select-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23536174' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
     color-scheme: light;
 }
@@ -406,6 +410,8 @@ html #moon-tax-app {
     background: var(--console-secondary);
     border-color: var(--console-border);
 }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-link { color: var(--console-teal); }
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-link:hover { color: var(--console-link-hover); }
 :is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health, #vh-restart-modal) .btn-close {
     background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath stroke='%23798598' stroke-width='2' d='m2 2 12 12M14 2 2 14'/%3e%3c/svg%3e");
     filter: none;
@@ -424,15 +430,19 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --console-text: #fff;
     --console-muted: rgba(255, 255, 255, .75);
     --console-teal: #27d3bd;
-    --console-border: rgba(255, 255, 255, .15);
+    --console-border: rgba(255, 255, 255, .09);
     --console-solid: #191d26;
     --bs-body-color: #fff;
     --bs-heading-color: #fff;
     --bs-secondary-color: rgba(255, 255, 255, .75);
+    --bs-link-color-rgb: 39, 211, 189;
+    --bs-link-hover-color-rgb: 53, 222, 199;
     --tax-teal: #27d3bd;
+    --tax-border: rgba(255, 255, 255, .09);
     --ar-muted: rgba(255, 255, 255, .75);
     --vh-muted: rgba(255, 255, 255, .75);
     color: #fff;
+    border-color: var(--console-border);
     background-color: #11151e;
     color-scheme: dark;
 }

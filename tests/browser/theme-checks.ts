@@ -39,8 +39,9 @@ async function checkReadableText(page: Page, root: string) {
     const selectors = 'h1,h2,h3,p,small,label,th,td,a,button,input,select,[class*="-status"],[class*="-state"],[class*="-kicker"],[class*="-tag"],.ar-stats strong,.ops-kpi strong';
     for (const element of scope.querySelectorAll(selectors)) {
       const style = getComputedStyle(element);
-      if (!element.getClientRects().length || style.visibility !== "visible"
-          || element.matches(":disabled") || element.closest('[aria-hidden="true"], [hidden]')) continue;
+      if (!element.getClientRects().length || style.visibility !== "visible" || style.opacity === "0"
+          || element.matches(':disabled, input[type="checkbox"], input[type="radio"]')
+          || element.closest('[aria-hidden="true"], [hidden]')) continue;
       const label = element instanceof HTMLInputElement ? element.value || element.placeholder : element.textContent?.trim();
       if (!label) continue;
       const bg = background(element);
