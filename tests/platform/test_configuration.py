@@ -518,9 +518,22 @@ class PlatformConfigurationContracts(TestCase):
         publish_names = [step["name"] for step in publish["steps"]]
         self.assertLess(
             publish_names.index("Reverify the pinned release ledger before publication"),
+            publish_names.index("Recompute the exact publication plan"),
+        )
+        self.assertLess(
+            publish_names.index("Recompute the exact publication plan"),
             publish_names.index(
                 "Validate payload and reconstruct the exact release commit"
             ),
+        )
+        recompute_plan = next(
+            step
+            for step in publish["steps"]
+            if step["name"] == "Recompute the exact publication plan"
+        )
+        self.assertIn("ops/release/buh_release.py plan", recompute_plan["run"])
+        self.assertIn(
+            "--output build/publish-plan.json", recompute_plan["run"]
         )
         self.assertEqual(
             publish_names[-1],
