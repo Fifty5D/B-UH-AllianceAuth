@@ -142,7 +142,7 @@ export function registerThemeChecks(capture: boolean) {
           await page.setViewportSize({width: 390, height: 844});
           await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
         }
-        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-payments", "moon-tax-policy", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
+        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-person", "moon-tax-payments", "moon-tax-policy", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
           const root = await openConsole(page, app);
           await expect(page.locator(root)).toHaveCSS("color-scheme", theme.light ? "light" : "dark");
           await checkReadableText(page, root);

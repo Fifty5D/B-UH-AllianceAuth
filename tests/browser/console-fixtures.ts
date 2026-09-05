@@ -2,18 +2,23 @@ import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {Page, expect} from "@playwright/test";
 
-export type ConsoleApp = "moon-tax" | "moon-tax-period" | "moon-tax-payments" | "moon-tax-policy" | "structure-operations" | "schedule" | "archive" | "vps";
+export type ConsoleApp = "moon-tax" | "moon-tax-period" | "moon-tax-person" | "moon-tax-payments" | "moon-tax-policy" | "structure-operations" | "schedule" | "archive" | "vps";
 const fixtures = join(__dirname, "fixtures", "legacy-consoles");
 const metrics = JSON.parse(readFileSync(join(fixtures, "metrics.json"), "utf8"));
 
 export async function openConsole(page: Page, app: ConsoleApp) {
   const legacy = app === "archive" || app === "vps";
-  const path = app === "moon-tax" || app === "moon-tax-period" ? "/moon-tax/" : app === "moon-tax-payments" ? "/moon-tax/payments/"
+  const path = app === "moon-tax" || app === "moon-tax-period" || app === "moon-tax-person" ? "/moon-tax/" : app === "moon-tax-payments" ? "/moon-tax/payments/"
     : app === "moon-tax-policy" ? "/moon-tax/policy/" : app === "schedule"
     ? "/structure-operations/schedule/" : "/structure-operations/";
   await page.goto(path);
   if (app === "moon-tax-period") {
     const href = await page.locator('a[href^="/moon-tax/periods/"]').first().getAttribute("href");
+    expect(href).toBeTruthy();
+    await page.goto(href!);
+  }
+  if (app === "moon-tax-person") {
+    const href = await page.locator('a[href^="/moon-tax/people/accounts/"]').first().getAttribute("href");
     expect(href).toBeTruthy();
     await page.goto(href!);
   }

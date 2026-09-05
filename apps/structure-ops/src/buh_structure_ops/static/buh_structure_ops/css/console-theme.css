@@ -426,6 +426,8 @@ html #moon-tax-app {
 :is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-warning, .badge.bg-warning) { background-color: rgba(240, 188, 83, .15) !important; color: var(--console-gold) !important; }
 :is(#moon-tax-app, #buh-structure-ops, #buh-archive, #buh-vps-health) :is(.badge.text-bg-info, .badge.bg-info) { background-color: rgba(82, 168, 255, .15) !important; color: var(--console-blue) !important; }
 #moon-tax-app .tax-bulk-toolbar { background: var(--console-solid); color: var(--console-text); }
+#moon-tax-app .tax-payment-summary article { background: var(--console-panel); }
+#moon-tax-app .tax-preview-banner { background: linear-gradient(120deg, rgba(240, 188, 83, .14), var(--console-solid)); }
 #moon-tax-app .tax-hero-strip { color: #fff; }
 #buh-ops-schedule .schedule-day.outside { opacity: 1; color: var(--console-muted); }
 #buh-ops-schedule .schedule-filter-chip:not(.active) { opacity: 1; color: var(--console-muted); border-style: dashed; }
@@ -436,7 +438,7 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
 
 /* Keep the familiar Moon Tax banner in light themes as well. Its children use
  * a complete dark palette so inherited light-theme text cannot disappear. */
-:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) :is(.tax-hero, .tax-page-head, .tax-period-hero, .ops-hero, .schedule-hero, .ar-hero, .vh-hero) {
+:is(#moon-tax-app, #buh-structure-ops, #buh-ops-schedule, #buh-archive, #buh-vps-health) :is(.tax-hero, .tax-page-head, .tax-period-hero, .tax-person-hero, .ops-hero, .schedule-hero, .ar-hero, .vh-hero) {
     --console-text: #fff;
     --console-muted: rgba(255, 255, 255, .75);
     --console-teal: #27d3bd;
