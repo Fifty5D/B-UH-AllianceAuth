@@ -159,6 +159,17 @@
     background: linear-gradient(120deg, rgba(255, 98, 119, .12), var(--console-panel));
 }
 #buh-vps-health .vh-control-grid article.updates { border-color: rgba(82, 168, 255, .28); }
+#buh-vps-health .vh-control-grid article {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    align-items: start;
+}
+#buh-vps-health .vh-control-grid :is(.btn, .vh-stepper) {
+    justify-self: start;
+    max-width: 100%;
+    white-space: normal;
+}
+#buh-vps-health .vh-control-grid small { grid-column: auto; }
 #buh-structure-ops .ops-kpi-icon {
     width: 42px;
     height: 42px;

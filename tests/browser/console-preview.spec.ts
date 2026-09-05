@@ -53,11 +53,18 @@ for (const viewport of [
         await expect(page.locator("#vh-restart-submit")).toBeDisabled();
         await expect(page.locator(".vh-modal")).toHaveCSS("background-color", "rgb(25, 29, 38)");
         await page.getByRole("button", {name: "Cancel", exact: true}).click();
+        await expect(page.locator("#vh-restart-modal")).toBeHidden();
+        await expect(page.locator(".modal-backdrop")).toHaveCount(0);
       }
       await page.emulateMedia({reducedMotion: "reduce"});
       await page.evaluate(async () => { await document.fonts.ready; });
       const directory = join(outputRoot, viewport.name);
       mkdirSync(directory, {recursive: true});
+      if (app === "vps") {
+        await page.screenshot({path: join(directory, "vps-controls.png"), fullPage: true, animations: "disabled"});
+      }
+      // Auth scrolls its content column independently of the document.
+      await page.locator(".nav-padding.overflow-auto").evaluate((element) => { element.scrollTop = 0; });
       const screenshotPath = join(directory, `${app}-console.png`);
       await page.screenshot({path: screenshotPath, fullPage: true, animations: "disabled"});
       await test.info().attach(`${app}-${viewport.name}`, {path: screenshotPath, contentType: "image/png"});
