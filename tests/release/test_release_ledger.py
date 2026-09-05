@@ -337,6 +337,7 @@ class GitLedgerFixture:
         version: str,
         *,
         previous: dict | None,
+        artifact_previous: dict | None = None,
         manifest_source: str | None = None,
         platform_id: str | None = None,
         app_version: str = "0.1.0",
@@ -356,9 +357,12 @@ class GitLedgerFixture:
         registry, build, app_inputs, compatibility = self.source_plan_inputs(source)
         compatibility_sha256 = build["compatibility_sha256"]
         versions = app_versions or {"dummy": app_version}
+        reuse_predecessor = (
+            artifact_previous if artifact_previous is not None else previous
+        )
         previous_manifest = (
-            self.manifests.get(previous["platform_version"])
-            if previous is not None
+            self.manifests.get(reuse_predecessor["platform_version"])
+            if reuse_predecessor is not None
             else None
         )
         previous_artifacts = {
@@ -404,12 +408,12 @@ class GitLedgerFixture:
                 artifact = dict(prior)
                 source_wheel = (
                     release_dir.parent
-                    / f'v{previous["platform_version"]}'
+                    / f'v{reuse_predecessor["platform_version"]}'
                     / artifact["filename"]
                 )
                 shutil.copyfile(source_wheel, release_dir / artifact["filename"])
                 artifact["origin"] = "reused"
-                artifact["reused_from"] = previous["platform_version"]
+                artifact["reused_from"] = reuse_predecessor["platform_version"]
             artifacts.append(artifact)
 
         for dependency in registry.dependencies:
@@ -427,12 +431,12 @@ class GitLedgerFixture:
                 artifact = dict(prior)
                 source_wheel = (
                     release_dir.parent
-                    / f'v{previous["platform_version"]}'
+                    / f'v{reuse_predecessor["platform_version"]}'
                     / artifact["filename"]
                 )
                 shutil.copyfile(source_wheel, release_dir / artifact["filename"])
                 artifact["origin"] = "reused"
-                artifact["reused_from"] = previous["platform_version"]
+                artifact["reused_from"] = reuse_predecessor["platform_version"]
             else:
                 source_wheel = (
                     dependency_release_sources[dependency.component]
@@ -521,6 +525,14 @@ class GitLedgerFixture:
             },
         }
         (release_dir / "RELEASE.json").write_bytes(_canonical(manifest))
+        payloads = sorted(release_dir.iterdir(), key=lambda path: path.name)
+        (release_dir / "SHA256SUMS").write_text(
+            "".join(
+                f"{buh_release.sha256_file(path)}  {path.name}\n"
+                for path in payloads
+            ),
+            encoding="ascii",
+        )
         self.git("add", release_dir.relative_to(self.repo).as_posix())
         self.git("commit", "-m", f"release platform v{version}")
         release_commit = self.head
@@ -754,6 +766,138 @@ class ReleaseLedgerTests(unittest.TestCase):
                 "refs/buh-release-ledger/releases/v*",
                 fetch_arguments[0],
             )
+
+    def test_verified_chain_allows_one_equivalent_deployment_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = GitLedgerFixture(Path(temp))
+            _, first_manifest = fixture.add_release("1.0.0", previous=None)
+            first = fixture.predecessor("1.0.0", first_manifest)
+
+            fixture.source_change("skipped.txt")
+            skipped_change = _platform_feature()
+            fixture.stage_change(skipped_change)
+            _, skipped_manifest = fixture.add_release(
+                "1.1.0",
+                previous=first,
+                changes=[skipped_change],
+            )
+            skipped = fixture.predecessor("1.1.0", skipped_manifest)
+
+            fixture.source_change("reconciliation.txt")
+            bridge_change = {
+                "fragment": "deployment-reconciliation.toml",
+                "app_id": "platform",
+                "kind": "fix",
+                "bump": "patch",
+                "summary": "Reconcile a skipped deployment",
+            }
+            fragment = fixture.repo / "changes" / bridge_change["fragment"]
+            fragment.write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Reconcile a skipped deployment"\n'
+                'deployment_predecessor = "1.0.0"\n',
+                encoding="utf-8",
+            )
+            fixture.git("add", fragment.relative_to(fixture.repo).as_posix())
+            fixture.git("commit", "-m", "declare deployment reconciliation")
+            fragment.unlink()
+            fixture.git(
+                "add", "-A", fragment.relative_to(fixture.repo).as_posix()
+            )
+            _, bridge_manifest = fixture.add_release(
+                "1.1.1",
+                previous=first,
+                artifact_previous=skipped,
+                changes=[bridge_change],
+            )
+            bridge = fixture.predecessor("1.1.1", bridge_manifest)
+
+            fixture.source_change("after-reconciliation.txt")
+            after_change = {
+                "fragment": "after-reconciliation.toml",
+                "app_id": "platform",
+                "kind": "fix",
+                "bump": "patch",
+                "summary": "Continue the normal release chain",
+            }
+            fixture.stage_change(after_change)
+            fixture.add_release(
+                "1.1.2",
+                previous=bridge,
+                changes=[after_change],
+            )
+
+            report = fixture.verify()
+            self.assertEqual(
+                [item["platform_version"] for item in report["releases"]],
+                ["1.0.0", "1.1.0", "1.1.1", "1.1.2"],
+            )
+            self.assertEqual(
+                bridge_manifest["previous_release"],
+                first,
+            )
+
+    def test_deployment_bridge_rejects_changed_skipped_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = GitLedgerFixture(Path(temp))
+            _, first_manifest = fixture.add_release("1.0.0", previous=None)
+            first = fixture.predecessor("1.0.0", first_manifest)
+
+            compatibility = fixture.repo / "platform/compatibility.toml"
+            compatibility.write_text(
+                compatibility.read_text(encoding="utf-8").replace(
+                    'redis = ">=7"', 'redis = ">=8"'
+                ),
+                encoding="utf-8",
+            )
+            fixture.git("add", "platform/compatibility.toml")
+            fixture.git("commit", "-m", "change deployment compatibility")
+            skipped_change = _platform_feature()
+            fixture.stage_change(skipped_change)
+            _, skipped_manifest = fixture.add_release(
+                "1.1.0",
+                previous=first,
+                changes=[skipped_change],
+            )
+            skipped = fixture.predecessor("1.1.0", skipped_manifest)
+
+            fixture.source_change("unsafe-reconciliation.txt")
+            bridge_change = {
+                "fragment": "unsafe-reconciliation.toml",
+                "app_id": "platform",
+                "kind": "fix",
+                "bump": "patch",
+                "summary": "Attempt an unsafe reconciliation",
+            }
+            fragment = fixture.repo / "changes" / bridge_change["fragment"]
+            fragment.write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Attempt an unsafe reconciliation"\n'
+                'deployment_predecessor = "1.0.0"\n',
+                encoding="utf-8",
+            )
+            fixture.git("add", fragment.relative_to(fixture.repo).as_posix())
+            fixture.git("commit", "-m", "declare unsafe reconciliation")
+            fragment.unlink()
+            fixture.git(
+                "add", "-A", fragment.relative_to(fixture.repo).as_posix()
+            )
+            fixture.add_release(
+                "1.1.1",
+                previous=first,
+                artifact_previous=skipped,
+                changes=[bridge_change],
+            )
+
+            with self.assertRaisesRegex(
+                ledger.LedgerError,
+                "deployment reconciliation|historical release plan",
+            ):
+                fixture.verify()
 
     def test_incident_regression_fails_with_clear_stale_main_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

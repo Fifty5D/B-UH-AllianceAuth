@@ -854,8 +854,18 @@ jobs:
               raise SystemExit("Candidate compatibility contract differs from the plan")
 
           previous = recomputed.get("previous_manifest")
+          deployment_predecessor = recomputed.get("deployment_predecessor")
           expected_previous = None
-          if previous is not None:
+          if deployment_predecessor is not None:
+              expected_previous = {
+                  key: deployment_predecessor[key]
+                  for key in (
+                      "platform_version",
+                      "source_commit",
+                      "manifest_sha256",
+                  )
+              }
+          elif previous is not None:
               expected_previous = {
                   "platform_version": recomputed["previous_platform_version"],
                   "source_commit": previous["source_commit"],
@@ -1716,8 +1726,10 @@ jobs:
             --arg release_path "${release_path}" \
             --arg source "${EXPECTED_SOURCE_SHA}" \
             --arg version "${EXPECTED_VERSION}" \
-            --slurpfile ledger "${PUBLICATION_DIR}/release-state.json" '
+            --slurpfile ledger "${PUBLICATION_DIR}/release-state.json" \
+            --slurpfile plan build/publish-plan.json '
               $ledger[0] as $state
+              | $plan[0] as $candidate
               | type == "object"
               and .source_commit == $source
               and .platform_version == $version
@@ -1732,6 +1744,15 @@ jobs:
               and .previous_release == (
                 if $state.bootstrap then
                   null
+                elif $candidate.deployment_predecessor != null then
+                  {
+                    manifest_sha256:
+                      $candidate.deployment_predecessor.manifest_sha256,
+                    platform_version:
+                      $candidate.deployment_predecessor.platform_version,
+                    source_commit:
+                      $candidate.deployment_predecessor.source_commit
+                  }
                 else
                   {
                     manifest_sha256: $state.latest.manifest_sha256,

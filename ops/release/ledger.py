@@ -33,6 +33,7 @@ try:  # Support both package imports and direct script execution.
         PLATFORM_INPUT_IGNORED_PARTS,
         app_input_digest,
         create_plan_v1,
+        deployment_payload_identity,
         git_blob_object_id,
         inspect_wheel,
         load_changes,
@@ -57,6 +58,7 @@ except ImportError:  # pragma: no cover - exercised by the CLI integration test.
         PLATFORM_INPUT_IGNORED_PARTS,
         app_input_digest,
         create_plan_v1,
+        deployment_payload_identity,
         git_blob_object_id,
         inspect_wheel,
         load_changes,
@@ -1400,6 +1402,41 @@ def _validate_authoritative_plan_replay(
         if previous_manifest is not None
         else None
     )
+    planned_deployment_predecessor = plan.get("deployment_predecessor")
+    if planned_deployment_predecessor is not None:
+        if not isinstance(planned_deployment_predecessor, Mapping):
+            raise LedgerError(
+                "Authoritative historical deployment_predecessor is malformed"
+            )
+        expected_predecessor = {
+            key: planned_deployment_predecessor.get(key)
+            for key in (
+                "platform_version",
+                "source_commit",
+                "manifest_sha256",
+            )
+        }
+    elif previous_manifest is not None:
+        previous_path = release_dir.parent / (
+            f"v{previous_manifest['platform_version']}/RELEASE.json"
+        )
+        expected_predecessor = {
+            "platform_version": previous_manifest["platform_version"],
+            "source_commit": previous_manifest["source_commit"],
+            "manifest_sha256": sha256_file(previous_path),
+        }
+    else:
+        expected_predecessor = None
+    if manifest.get("previous_release") != expected_predecessor:
+        if planned_deployment_predecessor is None:
+            raise LedgerError(
+                "Release does not name the exact immediately preceding "
+                "verified release"
+            )
+        raise LedgerError(
+            "Release deployment predecessor differs from its authoritative "
+            "historical plan"
+        )
     if (
         not plan.get("release_required")
         or plan.get("platform_id") != manifest.get("platform_id")
@@ -2378,12 +2415,49 @@ def verify_ledger(
                 "source_commit": previous_manifest["source_commit"],
                 "manifest_sha256": previous_record["manifest_sha256"],
             }
-            if predecessor != expected_predecessor:
-                raise LedgerError(
-                    f"Release v{version} does not name the exact immediately preceding "
-                    "verified release"
-                )
             _require_ancestor(root, previous_record["release_commit"], parent)
+            if predecessor != expected_predecessor:
+                matches = [
+                    (index, record)
+                    for index, record in enumerate(records)
+                    if predecessor
+                    == {
+                        "platform_version": record["platform_version"],
+                        "source_commit": record["source_commit"],
+                        "manifest_sha256": record["manifest_sha256"],
+                    }
+                ]
+                if len(matches) != 1:
+                    raise LedgerError(
+                        f"Release v{version} deployment predecessor is not an exact "
+                        "verified ledger release"
+                    )
+                predecessor_index, predecessor_record = matches[0]
+                try:
+                    payload = deployment_payload_identity(
+                        working_root
+                        / f"v{predecessor_record['platform_version']}"
+                    )
+                    for skipped_record in records[predecessor_index + 1 :]:
+                        if deployment_payload_identity(
+                            working_root
+                            / f"v{skipped_record['platform_version']}"
+                        ) != payload:
+                            raise LedgerError(
+                                f"Release v{version} cannot bridge over "
+                                f"deployment-changing release "
+                                f"v{skipped_record['platform_version']}"
+                            )
+                    if deployment_payload_identity(release_dir) != payload:
+                        raise LedgerError(
+                            f"Release v{version} reconciliation payload differs from "
+                            "its declared deployment predecessor"
+                        )
+                except (OSError, ReleaseError) as exc:
+                    raise LedgerError(
+                        f"Release v{version} deployment reconciliation cannot be "
+                        "verified"
+                    ) from exc
 
         record = {
             "platform_version": str(version),

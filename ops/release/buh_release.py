@@ -194,9 +194,18 @@ class Change:
     kind: str
     bump: str
     summary: str
+    deployment_predecessor: str | None = None
 
     def as_dict(self) -> dict[str, str]:
-        return dataclasses.asdict(self)
+        # deployment_predecessor is one-time release-planning intent. It must
+        # not expand the schema consumed by already-installed receivers.
+        return {
+            "fragment": self.fragment,
+            "app_id": self.app_id,
+            "kind": self.kind,
+            "bump": self.bump,
+            "summary": self.summary,
+        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -955,7 +964,13 @@ def load_changes(directory: Path, known_apps: set[str]) -> tuple[Change, ...]:
         if single_entry:
             _strict_keys(
                 data,
-                {"schema_version", "summary", "app", "kind"},
+                {
+                    "schema_version",
+                    "summary",
+                    "app",
+                    "kind",
+                    "deployment_predecessor",
+                },
                 f"change fragment {path.name}",
                 {"summary", "app", "kind"},
             )
@@ -968,6 +983,22 @@ def load_changes(directory: Path, known_apps: set[str]) -> tuple[Change, ...]:
                 {"summary", "changes"},
             )
             entries = data["changes"]
+        deployment_predecessor = data.get("deployment_predecessor")
+        if deployment_predecessor is not None:
+            if not single_entry:
+                raise ReleaseError(
+                    "deployment_predecessor requires a single-entry change fragment"
+                )
+            try:
+                parsed_predecessor = SemVer.parse(deployment_predecessor)
+            except ReleaseError as exc:
+                raise ReleaseError(
+                    f"Invalid deployment_predecessor in {path.name}"
+                ) from exc
+            if str(parsed_predecessor) != deployment_predecessor:
+                raise ReleaseError(
+                    f"Non-canonical deployment_predecessor in {path.name}"
+                )
         fragment_schema = data.get("schema_version", SCHEMA_VERSION)
         if type(fragment_schema) is not int or fragment_schema != SCHEMA_VERSION:
             raise ReleaseError(f"Unsupported schema in change fragment {path.name}")
@@ -999,6 +1030,12 @@ def load_changes(directory: Path, known_apps: set[str]) -> tuple[Change, ...]:
                 raise ReleaseError(f"Duplicate app {app_id!r} in {path.name}")
             if not isinstance(kind, str) or kind not in KIND_TO_BUMP:
                 raise ReleaseError(f"Unknown change kind {kind!r} in {path.name}")
+            if deployment_predecessor is not None and (
+                app_id != "platform" or kind != "fix"
+            ):
+                raise ReleaseError(
+                    "deployment_predecessor is allowed only on a platform fix"
+                )
             seen_in_fragment.add(app_id)
             changes.append(
                 Change(
@@ -1007,8 +1044,11 @@ def load_changes(directory: Path, known_apps: set[str]) -> tuple[Change, ...]:
                     kind=kind,
                     bump=KIND_TO_BUMP[kind],
                     summary=summary.strip(),
+                    deployment_predecessor=deployment_predecessor,
                 )
             )
+    if sum(change.deployment_predecessor is not None for change in changes) > 1:
+        raise ReleaseError("Only one deployment_predecessor may be declared")
     return tuple(changes)
 
 
@@ -1078,6 +1118,51 @@ def _previous_artifacts(previous: Mapping[str, Any] | None) -> dict[str, dict[st
             raise ReleaseError(f"Previous manifest repeats component {component}")
         result[component] = dict(artifact)
     return result
+
+
+DEPLOYMENT_ARTIFACT_IDENTITY_KEYS = (
+    "component",
+    "kind",
+    "distribution",
+    "version",
+    "filename",
+    "size",
+    "sha256",
+    "input_sha256",
+    "import_name",
+    "git_blob_sha",
+)
+
+
+def deployment_payload_identity(release_dir: Path) -> dict[str, Any]:
+    """Return the exact receiver-visible identity of a verified release."""
+
+    manifest = verify_release_dir(release_dir)
+    install_plan = _load_json(release_dir / "INSTALL_PLAN.json")
+    return {
+        "platform_id": manifest["platform_id"],
+        "compatibility": manifest["compatibility"],
+        "artifacts": [
+            {
+                key: artifact[key]
+                for key in DEPLOYMENT_ARTIFACT_IDENTITY_KEYS
+                if key in artifact
+            }
+            for artifact in manifest["artifacts"]
+        ],
+        # platform_version is ledger metadata. Every other install-plan field
+        # changes what the receiver installs or invokes.
+        "install_plan": {
+            key: install_plan[key]
+            for key in (
+                "schema_version",
+                "compatibility_sha256",
+                "wheels",
+                "django_apps",
+                "setup_commands",
+            )
+        },
+    }
 
 
 def create_plan_v1(
@@ -1254,6 +1339,74 @@ def create_plan_v1(
             planned_dependency["git_blob_sha"] = prior["git_blob_sha"]
         dependency_artifacts.append(planned_dependency)
 
+    deployment_predecessor: dict[str, str] | None = None
+    reconciliation_changes = [
+        change for change in changes if change.deployment_predecessor is not None
+    ]
+    if reconciliation_changes:
+        reconciliation = reconciliation_changes[0]
+        if bootstrap or previous is None or previous_manifest_path is None:
+            raise ReleaseError(
+                "deployment_predecessor cannot be used for a bootstrap release"
+            )
+        if len(changes) != 1 or directly_changed:
+            raise ReleaseError(
+                "deployment_predecessor requires one platform-only fix"
+            )
+        if (
+            previous_build.get("registry_sha256") != registry.sha256
+            or previous_build.get("compatibility_sha256") != compatibility_sha
+        ):
+            raise ReleaseError(
+                "deployment_predecessor cannot cross registry or compatibility changes"
+            )
+        requested_version = SemVer.parse(reconciliation.deployment_predecessor)
+        immediate_version = SemVer.parse(previous["platform_version"])
+        if requested_version >= immediate_version:
+            raise ReleaseError(
+                "deployment_predecessor must be older than the immediate release"
+            )
+        if (
+            previous_manifest_path.name != "RELEASE.json"
+            or previous_manifest_path.parent.name != f"v{immediate_version}"
+        ):
+            raise ReleaseError(
+                "Previous manifest path does not match its platform version"
+            )
+        immediate_dir = previous_manifest_path.parent
+        requested_dir = immediate_dir.parent / f"v{requested_version}"
+        immediate_manifest = verify_release_dir(immediate_dir)
+        requested_manifest = verify_release_dir(requested_dir)
+        if (
+            immediate_manifest != previous
+            or sha256_file(previous_manifest_path) != previous_manifest_sha
+        ):
+            raise ReleaseError("Immediate release changed during reconciliation planning")
+        if (
+            requested_manifest["platform_id"] != registry.platform_id
+            or requested_manifest["platform_version"] != str(requested_version)
+        ):
+            raise ReleaseError(
+                "deployment_predecessor does not identify this platform release"
+            )
+        requested_payload = deployment_payload_identity(requested_dir)
+        if deployment_payload_identity(immediate_dir) != requested_payload:
+            raise ReleaseError(
+                "deployment_predecessor and immediate release are not "
+                "deployment-equivalent"
+            )
+        deployment_predecessor = {
+            "path": (
+                f"{registry.release_root}/v{requested_version}/RELEASE.json"
+            ),
+            "platform_version": str(requested_version),
+            "source_commit": requested_manifest["source_commit"],
+            "manifest_sha256": sha256_file(requested_dir / "RELEASE.json"),
+            "payload_sha256": _sha256_bytes(
+                _canonical_json_bytes(requested_payload)
+            ),
+        }
+
     return {
         "schema_version": PLAN_SCHEMA_V1,
         "platform_id": registry.platform_id,
@@ -1272,6 +1425,7 @@ def create_plan_v1(
             if previous
             else None
         ),
+        "deployment_predecessor": deployment_predecessor,
         "platform_version": platform_version,
         "platform_bump": platform_bump,
         "build": {
@@ -2057,6 +2211,59 @@ def _ordered_app_ids(app_plans: Sequence[Mapping[str, Any]]) -> list[str]:
     return [app.app_id for app in _topological_apps(configs)]
 
 
+def _load_planned_deployment_predecessor(
+    plan: Mapping[str, Any],
+    repo_root: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    value = plan.get("deployment_predecessor")
+    if value is None:
+        return None, None
+    if not isinstance(value, Mapping):
+        raise ReleaseError("Planned deployment_predecessor must be an object")
+    _strict_keys(
+        value,
+        {
+            "path",
+            "platform_version",
+            "source_commit",
+            "manifest_sha256",
+            "payload_sha256",
+        },
+        "planned deployment_predecessor",
+        {
+            "path",
+            "platform_version",
+            "source_commit",
+            "manifest_sha256",
+            "payload_sha256",
+        },
+    )
+    version = SemVer.parse(value["platform_version"])
+    if version >= SemVer.parse(plan.get("platform_version")):
+        raise ReleaseError(
+            "Planned deployment_predecessor is not older than the target release"
+        )
+    expected_path = (
+        f"{plan.get('release_root')}/v{version}/RELEASE.json"
+    )
+    if value["path"] != expected_path:
+        raise ReleaseError("Planned deployment_predecessor path is not canonical")
+    path = repo_root / PurePosixPath(expected_path)
+    if path.is_symlink() or path.name != "RELEASE.json":
+        raise ReleaseError("Planned deployment_predecessor path is unsafe")
+    manifest = verify_release_dir(path.parent)
+    if (
+        manifest["platform_version"] != str(version)
+        or manifest["source_commit"] != value["source_commit"]
+        or sha256_file(path) != value["manifest_sha256"]
+    ):
+        raise ReleaseError("Planned deployment_predecessor identity changed")
+    payload = deployment_payload_identity(path.parent)
+    if _sha256_bytes(_canonical_json_bytes(payload)) != value["payload_sha256"]:
+        raise ReleaseError("Planned deployment_predecessor payload changed")
+    return manifest, payload
+
+
 def assemble_release(
     *,
     plan: Mapping[str, Any],
@@ -2074,6 +2281,9 @@ def assemble_release(
     if repo_root is None:
         raise ReleaseError("Release assembly requires the repository root")
     repo_root = repo_root.resolve()
+    deployment_manifest, deployment_payload = (
+        _load_planned_deployment_predecessor(plan, repo_root)
+    )
     output_dir.mkdir(parents=True, mode=0o755)
     built_used: set[Path] = set()
     artifacts: list[dict[str, Any]] = []
@@ -2251,7 +2461,13 @@ def assemble_release(
     install_path.write_bytes(_canonical_json_bytes(install_plan))
 
     previous_release = None
-    if plan.get("previous_manifest"):
+    if deployment_manifest is not None:
+        previous_release = {
+            "platform_version": deployment_manifest["platform_version"],
+            "source_commit": deployment_manifest["source_commit"],
+            "manifest_sha256": plan["deployment_predecessor"]["manifest_sha256"],
+        }
+    elif plan.get("previous_manifest"):
         previous_release = {
             "platform_version": plan["previous_platform_version"],
             "source_commit": plan["previous_manifest"]["source_commit"],
@@ -2297,6 +2513,13 @@ def assemble_release(
     sums = "".join(f"{sha256_file(path)}  {path.name}\n" for path in checked_files)
     (output_dir / "SHA256SUMS").write_text(sums, encoding="ascii")
     verify_release_dir(output_dir)
+    if (
+        deployment_payload is not None
+        and deployment_payload_identity(output_dir) != deployment_payload
+    ):
+        raise ReleaseError(
+            "Reconciled release is not deployment-equivalent to its predecessor"
+        )
     return output_dir
 
 

@@ -288,6 +288,49 @@ class RegistryAndChangeTests(unittest.TestCase):
                 "summary": "Correct totals",
             })
 
+    def test_deployment_predecessor_is_strict_planning_only_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            (fixture.changes / "reconcile.toml").write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Reconcile a skipped deployment"\n'
+                'deployment_predecessor = "1.2.3"\n',
+                encoding="utf-8",
+            )
+            changes = release.load_changes(
+                fixture.changes, {"alpha", "beta"}
+            )
+            self.assertEqual(changes[0].deployment_predecessor, "1.2.3")
+            self.assertNotIn("deployment_predecessor", changes[0].as_dict())
+
+    def test_deployment_predecessor_rejects_broader_change_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            invalid = (
+                ("application", "alpha", "fix", "1.2.3"),
+                ("feature", "platform", "feature", "1.2.3"),
+                ("version", "platform", "fix", "01.2.3"),
+            )
+            for name, app_id, kind, version in invalid:
+                path = fixture.changes / f"{name}.toml"
+                path.write_text(
+                    'schema_version = 1\n'
+                    f'app = "{app_id}"\n'
+                    f'kind = "{kind}"\n'
+                    'summary = "Invalid reconciliation"\n'
+                    f'deployment_predecessor = "{version}"\n',
+                    encoding="utf-8",
+                )
+                with self.subTest(name=name), self.assertRaises(
+                    release.ReleaseError
+                ):
+                    release.load_changes(
+                        fixture.changes, {"alpha", "beta"}
+                    )
+                path.unlink()
+
     def test_registry_rejects_dependency_cycles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             fixture = RepoFixture(Path(temp))
@@ -454,6 +497,133 @@ class PlanningTests(unittest.TestCase):
             self.assertTrue(plan["release_required"])
             self.assertEqual(plan["build_matrix"], [])
             self.assertEqual(plan["platform_version"], "1.2.4")
+
+    def test_equivalent_skipped_release_can_be_reconciled_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            release_root = fixture.root / "releases/platform"
+            release_root.mkdir(parents=True)
+            first = release_root / "v1.2.3"
+            self._bootstrap_release(fixture).rename(first)
+
+            tool = fixture.registry.parent / "buh_release.py"
+            tool.write_text("TOOL = 2\n", encoding="utf-8")
+            normal_fragment = fixture.fragment(
+                "platform-tooling", "platform", "fix"
+            )
+            second_plan = fixture.plan(
+                previous=first / "RELEASE.json", commit="b" * 40
+            )
+            second = release_root / "v1.2.4"
+            wheels = fixture.root / "second-wheels"
+            wheels.mkdir()
+            release.assemble_release(
+                plan=second_plan,
+                wheel_dir=wheels,
+                previous_release_dir=first,
+                output_dir=second,
+                repo_root=fixture.root,
+            )
+            normal_fragment.unlink()
+
+            tool.write_text("TOOL = 3\n", encoding="utf-8")
+            (fixture.changes / "reconcile.toml").write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Reconcile a skipped deployment"\n'
+                'deployment_predecessor = "1.2.3"\n',
+                encoding="utf-8",
+            )
+            plan = fixture.plan(
+                previous=second / "RELEASE.json", commit="c" * 40
+            )
+            self.assertEqual(
+                plan["deployment_predecessor"]["platform_version"],
+                "1.2.3",
+            )
+            third = release_root / "v1.2.5"
+            wheels = fixture.root / "third-wheels"
+            wheels.mkdir()
+            release.assemble_release(
+                plan=plan,
+                wheel_dir=wheels,
+                previous_release_dir=second,
+                output_dir=third,
+                repo_root=fixture.root,
+            )
+            manifest = json.loads(
+                (third / "RELEASE.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["previous_release"],
+                {
+                    key: plan["deployment_predecessor"][key]
+                    for key in (
+                        "platform_version",
+                        "source_commit",
+                        "manifest_sha256",
+                    )
+                },
+            )
+            self.assertEqual(
+                release.deployment_payload_identity(first),
+                release.deployment_payload_identity(second),
+            )
+            self.assertEqual(
+                release.deployment_payload_identity(first),
+                release.deployment_payload_identity(third),
+            )
+
+    def test_reconciliation_rejects_a_skipped_payload_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            release_root = fixture.root / "releases/platform"
+            release_root.mkdir(parents=True)
+            first = release_root / "v1.2.3"
+            self._bootstrap_release(fixture).rename(first)
+
+            fixture.compatibility.write_text(
+                fixture.compatibility.read_text(encoding="utf-8").replace(
+                    'redis = "8"', 'redis = "9"'
+                ),
+                encoding="utf-8",
+            )
+            normal_fragment = fixture.fragment(
+                "compatibility", "platform", "fix"
+            )
+            second_plan = fixture.plan(
+                previous=first / "RELEASE.json", commit="b" * 40
+            )
+            second = release_root / "v1.2.4"
+            wheels = fixture.root / "second-wheels"
+            wheels.mkdir()
+            release.assemble_release(
+                plan=second_plan,
+                wheel_dir=wheels,
+                previous_release_dir=first,
+                output_dir=second,
+                repo_root=fixture.root,
+            )
+            normal_fragment.unlink()
+
+            (fixture.registry.parent / "buh_release.py").write_text(
+                "TOOL = 2\n", encoding="utf-8"
+            )
+            (fixture.changes / "reconcile.toml").write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Unsafe reconciliation"\n'
+                'deployment_predecessor = "1.2.3"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError, "not deployment-equivalent"
+            ):
+                fixture.plan(
+                    previous=second / "RELEASE.json", commit="c" * 40
+                )
 
     def test_declared_platform_input_requires_fragment_but_legacy_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
