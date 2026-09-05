@@ -1,0 +1,49 @@
+name: Package tested receiver repair
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/package-tested-receiver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Export verified receiver source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the exact tested repair
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: afd2d37e09856c34be1d18f76383898d87a384a7
+          path: receiver-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: ops
+      - name: Verify and package the original Git checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C receiver-source rev-parse HEAD)" = afd2d37e09856c34be1d18f76383898d87a384a7
+          git -C receiver-source diff --quiet --
+          git -C receiver-source diff --cached --quiet --
+          test -z "$(git -C receiver-source status --porcelain)"
+          if git -C receiver-source config --local --get-regexp '(extraheader|credential|password|token)'; then
+            echo "Unexpected credential configuration in source checkout" >&2
+            exit 1
+          fi
+          git -C receiver-source fsck --full
+          tar -czf receiver-repair-afd2d37.tar.gz receiver-source
+          test "$(stat -c %s receiver-repair-afd2d37.tar.gz)" -lt 67108864
+          sha256sum receiver-repair-afd2d37.tar.gz > SHA256SUMS
+      - name: Retain the private transfer package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: receiver-repair-afd2d37
+          path: |
+            receiver-repair-afd2d37.tar.gz
+            SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
