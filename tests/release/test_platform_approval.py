@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import sys
 import tempfile
 import unittest
@@ -114,6 +115,8 @@ class ApprovalTransport:
     def __init__(self, *, include_merge_marker: bool = True) -> None:
         self.include_merge_marker = include_merge_marker
         self.calls: list[tuple[str, str]] = []
+        self.source_run = _run(preflight=False)
+        self.associated_pulls = [_event()["pull_request"]]
 
     def request(
         self,
@@ -173,7 +176,9 @@ class ApprovalTransport:
         if suffix == f"actions/runs/{PREFLIGHT_RUN}":
             return _response(_run(preflight=True))
         if suffix == f"actions/runs/{SOURCE_RUN}":
-            return _response(_run(preflight=False))
+            return _response(self.source_run)
+        if suffix == f"commits/{RELEASE}/pulls":
+            return _response(self.associated_pulls)
         if suffix == f"actions/runs/{PREFLIGHT_RUN}/artifacts":
             return _response(
                 {
@@ -196,6 +201,122 @@ class ApprovalTransport:
 
 
 class PlatformApprovalTests(unittest.TestCase):
+    def authorize_with(self, transport):
+        with tempfile.TemporaryDirectory() as temp:
+            return approval.authorize(
+                _event(), owner=OWNER, repository=REPOSITORY,
+                actor=OWNER, triggering_actor=OWNER, run_attempt=1,
+                api_url="https://api.github.com", server_url="https://github.com",
+                output=Path(temp) / "approval.json", token=TOKEN,
+                transport=transport, sleeper=lambda _: None,
+            )
+
+    def test_authorize_accepts_empty_run_pr_list_after_merge(self):
+        # Real v0.5.2 failure: GitHub removed this association after PR #32
+        # merged, while the exact successful Source CI run remained intact.
+        transport = ApprovalTransport()
+        transport.source_run["pull_requests"] = []
+        report = self.authorize_with(transport)
+        self.assertEqual(report["release_commit"], RELEASE)
+        self.assertIn(
+            ("GET", f"/repos/{REPOSITORY}/commits/{RELEASE}/pulls"),
+            transport.calls,
+        )
+
+    def test_authorize_with_populated_pr_list_needs_no_fallback(self):
+        transport = ApprovalTransport()
+        self.authorize_with(transport)
+        self.assertFalse(any(path.endswith("/pulls") for _, path in transport.calls))
+
+    def test_empty_pr_list_cannot_replace_exact_source_run_evidence(self):
+        changes = {
+            "id": SOURCE_RUN + 1, "run_attempt": 2,
+            "status": "in_progress", "conclusion": "failure", "event": "push",
+            "head_sha": SOURCE, "head_branch": "main",
+            "path": ".github/workflows/other.yml",
+            "head_repository": {"full_name": "another/repository"},
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                transport = ApprovalTransport()
+                transport.source_run.update({"pull_requests": [], field: value})
+                with self.assertRaisesRegex(approval.ApprovalError, "Source CI evidence"):
+                    self.authorize_with(transport)
+                self.assertFalse(any(path.endswith("/pulls") for _, path in transport.calls))
+
+    def test_fallback_rejects_missing_or_conflicting_pr_list(self):
+        for pulls in (None, {}, "", [{"number": PR_NUMBER + 1}], [None]):
+            with self.subTest(pulls=pulls):
+                transport = ApprovalTransport()
+                transport.source_run["pull_requests"] = pulls
+                with self.assertRaises(approval.ApprovalError):
+                    self.authorize_with(transport)
+                self.assertFalse(any(path.endswith("/pulls") for _, path in transport.calls))
+        transport = ApprovalTransport()
+        del transport.source_run["pull_requests"]
+        with self.assertRaises(approval.ApprovalError):
+            self.authorize_with(transport)
+
+    def test_fallback_rejects_absent_ambiguous_or_unmerged_association(self):
+        pr = _event()["pull_request"]
+        for pulls in ([], [pr, pr], [{**pr, "number": PR_NUMBER + 1}],
+                      [{**pr, "merged_at": None}], [{**pr, "merged_at": "invalid"}]):
+            with self.subTest(pulls=pulls):
+                transport = ApprovalTransport()
+                transport.source_run["pull_requests"] = []
+                transport.associated_pulls = pulls
+                with self.assertRaises(approval.ApprovalError):
+                    self.authorize_with(transport)
+
+    def test_fallback_revalidates_the_exact_merged_pr_identity(self):
+        changes = [
+            ("state", "open"), ("draft", True), ("title", "A different change"),
+            ("html_url", "https://github.com/another/repo/pull/31"),
+            ("user", {"login": "another-user"}),
+            ("head.ref", "different-branch"), ("head.sha", SOURCE),
+            ("head.repo", {"full_name": "another/repository"}),
+            ("base.ref", "different-base"),
+            ("base.repo", {"full_name": "another/repository"}),
+        ]
+        for field, value in changes:
+            with self.subTest(field=field):
+                transport = ApprovalTransport()
+                transport.source_run["pull_requests"] = []
+                pr = copy.deepcopy(_event()["pull_request"])
+                if "." in field:
+                    parent, child = field.split(".")
+                    pr[parent][child] = value
+                else:
+                    pr[field] = value
+                transport.associated_pulls = [pr]
+                with self.assertRaises(approval.ApprovalError):
+                    self.authorize_with(transport)
+
+    def test_empty_pr_fallback_still_requires_chatgpt_approval(self):
+        transport = ApprovalTransport(include_merge_marker=False)
+        transport.source_run["pull_requests"] = []
+        with self.assertRaisesRegex(approval.ApprovalError, "lacks the ChatGPT approval"):
+            self.authorize_with(transport)
+        self.assertFalse(any(path.endswith("/pulls") for _, path in transport.calls))
+
+    def test_readiness_still_requires_direct_pr_run_association(self):
+        transport = ApprovalTransport()
+        transport.source_run["pull_requests"] = []
+        class Client:
+            def get(self, path, query):
+                return {"workflow_runs": [transport.source_run]}
+        with tempfile.TemporaryDirectory() as temp:
+            config = approval._config(
+                owner=OWNER, repository=REPOSITORY, version=VERSION,
+                source_commit=SOURCE, release_commit=RELEASE,
+                api_url="https://api.github.com", server_url="https://github.com",
+                output=Path(temp) / "ready.json",
+            )
+            with self.assertRaisesRegex(approval.ApprovalError, "timeout"):
+                approval._source_ci_run(
+                    Client(), config, PR_NUMBER, sleeper=lambda _: None, polls=1,
+                )
+
     def test_marker_is_canonical_and_approval_binds_the_release(self) -> None:
         ready = _ready_payload()
         encoded = approval.marker(approval.READY_PREFIX, ready)
