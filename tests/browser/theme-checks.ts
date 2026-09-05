@@ -62,6 +62,10 @@ async function checkReadableText(page: Page, root: string) {
 }
 
 async function checkStickyHeaders(page: Page, root: string) {
+  const loading = page.locator(`${root} #mining-loading`);
+  if (await loading.count()) {
+    await expect(loading, `${root} dashboard data settled`).toHaveClass(/is-hidden/);
+  }
   const wrapper = page.locator(`${root} .table-responsive:has(> table > thead)`).first();
   if (!await wrapper.count()) return;
   const body = wrapper.locator("tbody").first();
