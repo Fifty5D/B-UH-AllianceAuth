@@ -1,5 +1,0 @@
-schema_version = 1
-app = "platform"
-kind = "fix"
-summary = "Reconcile skipped but deployment-equivalent platform releases without weakening production predecessor checks."
-deployment_predecessor = "0.4.8"
