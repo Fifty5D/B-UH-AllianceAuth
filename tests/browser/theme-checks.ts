@@ -64,15 +64,29 @@ async function checkReadableText(page: Page, root: string) {
 async function checkStickyHeaders(page: Page, root: string) {
   const wrapper = page.locator(`${root} .table-responsive:has(> table > thead)`).first();
   if (!await wrapper.count()) return;
-  if (!await wrapper.locator("tbody tr").count()) return;
-  // Repeat only synthetic rows to reproduce a long production ledger.
-  await wrapper.locator("tbody").first().evaluate((body) => {
-    const rows = [...body.children];
+  const body = wrapper.locator("tbody").first();
+  await expect(body, `${root} sticky table body`).toHaveCount(1);
+  const columns = await wrapper.locator("thead th").count();
+  expect(columns, `${root} sticky table columns`).toBeGreaterThan(0);
+  // Use a structured row even when the seeded page is empty so sticky and
+  // horizontal alignment checks cover every table instead of silently skipping.
+  await body.evaluate((element, columnCount) => {
+    const row = document.createElement("tr");
+    row.dataset.testSynthetic = "sticky";
+    for (let index = 0; index < columnCount; index++) {
+      const cell = document.createElement("td");
+      cell.textContent = `Synthetic ${index + 1}`;
+      row.append(cell);
+    }
+    element.replaceChildren(row);
+  }, columns);
+  await body.evaluate((element) => {
+    const rows = [...element.children];
     for (let n = 0; n < 40 && rows.length; n++) {
       const row = rows[n % rows.length].cloneNode(true) as Element;
       row.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
       row.removeAttribute("id");
-      body.append(row);
+      element.append(row);
     }
   });
   await wrapper.scrollIntoViewIfNeeded();
