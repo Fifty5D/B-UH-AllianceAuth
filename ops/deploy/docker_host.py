@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import stat
 import subprocess
@@ -14,8 +15,9 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from .contracts import (
     IMAGE_DIGEST_RE,
@@ -44,6 +46,8 @@ SAFE_IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,511}$")
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
 MAX_COMPOSE_FILES = 8
 MAX_SERVICE_REPLICAS = 128
+BACKUP_LOCK_SECONDS = 120
+BACKUP_LOCK_WAIT_SECONDS = 15
 
 
 def _semver(value: str) -> tuple[int, int, int]:
@@ -1058,6 +1062,76 @@ class DockerHost:
             counts[table] = int(output)
         return counts
 
+    @contextmanager
+    def _database_read_lock(self, container: str) -> Iterator[None]:
+        """Keep the dump and its evidence counts on the same database state.
+
+        The watchdog runs inside the database container, so even a terminated
+        receiver or Docker client cannot leave the database locked indefinitely.
+        Reconnection is disabled because a new session would lose the lock.
+        """
+        script = (
+            'password="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
+            'test -n "$password"; export MYSQL_PWD="$password"; '
+            'command -v timeout >/dev/null; '
+            f'exec timeout --signal=TERM --kill-after=5s {BACKUP_LOCK_SECONDS}s '
+            'mariadb --user=root --batch --skip-column-names --unbuffered '
+            '--skip-reconnect'
+        )
+        process = subprocess.Popen(
+            ["docker", "exec", "-i", container, "sh", "-ceu", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(
+                (
+                    f"SET SESSION lock_wait_timeout={BACKUP_LOCK_WAIT_SECONDS};\n"
+                    "FLUSH TABLES WITH READ LOCK;\n"
+                    "SELECT 'BUH_BACKUP_LOCKED';\n"
+                ).encode("ascii")
+            )
+            process.stdin.flush()
+            deadline = time.monotonic() + BACKUP_LOCK_WAIT_SECONDS + 5
+            response = b""
+            while b"\n" not in response and len(response) < 128:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                    raise DeploymentError("Database backup read lock timed out")
+                chunk = os.read(process.stdout.fileno(), 128 - len(response))
+                if not chunk:
+                    break
+                response += chunk
+            if response != b"BUH_BACKUP_LOCKED\n" or process.poll() is not None:
+                raise DeploymentError("Database backup read lock was not acquired")
+            yield
+            if process.poll() is not None:
+                raise DeploymentError("Database backup read lock expired or disconnected")
+            process.stdin.write(b"UNLOCK TABLES;\n")
+            process.stdin.flush()
+            process.stdin.close()
+            if process.wait(timeout=10) != 0:
+                raise DeploymentError("Database backup read lock did not release cleanly")
+        except (OSError, subprocess.SubprocessError) as error:
+            raise DeploymentError("Database backup read lock connection failed") from error
+        finally:
+            # EOF also closes the session and releases its global read lock.
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                # The in-container watchdog still bounds an orphaned session.
+            if process.stdout is not None:
+                process.stdout.close()
+
     def backup(self, bundle: ValidatedBundle) -> Mapping[str, Any]:
         if self.backup_path is None:
             raise DeploymentError("Configuration backup was not prepared")
@@ -1072,23 +1146,28 @@ class DockerHost:
             raise DeploymentError("Database container image is not content addressed")
 
         raw_path = self.backup_path / "database.sql"
-        self._run_to_file(
-            [
-                "docker",
-                "exec",
-                container,
-                "sh",
-                "-ceu",
-                self._database_dump_shell(),
-                "buh-db-dump",
-                database,
-            ],
-            raw_path,
-            context="Pre-migration database backup",
-        )
-        if raw_path.stat().st_size < 128:
-            raise DeploymentError("Database backup is unexpectedly small")
-        source_counts = self._evidence_counts(container, database)
+        # A transaction-consistent dump cannot be compared with later live
+        # counts: scheduled capture, retention and user writes may change them.
+        # Hold one bounded read lock through both reads, then release it before
+        # the slower independent restore rehearsal.
+        with self._database_read_lock(container):
+            self._run_to_file(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "sh",
+                    "-ceu",
+                    self._database_dump_shell(),
+                    "buh-db-dump",
+                    database,
+                ],
+                raw_path,
+                context="Pre-migration database backup",
+            )
+            if raw_path.stat().st_size < 128:
+                raise DeploymentError("Database backup is unexpectedly small")
+            source_counts = self._evidence_counts(container, database)
 
         restore_name = f"buh-restore-{bundle.request.workflow_run_id}-{os.getpid()}"
         restore_password = secrets.token_urlsafe(32)
