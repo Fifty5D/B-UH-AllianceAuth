@@ -1417,6 +1417,59 @@ jobs:
             "${PUBLICATION_DIR}/release-state.json" \
             "${RUNNER_TEMP}/publish-release-state.json"
 
+      - name: Recompute the exact publication plan
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
+          TEST_RUN_URL: ${{ needs.candidate.outputs.test_run_url }}
+        run: |
+          set -Eeuo pipefail
+          release_state="${RUNNER_TEMP}/publish-release-state.json"
+          [[ -f "${release_state}" && ! -L "${release_state}" ]]
+
+          bootstrap="$(jq -r '.bootstrap' "${release_state}")"
+          previous_manifest=""
+          case "${bootstrap}" in
+            true)
+              jq -e '.latest == null' "${release_state}" >/dev/null
+              ;;
+            false)
+              previous_release_path="$(
+                jq -r '.latest.release_path // empty' "${release_state}"
+              )"
+              [[ "${previous_release_path}" =~ ^releases/platform/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              previous_manifest="${previous_release_path}/RELEASE.json"
+              [[ -f "${previous_manifest}" && ! -L "${previous_manifest}" ]]
+              ;;
+            *)
+              echo "Release-ledger bootstrap output is invalid." >&2
+              exit 1
+              ;;
+          esac
+
+          mkdir -p build
+          command=(
+            python3 ops/release/buh_release.py plan
+            --root .
+            --source-sha "${EXPECTED_SOURCE_SHA}"
+            --test-run "${TEST_RUN_URL}"
+            --output build/publish-plan.json
+          )
+          if [[ -n "${previous_manifest}" ]]; then
+            command+=(--previous "${previous_manifest}")
+          fi
+          "${command[@]}"
+
+          jq -e \
+            --arg source "${EXPECTED_SOURCE_SHA}" \
+            --arg version "${EXPECTED_VERSION}" \
+            --arg test_run "${TEST_RUN_URL}" '
+              type == "object"
+              and .source_commit == $source
+              and .platform_version == $version
+              and .test_run == $test_run
+            ' build/publish-plan.json >/dev/null
+
       - name: Validate payload and reconstruct the exact release commit
         id: verify
         env:
