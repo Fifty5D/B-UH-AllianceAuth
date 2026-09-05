@@ -12,6 +12,7 @@
     --mining-border: rgba(255, 255, 255, .09);
     --mining-text: #f4f7ff;
     --mining-muted: #abb4c5;
+    --mining-active-text: #0e2727;
     --mining-control: rgba(7, 10, 16, .42);
     --mining-table-hover: rgba(39, 211, 189, .08);
     position: relative;
@@ -35,6 +36,7 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     --mining-border: rgba(22, 35, 54, .16);
     --mining-text: #172033;
     --mining-muted: #526071;
+    --mining-active-text: #fff;
     --mining-control: #fff;
     --mining-table-hover: rgba(8, 127, 114, .08);
     color-scheme: light;
@@ -181,6 +183,10 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
     box-shadow: 0 8px 26px rgba(4, 8, 18, .08);
 }
 
+#buh-mining-app .text-secondary {
+    color: var(--mining-muted) !important;
+}
+
 #buh-mining-app :is(.form-control, .form-select) {
     border-color: var(--mining-border);
     color: var(--mining-text);
@@ -254,7 +260,7 @@ html:is([data-theme="bootstrap"], [data-theme="flatly"], [data-theme="materia"],
 .mining-segmented button:last-child { border-right: 0; }
 
 .mining-segmented button.active {
-    color: #0e2727;
+    color: var(--mining-active-text);
     background: var(--mining-teal);
 }
 
