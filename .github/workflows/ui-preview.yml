@@ -1,5 +1,5 @@
 name: Preview UI
-run-name: Preview UI / PR #${{ github.event.pull_request.number || inputs.pull_request }} / ${{ github.event.pull_request.head.sha || 'manual' }} / ${{ github.event.action || 'workflow_dispatch' }} / ${{ github.event.label.name || 'none' }}
+run-name: "Preview UI / PR #${{ github.event.pull_request.number || inputs.pull_request }} / ${{ github.event.pull_request.head.sha || 'manual' }} / ${{ github.event.action || 'workflow_dispatch' }} / ${{ github.event.label.name || 'none' }}"
 
 on:
   workflow_dispatch:

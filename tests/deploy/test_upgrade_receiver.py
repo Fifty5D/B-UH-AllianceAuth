@@ -2,6 +2,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import signal
 import stat
@@ -1870,7 +1871,7 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
                 check=True,
             )
             subprocess.run(["git", "-C", repo, "add", "."], check=True)
-            history_secret = "MUST-NOT-LEAVE-LOCAL-GIT-HISTORY"
+            history_secret = f"history-{secrets.token_hex(24)}"
             historical = repo / "removed-history-secret.txt"
             historical.write_text(history_secret + "\n", encoding="utf-8")
             subprocess.run(["git", "-C", repo, "add", "."], check=True)
@@ -1914,7 +1915,7 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 executable.write_text(fake_native, encoding="utf-8", newline="\n")
                 executable.chmod(0o755)
 
-            secret = "DO-NOT-COPY-THIS-LOCAL-SECRET"
+            secret = f"local-{secrets.token_hex(24)}"
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
             environment["BUH_FAKE_CAPTURE"] = str(capture)
@@ -1973,14 +1974,31 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 }
             self.assertEqual(archived_files, set(required))
             self.assertNotIn("removed-history-secret.txt", archived_files)
-            self.assertNotIn(history_secret.encode("ascii"), archive.read_bytes())
-            self.assertNotIn(history_secret, inventory.read_text(encoding="ascii"))
+            archive_bytes = archive.read_bytes()
+            inventory_text = inventory.read_text(encoding="ascii")
+            self.assertFalse(
+                history_secret.encode("ascii") in archive_bytes,
+                "Historical sentinel leaked into the reviewed source archive",
+            )
+            self.assertFalse(
+                history_secret in inventory_text,
+                "Historical sentinel leaked into the reviewed tree inventory",
+            )
 
             bootstrap_bytes = (capture / "bootstrap.bin").read_bytes()
             self.assertTrue(bootstrap_bytes.endswith(b"\n"))
-            self.assertNotIn(b"\r", bootstrap_bytes)
-            self.assertNotIn(secret.encode("ascii"), bootstrap_bytes)
-            self.assertNotIn(secret.encode("ascii"), archive.read_bytes())
+            self.assertFalse(
+                b"\r" in bootstrap_bytes,
+                "Root bootstrap contains a carriage-return byte",
+            )
+            self.assertFalse(
+                secret.encode("ascii") in bootstrap_bytes,
+                "Caller environment sentinel leaked into the root bootstrap",
+            )
+            self.assertFalse(
+                secret.encode("ascii") in archive_bytes,
+                "Caller environment sentinel leaked into the reviewed source archive",
+            )
             bootstrap = bootstrap_bytes.decode("utf-8")
             self.assertIn("BUH_REVIEWED_INVENTORY", bootstrap)
             self.assertIn("upgrade-receiver.sh", bootstrap)

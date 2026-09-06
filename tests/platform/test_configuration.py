@@ -588,6 +588,16 @@ class PlatformConfigurationContracts(TestCase):
             self.assertEqual(checkout["with"]["ref"], "${{ inputs.source_sha }}")
             self.assertFalse(checkout["with"]["persist-credentials"])
 
+    def test_preview_run_name_preserves_exact_head_binding_fields(self):
+        workflow = _load_workflow(WORKFLOWS / "ui-preview.yml")
+        self.assertEqual(
+            workflow["run-name"],
+            "Preview UI / PR #${{ github.event.pull_request.number || "
+            "inputs.pull_request }} / ${{ github.event.pull_request.head.sha || "
+            "'manual' }} / ${{ github.event.action || 'workflow_dispatch' }} / "
+            "${{ github.event.label.name || 'none' }}",
+        )
+
     def test_preview_permissions_relevance_theme_matrix_and_provenance(self):
         workflow = _load_workflow(WORKFLOWS / "ui-preview.yml")
         preview = workflow["jobs"]["preview"]
@@ -601,7 +611,7 @@ class PlatformConfigurationContracts(TestCase):
             "${{ steps.target.outputs.head_sha }}",
         )
         for required in (
-            "run-name: Preview UI / PR #${{ github.event.pull_request.number",
+            'run-name: "Preview UI / PR #${{ github.event.pull_request.number',
             "^\\\\.github/workflows/(ui-preview|invalidate-readiness)\\\\.ya?ml$",
             "^ops/readiness\\\\.py$",
             "^platform/test(auth|env)/",
