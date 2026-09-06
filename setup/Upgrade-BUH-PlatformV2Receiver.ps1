@@ -152,7 +152,7 @@ try {
     [IO.File]::WriteAllText(
         $Inventory,
         ([String]::Join("`n", $InventoryLines) + "`n"),
-        [Text.ASCIIEncoding]::new($false)
+        [Text.ASCIIEncoding]::new()
     )
     & git -C $RepoRoot archive --format=tar --output=$TreeArchive $ReviewedCommit -- $RequiredSources
     Assert-NativeSuccess "Exact reviewed tree export"
@@ -164,7 +164,7 @@ try {
     [IO.File]::WriteAllText(
         $Checksums,
         "$ArchiveHash  receiver-tree.tar`n$InventoryHash  TRACKED`n",
-        [Text.ASCIIEncoding]::new($false)
+        [Text.ASCIIEncoding]::new()
     )
 
     Write-Host "Transferring the exact reviewed receiver package to $SshTarget..." -ForegroundColor Cyan

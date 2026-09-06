@@ -10,8 +10,9 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import urlsplit
 
@@ -35,6 +36,29 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_IMAGE = (
     "ghcr.io/allianceauth/allianceauth:v5.2.0@sha256:" + "1" * 64
 )
+
+
+@contextmanager
+def simulated_root_owned_lstat(path: Path):
+    """Expose one runner-owned safety fixture as root-owned on POSIX CI."""
+
+    real_lstat = Path.lstat
+
+    def lstat_as_root(candidate):
+        details = real_lstat(candidate)
+        if candidate != path:
+            return details
+        return SimpleNamespace(
+            st_mode=details.st_mode,
+            st_uid=0,
+            st_gid=0,
+            st_dev=details.st_dev,
+            st_ino=details.st_ino,
+            st_size=details.st_size,
+        )
+
+    with mock.patch.object(Path, "lstat", lstat_as_root):
+        yield
 
 
 def container_id(number: int) -> str:
@@ -291,7 +315,8 @@ class DockerHostContracts(unittest.TestCase):
                     recovered_host.complete_recovery_plan()
                     return "exact prior topology restored"
 
-                with mock.patch.object(
+                recovery_plan = config.state_dir / "active-recovery.json"
+                with simulated_root_owned_lstat(recovery_plan), mock.patch.object(
                     DockerHost, "rollback", autospec=True, side_effect=recover
                 ):
                     result = DockerHost.recover_incomplete_plan(config)

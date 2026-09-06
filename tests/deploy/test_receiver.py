@@ -22,29 +22,33 @@ def simulated_root_metadata():
     """Present temporary runner-owned files as root-owned to the root-only unit."""
 
     real_lstat = Path.lstat
+    real_stat = Path.stat
     real_fstat = os.fstat
 
-    def lstat_as_root(path):
-        details = real_lstat(path)
+    def root_details(details):
         return SimpleNamespace(
             st_mode=details.st_mode,
             st_uid=0,
+            st_gid=0,
             st_dev=details.st_dev,
             st_ino=details.st_ino,
+            st_size=details.st_size,
         )
 
+    def lstat_as_root(path):
+        return root_details(real_lstat(path))
+
+    def stat_as_root(path, *args, **kwargs):
+        return root_details(real_stat(path, *args, **kwargs))
+
     def fstat_as_root(descriptor):
-        details = real_fstat(descriptor)
-        return SimpleNamespace(
-            st_mode=details.st_mode,
-            st_uid=0,
-            st_dev=details.st_dev,
-            st_ino=details.st_ino,
-        )
+        return root_details(real_fstat(descriptor))
 
     with mock.patch(
         "ops.deploy.receiver.os.geteuid", return_value=0
-    ), mock.patch.object(Path, "lstat", lstat_as_root), mock.patch(
+    ), mock.patch.object(Path, "lstat", lstat_as_root), mock.patch.object(
+        Path, "stat", stat_as_root
+    ), mock.patch(
         "ops.deploy.receiver.os.fstat", side_effect=fstat_as_root
     ), mock.patch(
         "ops.deploy.receiver._verify_root_owned_ancestors"
@@ -180,7 +184,9 @@ class ReceiverBoundaryTests(unittest.TestCase):
             mode = 0o40777 if path == Path("/unsafe-parent") else 0o40755
             return SimpleNamespace(st_mode=mode, st_uid=0)
 
-        with mock.patch.object(Path, "lstat", side_effect=details), mock.patch(
+        with mock.patch.object(
+            Path, "lstat", autospec=True, side_effect=details
+        ), mock.patch(
             "ops.deploy.receiver.os.geteuid", return_value=0
         ), self.assertRaisesRegex(DeploymentError, "ancestor is unsafe"):
             _open_lock(config)

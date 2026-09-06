@@ -1288,9 +1288,9 @@ class ReceiverUpgradeLockTests(unittest.TestCase):
             mode = 0o40777 if path == Path("/unsafe") else 0o40755
             return SimpleNamespace(st_mode=mode, st_uid=0)
 
-        with mock.patch.object(Path, "lstat", side_effect=details), self.assertRaisesRegex(
-            receiver_upgrade.UpgradeError, "ancestor is unsafe"
-        ):
+        with mock.patch.object(
+            Path, "lstat", autospec=True, side_effect=details
+        ), self.assertRaisesRegex(receiver_upgrade.UpgradeError, "ancestor is unsafe"):
             receiver_upgrade._verify_root_owned_ancestor_chain(
                 Path("/unsafe/state/deploy.lock")
             )
@@ -1470,7 +1470,6 @@ source "$1" "${@:2}"
                     repo / "ops/deploy/install-receiver.sh",
                     config,
                     legacy,
-                    "receiver_test",
                 ],
                 cwd=repo,
                 env=environment,
