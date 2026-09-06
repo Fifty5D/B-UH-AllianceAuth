@@ -1,7 +1,12 @@
 import {expect, test} from "./offline-ui";
 import {registerThemeChecks} from "./theme-checks";
 
-registerThemeChecks(false);
+// Preview UI runs the same matrix through console-preview.spec.ts so it can
+// retain screenshots. Avoid executing the expensive matrix twice while still
+// keeping the control/link regression below in both lanes.
+if (!process.env.BUH_PREVIEW_OUTPUT_DIR) {
+  registerThemeChecks(false);
+}
 
 test("shared console style matches Moon Tax and leaves existing controls available", async ({page}) => {
   const response = await page.request.post("/__test__/login/", {form: {role: "director"}});

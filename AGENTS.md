@@ -22,7 +22,7 @@ production-critical paths.
   inputs also require an `app = "platform"` fragment. Before merging, validate the
   release plan against the latest synchronized `RELEASE.json`; passing source
   tests does not by itself prove that release metadata is complete.
-- Run `platform/testenv/run-fast.sh` before pushing. Let the complete Source CI suite
+- Run `platform/testenv/run-fast.sh` before pushing. Let the complete Validate PR suite
   validate MariaDB, Redis, Celery, fake ESI, migrations, backup restoration, and
   browser behavior.
 - Inspect failures and fix the same pull request until
@@ -42,6 +42,20 @@ production-critical paths.
   unreadable Bootstrap defaults into an app surface.
 
 ## Review and release boundaries
+
+- Codex owns implementation, focused tests, synthetic preview preparation, and
+  creation or updates of the single feature pull request targeting `main`. After
+  the exact head's checks and applicable preview are green, Codex applies
+  `ready-for-work`. The
+  trusted handoff policy removes that request while it validates and publishes
+  the exact-head record, then re-adds it as the final signal. Codex stops only
+  after that handoff succeeds; any head, check, preview, or review change
+  invalidates it and requires Codex to apply it again after the head is green.
+- Codex never merges, publishes, approves, or deploys. ChatGPT Work owns final
+  risk review, merge of a validated non-production PR, release/preflight evidence
+  verification, the single production-approval request, deployment monitoring,
+  and final reporting. A Work rejection uses `needs-codex` and includes an exact
+  remediation prompt for the same PR.
 
 - Review for authentication and permission regressions, Moon Tax calculation and
   accounting integrity, migration and retention safety, backup/release/deployment

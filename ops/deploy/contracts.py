@@ -15,11 +15,20 @@ from urllib.parse import urlsplit
 
 
 CONTRACT_SCHEMA_VERSION = 1
+RECEIVER_CONFIG_SCHEMA_VERSION = 2
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 132
 MAX_FILE_BYTES = 64 * 1024 * 1024
+
+REQUIRED_SMOKE_CHECK_STATUSES = {
+    "/": (200, 302),
+    "/account/login/": (200, 302),
+    "/moon-tax/": (200, 302, 403),
+    "/structure-operations/": (200, 302, 403),
+    "/mining-analytics/": (200, 302, 403),
+}
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -35,10 +44,82 @@ IMAGE_DIGEST_RE = re.compile(
     r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?"
     r"@sha256:[0-9a-f]{64}$"
 )
+FATAL_LOG_ALLOWLIST_RE = re.compile(
+    r"^component=([a-z][a-z0-9_.-]{2,23})\|"
+    r"exception=([A-Z][A-Za-z0-9_.]{2,47})\|"
+    r"message=([A-Za-z0-9][^\x00-\x1f\x7f|]{19,71})$"
+)
+EXACT_DISCORD_PERMISSION_MESSAGE = (
+    "403 Forbidden (error code: 50013): Missing Permissions"
+)
+SENSITIVE_KEY_RE = (
+    r"(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|"
+    r"set[_-]?cookie|client[_-]?secret|refresh[_-]?token|access[_-]?token|"
+    r"private[_-]?key|session(?:id)?|csrf(?:token)?)"
+)
+SENSITIVE_IDENTIFIER_RE = (
+    rf"(?:[A-Za-z0-9_.-]*{SENSITIVE_KEY_RE}[A-Za-z0-9_.-]*)"
+)
+SENSITIVE_TEXT_PATTERNS = (
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer <redacted>"),
+    (re.compile(r"(?i)\bBot\s+[A-Za-z0-9._~+/=-]{12,}"), "Bot <redacted>"),
+    (
+        re.compile(
+            rf"(?i)([\"']?{SENSITIVE_IDENTIFIER_RE}[\"']?\s*[:=]\s*)"
+            r"([\"'])(.*?)\2"
+        ),
+        r"\1\2<redacted>\2",
+    ),
+    (
+        re.compile(
+            rf"(?i)([\"']?{SENSITIVE_IDENTIFIER_RE}[\"']?)"
+            r"(\s*[:=]\s*)([^\s,;}}]+)"
+        ),
+        r"\1\2<redacted>",
+    ),
+    (
+        re.compile(
+            r"(?i)([?&](?:access_token|refresh_token|token|key|api_key|secret|"
+            r"signature|sig|auth|sentry_key)=)[^&\s\"']+"
+        ),
+        r"\1<redacted>",
+    ),
+    (
+        re.compile(r"(?i)(https?://)([^/@\s:]+):([^/@\s]+)@"),
+        r"\1<redacted>:<redacted>@",
+    ),
+    (
+        re.compile(
+            r"https://(?:canary\.)?discord(?:app)?\.com/api/webhooks/\S+",
+            re.IGNORECASE,
+        ),
+        "https://discord.com/api/webhooks/<redacted>",
+    ),
+    (
+        re.compile(
+            r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."
+            r"[A-Za-z0-9_-]{10,}\b"
+        ),
+        "<redacted-jwt>",
+    ),
+)
 
 
 class DeploymentError(RuntimeError):
     """Raised when a deployment input or host invariant fails closed."""
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redact credential-shaped retained text to a bounded fixed point."""
+
+    for _ in range(8):
+        updated = text
+        for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
+            updated = pattern.sub(replacement, updated)
+        if updated == text:
+            return updated
+        text = updated
+    return text
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -139,6 +220,7 @@ class SmokeCheck:
 
 @dataclass(frozen=True)
 class ReceiverConfig:
+    schema_version: int
     repository: str
     app_dir: Path
     state_dir: Path
@@ -154,20 +236,30 @@ class ReceiverConfig:
     database_service: str
     redis_service: str
     proxy_service: str
+    beat_service: str
+    nginx_upstream_file: Path
+    nginx_upstream_container_file: str
+    gunicorn_port: int
     setup_arguments: Mapping[str, tuple[str, ...]]
     smoke_checks: tuple[SmokeCheck, ...]
+    application_health_commands: tuple[str, ...]
+    required_celery_queues: tuple[str, ...]
+    required_celery_tasks: tuple[str, ...]
+    fatal_log_allowlist: tuple[str, ...]
     legacy_platform_version: str
     legacy_release_commit: str
     command_timeout_seconds: int
     health_attempts: int
     health_interval_seconds: int
+    stabilization_seconds: int
+    stabilization_interval_seconds: int
     restore_tmpfs_mb: int
     max_archive_bytes: int
 
     @classmethod
     def load(cls, path: Path) -> "ReceiverConfig":
         data = _load_json(path, max_bytes=64 * 1024, context="receiver config")
-        fields = {
+        v1_fields = {
             "schema_version",
             "repository",
             "app_dir",
@@ -194,9 +286,26 @@ class ReceiverConfig:
             "restore_tmpfs_mb",
             "max_archive_bytes",
         }
-        _strict_keys(data, allowed=fields, required=fields, context="receiver config")
-        if data["schema_version"] != CONTRACT_SCHEMA_VERSION:
+        v2_fields = v1_fields | {
+            "beat_service",
+            "nginx_upstream_file",
+            "nginx_upstream_container_file",
+            "gunicorn_port",
+            "application_health_commands",
+            "required_celery_queues",
+            "required_celery_tasks",
+            "fatal_log_allowlist",
+            "stabilization_seconds",
+            "stabilization_interval_seconds",
+        }
+        schema_version = data.get("schema_version")
+        if schema_version == CONTRACT_SCHEMA_VERSION:
+            fields = v1_fields
+        elif schema_version == RECEIVER_CONFIG_SCHEMA_VERSION:
+            fields = v2_fields
+        else:
             raise DeploymentError("Unsupported receiver config schema")
+        _strict_keys(data, allowed=fields, required=fields, context="receiver config")
         repository = data["repository"]
         if not isinstance(repository, str) or not SAFE_REPOSITORY_RE.fullmatch(repository):
             raise DeploymentError("Invalid repository in receiver config")
@@ -235,6 +344,24 @@ class ReceiverConfig:
             raise DeploymentError("gunicorn_service must occur in auth_services")
         if named_services["worker_service"] not in auth_services:
             raise DeploymentError("worker_service must occur in auth_services")
+        if schema_version == RECEIVER_CONFIG_SCHEMA_VERSION:
+            beat_service = _service(data["beat_service"], "beat_service")
+        else:
+            beat_candidates = tuple(
+                service for service in auth_services if service.lower().endswith("beat")
+            )
+            if len(beat_candidates) != 1:
+                raise DeploymentError(
+                    "Schema-v1 receiver config must identify exactly one *beat service"
+                )
+            beat_service = beat_candidates[0]
+        if beat_service not in auth_services:
+            raise DeploymentError("beat_service must occur in auth_services")
+        if beat_service in {
+            named_services["gunicorn_service"],
+            named_services["worker_service"],
+        }:
+            raise DeploymentError("Gunicorn, worker, and beat services must be distinct")
         infrastructure = {
             named_services["database_service"],
             named_services["redis_service"],
@@ -286,11 +413,20 @@ class ReceiverConfig:
                 or len(url) > 500
                 or any(ord(character) < 32 for character in url)
                 or parsed is None
+                or parsed.scheme != "https"
+                or parsed.netloc != "auth.b-uh.com"
                 or parsed.hostname != "auth.b-uh.com"
-                or parsed_port not in {None, 443}
+                or parsed_port is not None
                 or parsed.username is not None
                 or parsed.password is not None
+                or bool(parsed.query)
                 or bool(parsed.fragment)
+                or not parsed.path.startswith("/")
+                or "//" in parsed.path
+                or any(part in {".", ".."} for part in parsed.path.split("/"))
+                or re.fullmatch(r"/[A-Za-z0-9._~!$&'()*+,;=:@/-]*", parsed.path)
+                is None
+                or url != f"https://auth.b-uh.com{parsed.path}"
             ):
                 raise DeploymentError(
                     f"Smoke check {index} must use the production HTTPS origin"
@@ -301,10 +437,151 @@ class ReceiverConfig:
                 or not statuses
                 or len(statuses) > 8
                 or len(statuses) != len(set(statuses))
-                or not all(type(status) is int and 100 <= status <= 599 for status in statuses)
+                or not all(
+                    type(status) is int and 100 <= status <= 499
+                    for status in statuses
+                )
             ):
                 raise DeploymentError(f"Smoke check {index} has invalid statuses")
             smoke_checks.append(SmokeCheck(url=url, statuses=tuple(statuses)))
+        paths = [urlsplit(check.url).path for check in smoke_checks]
+        if len(paths) != len(set(paths)):
+            raise DeploymentError("smoke_checks must use unique route paths")
+        required_checks = REQUIRED_SMOKE_CHECK_STATUSES
+        missing_paths = set(required_checks) - set(paths)
+        if schema_version == RECEIVER_CONFIG_SCHEMA_VERSION:
+            if missing_paths:
+                raise DeploymentError(
+                    "smoke_checks must uniquely cover public, login, Moon Tax, "
+                    "Structure Ops, and Mining Analytics routes"
+                )
+            for check in smoke_checks:
+                route = urlsplit(check.url).path
+                expected_statuses = required_checks.get(route)
+                if expected_statuses is not None and set(check.statuses) != set(
+                    expected_statuses
+                ):
+                    raise DeploymentError(
+                        f"Smoke check for {route} must use its fixed status policy"
+                    )
+        else:
+            # Installed schema-v1 configs predate the complete functional gate.
+            # Preserve every configured check and synthesize only the fixed,
+            # production-origin minimums so a receiver code upgrade cannot
+            # silently omit login or application health coverage.
+            for check in smoke_checks:
+                route = urlsplit(check.url).path
+                expected_statuses = required_checks.get(route)
+                if expected_statuses is not None and not set(check.statuses) <= set(
+                    expected_statuses
+                ):
+                    raise DeploymentError(
+                        f"Legacy smoke check for {route} exceeds its fixed status policy"
+                    )
+            for route, statuses in required_checks.items():
+                if route in missing_paths:
+                    smoke_checks.append(
+                        SmokeCheck(
+                            url=f"https://auth.b-uh.com{route}",
+                            statuses=statuses,
+                        )
+                    )
+
+        command_re = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+        contract_name_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
+
+        def bounded_strings(
+            name: str,
+            *,
+            maximum: int,
+            minimum: int,
+            pattern: re.Pattern[str],
+            defaults: tuple[str, ...],
+        ) -> tuple[str, ...]:
+            raw = data[name] if schema_version == RECEIVER_CONFIG_SCHEMA_VERSION else list(defaults)
+            if (
+                not isinstance(raw, list)
+                or not minimum <= len(raw) <= maximum
+                or len(raw) != len(set(raw))
+                or any(not isinstance(item, str) or not pattern.fullmatch(item) for item in raw)
+            ):
+                raise DeploymentError(f"{name} must be a bounded list of safe unique strings")
+            return tuple(raw)
+
+        application_health_commands = bounded_strings(
+            "application_health_commands",
+            maximum=16,
+            minimum=1,
+            pattern=command_re,
+            defaults=(
+                "buh_moon_tax_status",
+                "buh_structure_ops_status",
+                "buh_mining_check",
+            ),
+        )
+        required_celery_queues = bounded_strings(
+            "required_celery_queues",
+            maximum=32,
+            minimum=1,
+            pattern=contract_name_re,
+            defaults=("celery", "services"),
+        )
+        required_celery_tasks = bounded_strings(
+            "required_celery_tasks",
+            maximum=64,
+            minimum=1,
+            pattern=contract_name_re,
+            defaults=(
+                "buh_moon_tax.tasks.run_scheduled_audit",
+                "buh_structure_ops.tasks.capture_and_evaluate",
+            ),
+        )
+        allowlist_raw = (
+            data["fatal_log_allowlist"]
+            if schema_version == RECEIVER_CONFIG_SCHEMA_VERSION
+            else []
+        )
+        if (
+            not isinstance(allowlist_raw, list)
+            or len(allowlist_raw) > 32
+            or len(allowlist_raw) != len(set(allowlist_raw))
+            or any(
+                not isinstance(item, str)
+                or FATAL_LOG_ALLOWLIST_RE.fullmatch(item) is None
+                for item in allowlist_raw
+            )
+        ):
+            raise DeploymentError(
+                "fatal_log_allowlist must contain bounded structured signatures"
+            )
+        for signature in allowlist_raw:
+            match = FATAL_LOG_ALLOWLIST_RE.fullmatch(signature)
+            assert match is not None
+            _component, exception, message = match.groups()
+            exact_discord_permission = (
+                exception in {"Forbidden", "DiscordForbidden"}
+                and message == EXACT_DISCORD_PERMISSION_MESSAGE
+            )
+            words = {
+                word.casefold()
+                for word in re.findall(r"[A-Za-z0-9]{3,}", message)
+            }
+            if (
+                exception in {"Error", "Exception", "HTTPError"}
+                or len(words) < 4
+                or (
+                    not exact_discord_permission
+                    and re.search(
+                        r"(?i)(?:\b403\b|\b50013\b|permissions?|"
+                        r"permission denied|\berrors?\b)",
+                        signature,
+                    )
+                )
+            ):
+                raise DeploymentError(
+                    "fatal_log_allowlist contains a broad or forbidden signature"
+                )
+        fatal_log_allowlist = tuple(allowlist_raw)
 
         def bounded_int(name: str, minimum: int, maximum: int) -> int:
             value = data[name]
@@ -329,7 +606,40 @@ class ReceiverConfig:
         if len(set(directories.values())) != len(directories):
             raise DeploymentError("Application, state, and backup directories must differ")
 
+        if schema_version == RECEIVER_CONFIG_SCHEMA_VERSION:
+            nginx_upstream_file = _relative_path(
+                data["nginx_upstream_file"], "nginx_upstream_file"
+            )
+            nginx_upstream_container_file = data["nginx_upstream_container_file"]
+            if (
+                not isinstance(nginx_upstream_container_file, str)
+                or not nginx_upstream_container_file.startswith("/")
+                or ".." in PurePosixPath(nginx_upstream_container_file).parts
+                or not SAFE_RELATIVE_RE.fullmatch(
+                    nginx_upstream_container_file.lstrip("/")
+                )
+            ):
+                raise DeploymentError("Invalid in-container Nginx upstream path")
+            gunicorn_port = bounded_int("gunicorn_port", 1024, 65535)
+            stabilization_seconds = bounded_int(
+                "stabilization_seconds", 300, 1800
+            )
+            stabilization_interval_seconds = bounded_int(
+                "stabilization_interval_seconds", 5, 60
+            )
+            if stabilization_interval_seconds > stabilization_seconds:
+                raise DeploymentError(
+                    "stabilization_interval_seconds exceeds stabilization_seconds"
+                )
+        else:
+            nginx_upstream_file = Path("conf/buh-platform-v2/nginx/upstream.conf")
+            nginx_upstream_container_file = "/etc/nginx/buh-platform-v2/upstream.conf"
+            gunicorn_port = 8000
+            stabilization_seconds = 300
+            stabilization_interval_seconds = 15
+
         return cls(
+            schema_version=schema_version,
             repository=repository,
             **directories,
             compose_file=_relative_path(data["compose_file"], "compose_file"),
@@ -342,6 +652,14 @@ class ReceiverConfig:
             auth_services=auth_services,
             setup_arguments=setup_arguments,
             smoke_checks=tuple(smoke_checks),
+            beat_service=beat_service,
+            nginx_upstream_file=nginx_upstream_file,
+            nginx_upstream_container_file=nginx_upstream_container_file,
+            gunicorn_port=gunicorn_port,
+            application_health_commands=application_health_commands,
+            required_celery_queues=required_celery_queues,
+            required_celery_tasks=required_celery_tasks,
+            fatal_log_allowlist=fatal_log_allowlist,
             legacy_platform_version=data["legacy_platform_version"],
             legacy_release_commit=data["legacy_release_commit"],
             command_timeout_seconds=bounded_int(
@@ -351,6 +669,8 @@ class ReceiverConfig:
             health_interval_seconds=bounded_int(
                 "health_interval_seconds", 1, 60
             ),
+            stabilization_seconds=stabilization_seconds,
+            stabilization_interval_seconds=stabilization_interval_seconds,
             restore_tmpfs_mb=bounded_int("restore_tmpfs_mb", 256, 16384),
             max_archive_bytes=bounded_int(
                 "max_archive_bytes", 1024 * 1024, MAX_ARCHIVE_BYTES

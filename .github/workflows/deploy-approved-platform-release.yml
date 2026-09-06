@@ -1,7 +1,8 @@
-name: Deploy ChatGPT-approved platform release
+name: Deploy Production
 
 on:
   pull_request_target:
+    branches: [main]
     types: [closed]
 
 permissions:
@@ -20,19 +21,30 @@ jobs:
     name: Bind merge to ChatGPT approval and preflight
     if: ${{ github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       actions: read
+      checks: read
       contents: read
       issues: read
       pull-requests: read
     outputs:
+      feature_readiness: ${{ steps.final_gate.outputs.feature_readiness }}
+      feature_head_sha: ${{ steps.gate.outputs.feature_head_sha }}
+      feature_pr_number: ${{ steps.gate.outputs.feature_pr_number }}
+      main_validation_run_attempt: ${{ steps.gate.outputs.main_validation_run_attempt }}
+      main_validation_run_id: ${{ steps.gate.outputs.main_validation_run_id }}
       manifest_sha256: ${{ steps.gate.outputs.manifest_sha256 }}
       platform_version: ${{ steps.gate.outputs.platform_version }}
       preflight_artifact: ${{ steps.gate.outputs.preflight_artifact }}
+      preflight_artifact_digest: ${{ steps.gate.outputs.preflight_artifact_digest }}
+      preflight_artifact_id: ${{ steps.gate.outputs.preflight_artifact_id }}
+      preflight_run_attempt: ${{ steps.gate.outputs.preflight_run_attempt }}
       preflight_run_id: ${{ steps.gate.outputs.preflight_run_id }}
       release_commit: ${{ steps.gate.outputs.release_commit }}
       source_commit: ${{ steps.gate.outputs.source_commit }}
+      sync_validation_run_attempt: ${{ steps.gate.outputs.sync_validation_run_attempt }}
+      sync_validation_run_id: ${{ steps.gate.outputs.sync_validation_run_id }}
     steps:
       # pull_request_target is trusted only because this checkout is the base
       # branch revision. No code is ever checked out from event-controlled refs.
@@ -50,6 +62,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${{ github.sha }}" ]]
+          [[ "${{ github.sha }}" == "${{ github.event.pull_request.merge_commit_sha }}" ]]
           python3 ops/release/platform_approval.py authorize \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
@@ -64,11 +77,12 @@ jobs:
       - name: Download the exact retained preflight artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ steps.gate.outputs.preflight_artifact }}
+          artifact-ids: ${{ steps.gate.outputs.preflight_artifact_id }}
           path: build/preflight-evidence
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.gate.outputs.preflight_run_id }}
+          merge-multiple: true
 
       - name: Verify receiver and observer preflight evidence
         run: |
@@ -86,6 +100,74 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+      - name: Close authorization races before deploy
+        id: final_gate
+        env:
+          FEATURE_HEAD_SHA: ${{ steps.gate.outputs.feature_head_sha }}
+          FEATURE_PR_NUMBER: ${{ steps.gate.outputs.feature_pr_number }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          SOURCE_COMMIT: ${{ steps.gate.outputs.source_commit }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/platform_approval.py authorize \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${GITHUB_EVENT_PATH}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-deploy-approval-final.json >/dev/null
+          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
+          fi
+          first_introduction=()
+          if [[ "${FEATURE_PR_NUMBER}" == "44" ]]; then
+            first_introduction=(--allow-first-introduction --first-introduction-pr 44)
+          fi
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request "${FEATURE_PR_NUMBER}" \
+            --feature-head "${FEATURE_HEAD_SHA}" \
+            --merge-source-commit "${SOURCE_COMMIT}" \
+            "${allowed_mergers[@]}" \
+            "${first_introduction[@]}" \
+            --output build/current-feature-readiness.json >/dev/null
+          cmp --silent \
+            build/platform-deploy-approval.json \
+            build/platform-deploy-approval-final.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path("build/platform-deploy-approval-final.json")
+          current_path = Path("build/current-feature-readiness.json")
+          report = json.loads(report_path.read_text(encoding="ascii"))
+          current_raw = current_path.read_text(encoding="ascii")
+          current = json.loads(current_raw)
+          canonical = json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n"
+          embedded = json.dumps(
+              report.get("feature_readiness"),
+              sort_keys=True,
+              separators=(",", ":"),
+          ) + "\n"
+          if current_raw != canonical:
+              raise SystemExit("Current feature readiness is not canonical")
+          if embedded != current_raw or report.get("feature_readiness") != current:
+              raise SystemExit("Current feature readiness differs from the approved record")
+          with Path(os.environ["GITHUB_OUTPUT"]).open(
+              "a", encoding="utf-8", newline="\n"
+          ) as output:
+              print(f"feature_readiness={canonical.rstrip()}", file=output)
+          PY
+
   deploy:
     name: Deploy the approved immutable release
     needs: authorize
@@ -94,10 +176,28 @@ jobs:
       mode: deploy
       platform_version: ${{ needs.authorize.outputs.platform_version }}
       release_commit: ${{ needs.authorize.outputs.release_commit }}
+      feature_pr_number: ${{ needs.authorize.outputs.feature_pr_number }}
+      feature_head_sha: ${{ needs.authorize.outputs.feature_head_sha }}
+      source_commit: ${{ needs.authorize.outputs.source_commit }}
+      feature_readiness: ${{ needs.authorize.outputs.feature_readiness }}
+      main_validation_run_id: ${{ needs.authorize.outputs.main_validation_run_id }}
+      main_validation_run_attempt: ${{ needs.authorize.outputs.main_validation_run_attempt }}
+      manifest_sha256: ${{ needs.authorize.outputs.manifest_sha256 }}
+      preflight_run_id: ${{ needs.authorize.outputs.preflight_run_id }}
+      preflight_run_attempt: ${{ needs.authorize.outputs.preflight_run_attempt }}
+      preflight_artifact: ${{ needs.authorize.outputs.preflight_artifact }}
+      preflight_artifact_id: ${{ needs.authorize.outputs.preflight_artifact_id }}
+      preflight_artifact_digest: ${{ needs.authorize.outputs.preflight_artifact_digest }}
+      sync_validation_run_id: ${{ needs.authorize.outputs.sync_validation_run_id }}
+      sync_validation_run_attempt: ${{ needs.authorize.outputs.sync_validation_run_attempt }}
       confirmation: DEPLOY PLATFORM V2
     secrets: inherit
     permissions:
+      actions: read
+      checks: read
       contents: read
+      issues: read
+      pull-requests: read
 
   report:
     name: Report deployment result for ChatGPT
@@ -116,6 +216,8 @@ jobs:
           ARTIFACT_NAME: ${{ needs.deploy.outputs.artifact_name }}
           AUTHORIZE_RESULT: ${{ needs.authorize.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
+          FEATURE_HEAD_SHA: ${{ needs.authorize.outputs.feature_head_sha }}
+          FEATURE_PR_NUMBER: ${{ needs.authorize.outputs.feature_pr_number }}
           GITHUB_TOKEN: ${{ github.token }}
           PLATFORM_VERSION: ${{ needs.authorize.outputs.platform_version }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
@@ -124,6 +226,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           SERVER_URL: ${{ github.server_url }}
+          SOURCE_COMMIT: ${{ needs.authorize.outputs.source_commit }}
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
@@ -140,19 +243,34 @@ jobs:
               result = "deployment-failed"
           else:
               result = "success"
+          feature_pr_raw = os.environ["FEATURE_PR_NUMBER"]
+          feature_pr = (
+              int(feature_pr_raw)
+              if re.fullmatch(r"[1-9][0-9]*", feature_pr_raw)
+              else None
+          )
           values = {
               "artifact_name": os.environ["ARTIFACT_NAME"],
+              "feature_head_sha": os.environ["FEATURE_HEAD_SHA"],
+              "feature_pr_number": feature_pr,
               "platform_version": os.environ["PLATFORM_VERSION"],
               "release_commit": os.environ["RELEASE_COMMIT"],
               "repository": os.environ["REPOSITORY"],
               "result": result,
               "schema_version": 1,
+              "source_commit": os.environ["SOURCE_COMMIT"],
               "workflow_run_attempt": int(os.environ["RUN_ATTEMPT"]),
               "workflow_run_id": int(os.environ["RUN_ID"]),
           }
           if result == "success":
               if not re.fullmatch(r"[0-9a-f]{40}", values["release_commit"]):
                   raise SystemExit("Successful deployment lacks an exact release commit")
+              if not re.fullmatch(r"[0-9a-f]{40}", values["feature_head_sha"]):
+                  raise SystemExit("Successful deployment lacks the exact feature head")
+              if values["feature_pr_number"] is None:
+                  raise SystemExit("Successful deployment lacks the feature pull request")
+              if not re.fullmatch(r"[0-9a-f]{40}", values["source_commit"]):
+                  raise SystemExit("Successful deployment lacks the exact source commit")
               if not re.fullmatch(
                   r"platform-v2-deploy-[0-9]{1,20}-[1-9][0-9]{0,5}",
                   values["artifact_name"],

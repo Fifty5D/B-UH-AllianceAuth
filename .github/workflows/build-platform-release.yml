@@ -3,6 +3,11 @@ name: Build platform release
 on:
   workflow_call:
     inputs:
+      automatic_release:
+        description: Trusted Prepare Release workflow_call mode (not dispatchable)
+        required: false
+        type: boolean
+        default: false
       expected_source_sha:
         description: Exact full main commit SHA (40 or 64 lowercase hex characters)
         required: true
@@ -14,6 +19,29 @@ on:
         default: false
       publish_confirmation:
         description: Exact publication confirmation when publication is enabled
+        required: false
+        type: string
+        default: ""
+      source_validation_run_id:
+        description: Exact triggering main Validate PR workflow run ID in automatic mode
+        required: false
+        type: string
+        default: ""
+      source_validation_run_attempt:
+        description: Exact triggering main Validate PR workflow run attempt in automatic mode
+        required: false
+        type: string
+        default: ""
+      feature_pr_number:
+        description: Exact merged feature pull-request number
+        required: true
+        type: string
+      feature_head_sha:
+        description: Exact merged feature pull-request head
+        required: true
+        type: string
+      feature_readiness:
+        description: Canonical published feature-readiness JSON in automatic mode
         required: false
         type: string
         default: ""
@@ -31,6 +59,21 @@ on:
       source_commit:
         description: Exact tested main commit
         value: ${{ jobs.synchronize_release.outputs.source_commit }}
+      feature_head_sha:
+        description: Exact merged feature pull-request head
+        value: ${{ jobs.source_gate.outputs.feature_head_sha }}
+      feature_pr_number:
+        description: Exact merged feature pull-request number
+        value: ${{ jobs.source_gate.outputs.feature_pr_number }}
+      feature_readiness:
+        description: Canonical reverified feature-readiness JSON
+        value: ${{ jobs.source_gate.outputs.feature_readiness }}
+      main_validation_run_attempt:
+        description: Exact selected main Validate PR run attempt
+        value: ${{ jobs.source_gate.outputs.run_attempt }}
+      main_validation_run_id:
+        description: Exact selected main Validate PR run ID
+        value: ${{ jobs.source_gate.outputs.run_id }}
       sync_pr_number:
         description: Mandatory release synchronization pull request number
         value: ${{ jobs.synchronize_release.outputs.sync_pr_number }}
@@ -52,13 +95,20 @@ on:
         description: Type PUBLISH RELEASE BRANCH when publication is enabled
         required: false
         type: string
+      feature_pr_number:
+        description: Exact merged feature pull-request number
+        required: true
+        type: string
+      feature_head_sha:
+        description: Exact merged feature pull-request head
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ inputs.publish_release_branch && 'buh-platform-release-publication' || format('buh-platform-release-candidate-{0}', github.run_id) }}
-  queue: max
   cancel-in-progress: false
 
 defaults:
@@ -67,25 +117,38 @@ defaults:
 
 jobs:
   source_gate:
-    name: Require exact-SHA Source CI
+    name: Require exact-SHA Validate PR
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
+      feature_head_sha: ${{ steps.lineage.outputs.feature_head_sha }}
+      feature_pr_number: ${{ steps.lineage.outputs.feature_pr_number }}
+      feature_readiness: ${{ steps.lineage.outputs.feature_readiness }}
       run_attempt: ${{ steps.source_ci.outputs.run_attempt }}
       run_id: ${{ steps.source_ci.outputs.run_id }}
       run_url: ${{ steps.source_ci.outputs.run_url }}
     steps:
-      - name: Find the newest exact-SHA main Source CI run
+      - name: Find the newest exact-SHA main Validate PR run
         id: source_ci
         env:
           API_URL: ${{ github.api_url }}
+          AUTOMATIC_RELEASE: ${{ inputs.automatic_release && 'true' || 'false' }}
+          CALL_EVENT: ${{ github.event_name }}
           DISPATCH_REF: ${{ github.ref }}
           DISPATCH_SHA: ${{ github.sha }}
+          EVENT_SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EVENT_SOURCE_ID: ${{ github.event.workflow_run.id }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          REQUESTED_SOURCE_ATTEMPT: ${{ inputs.source_validation_run_attempt }}
+          REQUESTED_SOURCE_ID: ${{ inputs.source_validation_run_id }}
           SERVER_URL: ${{ github.server_url }}
         run: |
           set -Eeuo pipefail
@@ -95,6 +158,24 @@ jobs:
           fi
           [[ "${DISPATCH_REF}" == "refs/heads/main" ]]
           [[ "${DISPATCH_SHA}" == "${EXPECTED_SOURCE_SHA}" ]]
+          case "${AUTOMATIC_RELEASE}" in
+            true)
+              [[ "${CALL_EVENT}" == "workflow_run" ]]
+              [[ "${EVENT_SOURCE_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${EVENT_SOURCE_ATTEMPT}" == "1" ]]
+              [[ "${REQUESTED_SOURCE_ID}" == "${EVENT_SOURCE_ID}" ]]
+              [[ "${REQUESTED_SOURCE_ATTEMPT}" == "${EVENT_SOURCE_ATTEMPT}" ]]
+              ;;
+            false)
+              [[ "${CALL_EVENT}" == "workflow_dispatch" ]]
+              [[ -z "${REQUESTED_SOURCE_ID}" ]]
+              [[ -z "${REQUESTED_SOURCE_ATTEMPT}" ]]
+              ;;
+            *)
+              echo "automatic_release is invalid." >&2
+              exit 1
+              ;;
+          esac
 
           mkdir -p build/source-ci-pages
           page=1
@@ -114,7 +195,7 @@ jobs:
             fi
             page=$((page + 1))
             if [[ "${page}" -gt 100 ]]; then
-              echo "Too many Source CI result pages; refusing an incomplete decision." >&2
+              echo "Too many Validate PR result pages; refusing an incomplete decision." >&2
               exit 1
             fi
           done
@@ -141,11 +222,12 @@ jobs:
               and isinstance(run.get("path"), str)
               and run["path"].split("@", 1)[0] == ".github/workflows/source-ci.yml"
               and (run.get("head_repository") or {}).get("full_name") == repository
+              and (run.get("repository") or {}).get("full_name") == repository
               and isinstance(run.get("id"), int)
           ]
           if not runs:
               raise SystemExit(
-                  "No Source CI push run exists for expected_source_sha"
+                  "No Validate PR push run exists for expected_source_sha"
               )
           selected = max(
               runs,
@@ -160,12 +242,20 @@ jobs:
               or selected.get("conclusion") != "success"
           ):
               raise SystemExit(
-                  "The newest exact-SHA Source CI run did not complete successfully"
+                  "The newest exact-SHA Validate PR run did not complete successfully"
               )
           run_id = selected["id"]
           run_attempt = int(selected.get("run_attempt", 0))
           if run_attempt < 1:
-              raise SystemExit("Newest Source CI run has an invalid attempt number")
+              raise SystemExit("Newest Validate PR run has an invalid attempt number")
+          if os.environ["AUTOMATIC_RELEASE"] == "true" and (
+              str(run_id) != os.environ["REQUESTED_SOURCE_ID"]
+              or str(run_attempt) != os.environ["REQUESTED_SOURCE_ATTEMPT"]
+              or run_attempt != 1
+          ):
+              raise SystemExit(
+                  "Automatic release is not bound to its first-attempt Validate PR run"
+              )
           run_url = (
               f"{os.environ['SERVER_URL']}/{repository}/actions/runs/{run_id}"
               f"/attempts/{run_attempt}"
@@ -177,12 +267,74 @@ jobs:
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
               "a", encoding="utf-8"
           ) as summary:
-              print("### Verified Source CI provenance", file=summary)
+              print("### Verified Validate PR provenance", file=summary)
               print(file=summary)
               print(f"- Source: `{expected}`", file=summary)
               print(f"- Run: `{run_id}`", file=summary)
               print(f"- Attempt: `{run_attempt}`", file=summary)
-          print(f"Using successful Source CI run {run_id}, attempt {run_attempt}")
+          print(f"Using successful Validate PR run {run_id}, attempt {run_attempt}")
+          PY
+
+      - name: Check out the exact source for feature-lineage verification
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reverify exact published feature readiness
+        id: lineage
+        env:
+          AUTOMATIC_RELEASE: ${{ inputs.automatic_release && 'true' || 'false' }}
+          EXPECTED_FEATURE_READINESS: ${{ inputs.feature_readiness }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          FEATURE_HEAD_SHA: ${{ inputs.feature_head_sha }}
+          FEATURE_PR_NUMBER: ${{ inputs.feature_pr_number }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${FEATURE_PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${FEATURE_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
+          fi
+          first_introduction=()
+          if [[ "${FEATURE_PR_NUMBER}" == "44" ]]; then
+            first_introduction=(--allow-first-introduction --first-introduction-pr 44)
+          fi
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request "${FEATURE_PR_NUMBER}" \
+            --feature-head "${FEATURE_HEAD_SHA}" \
+            --merge-source-commit "${EXPECTED_SOURCE_SHA}" \
+            "${allowed_mergers[@]}" \
+            "${first_introduction[@]}" \
+            --output build/feature-readiness.json >/dev/null
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("build/feature-readiness.json")
+          raw = path.read_text(encoding="ascii")
+          value = json.loads(raw)
+          canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+          if raw != canonical + "\n":
+              raise SystemExit("Reverified feature readiness is not canonical")
+          if (
+              os.environ["AUTOMATIC_RELEASE"] == "true"
+              and os.environ["EXPECTED_FEATURE_READINESS"] != canonical
+          ):
+              raise SystemExit("Feature readiness changed after release qualification")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"feature_head_sha={os.environ['FEATURE_HEAD_SHA']}", file=output)
+              print(f"feature_pr_number={os.environ['FEATURE_PR_NUMBER']}", file=output)
+              print(f"feature_readiness={canonical}", file=output)
           PY
 
   candidate:
@@ -618,13 +770,30 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      authorization_mode: ${{ steps.authorization.outputs.authorization_mode }}
     steps:
       - name: Require first-attempt repository-owner confirmation
+        id: authorization
         env:
           ACTOR: ${{ github.actor }}
+          AUTOMATIC_RELEASE: ${{ inputs.automatic_release && 'true' || 'false' }}
+          CALL_EVENT: ${{ github.event_name }}
+          EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EVENT_SOURCE_ID: ${{ github.event.workflow_run.id }}
+          EVENT_STATUS: ${{ github.event.workflow_run.status }}
+          EVENT_TYPE: ${{ github.event.workflow_run.event }}
+          EVENT_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           OWNER: ${{ github.repository_owner }}
           PUBLISH_CONFIRMATION: ${{ inputs.publish_confirmation }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_SOURCE_ATTEMPT: ${{ inputs.source_validation_run_attempt }}
+          REQUESTED_SOURCE_ID: ${{ inputs.source_validation_run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           SELECTED_REF: ${{ github.ref }}
           SELECTED_SHA: ${{ github.sha }}
@@ -633,14 +802,6 @@ jobs:
           set -Eeuo pipefail
           [[ "${PUBLISH_CONFIRMATION}" == "PUBLISH RELEASE BRANCH" ]] || {
             echo "Publication requires the exact confirmation phrase." >&2
-            exit 1
-          }
-          [[ "${ACTOR}" == "${OWNER}" ]] || {
-            echo "Publication is restricted to the repository owner." >&2
-            exit 1
-          }
-          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]] || {
-            echo "The triggering actor must also be the repository owner." >&2
             exit 1
           }
           [[ "${RUN_ATTEMPT}" == "1" ]] || {
@@ -655,6 +816,38 @@ jobs:
             echo "The dispatch source differs from expected_source_sha." >&2
             exit 1
           }
+          case "${AUTOMATIC_RELEASE}" in
+            true)
+              [[ "${CALL_EVENT}" == "workflow_run" ]]
+              [[ "${EVENT_STATUS}" == "completed" ]]
+              [[ "${EVENT_CONCLUSION}" == "success" ]]
+              [[ "${EVENT_TYPE}" == "push" ]]
+              [[ "${EVENT_HEAD_BRANCH}" == "main" ]]
+              [[ "${EVENT_HEAD_REPOSITORY}" == "${REPOSITORY}" ]]
+              [[ "${EVENT_HEAD_SHA}" == "${EXPECTED_SOURCE_SHA}" ]]
+              [[ "${EVENT_WORKFLOW_PATH%%@*}" == ".github/workflows/source-ci.yml" ]]
+              [[ "${EVENT_SOURCE_ATTEMPT}" == "1" ]]
+              [[ "${EVENT_SOURCE_ID}" == "${REQUESTED_SOURCE_ID}" ]]
+              [[ "${EVENT_SOURCE_ATTEMPT}" == "${REQUESTED_SOURCE_ATTEMPT}" ]]
+              echo "authorization_mode=automatic" >>"${GITHUB_OUTPUT}"
+              ;;
+            false)
+              [[ "${CALL_EVENT}" == "workflow_dispatch" ]]
+              [[ "${ACTOR}" == "${OWNER}" ]] || {
+                echo "Manual publication is restricted to the repository owner." >&2
+                exit 1
+              }
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]] || {
+                echo "The manual triggering actor must be the repository owner." >&2
+                exit 1
+              }
+              echo "authorization_mode=manual" >>"${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "automatic_release is invalid." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Check out the exact source for the runtime contract gate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1354,8 +1547,8 @@ jobs:
           {
             echo "### Publication payload prepared"
             echo
-            echo "- Source CI run: ${SOURCE_CI_RUN_ID}"
-            echo "- Source CI attempt: ${SOURCE_CI_RUN_ATTEMPT}"
+            echo "- Validate PR run: ${SOURCE_CI_RUN_ID}"
+            echo "- Validate PR attempt: ${SOURCE_CI_RUN_ATTEMPT}"
             echo "- Release commit: ${release_commit}"
             echo "- Payload: ${artifact_name}"
           } >>"${GITHUB_STEP_SUMMARY}"
@@ -1901,8 +2094,8 @@ jobs:
           {
             echo "### Publication payload independently verified"
             echo
-            echo "- Source CI run: ${metadata_ci_id}"
-            echo "- Source CI attempt: ${metadata_ci_attempt}"
+            echo "- Validate PR run: ${metadata_ci_id}"
+            echo "- Validate PR attempt: ${metadata_ci_attempt}"
             echo "- Release commit: ${release_commit}"
           } >>"${GITHUB_STEP_SUMMARY}"
 
@@ -1910,6 +2103,11 @@ jobs:
         id: publish_refs
         env:
           ACTOR: ${{ github.actor }}
+          AUTHORIZATION_MODE: ${{ needs.publication_gate.outputs.authorization_mode }}
+          AUTOMATIC_RELEASE: ${{ inputs.automatic_release && 'true' || 'false' }}
+          CALL_EVENT: ${{ github.event_name }}
+          EVENT_SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EVENT_SOURCE_ID: ${{ github.event.workflow_run.id }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -1918,15 +2116,32 @@ jobs:
           RELEASE_BRANCH: ${{ steps.verify.outputs.branch }}
           RELEASE_COMMIT: ${{ steps.verify.outputs.release_commit }}
           REPOSITORY: ${{ github.repository }}
+          REQUESTED_SOURCE_ATTEMPT: ${{ inputs.source_validation_run_attempt }}
+          REQUESTED_SOURCE_ID: ${{ inputs.source_validation_run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           SERVER_URL: ${{ github.server_url }}
           SYNC_BRANCH: sync/platform-v${{ needs.candidate.outputs.platform_version }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -Eeuo pipefail
-          [[ "${ACTOR}" == "${OWNER}" ]]
-          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
           [[ "${RUN_ATTEMPT}" == "1" ]]
+          case "${AUTHORIZATION_MODE}:${AUTOMATIC_RELEASE}" in
+            automatic:true)
+              [[ "${CALL_EVENT}" == "workflow_run" ]]
+              [[ "${EVENT_SOURCE_ID}" == "${REQUESTED_SOURCE_ID}" ]]
+              [[ "${EVENT_SOURCE_ATTEMPT}" == "1" ]]
+              [[ "${REQUESTED_SOURCE_ATTEMPT}" == "1" ]]
+              ;;
+            manual:false)
+              [[ "${CALL_EVENT}" == "workflow_dispatch" ]]
+              [[ "${ACTOR}" == "${OWNER}" ]]
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+              ;;
+            *)
+              echo "Publication authorization mode changed before remote write." >&2
+              exit 1
+              ;;
+          esac
           [[ "${RELEASE_BRANCH}" =~ ^release/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           [[ "${RELEASE_BRANCH}" == "release/platform-v${EXPECTED_VERSION}" ]]
           [[ "${SYNC_BRANCH}" =~ ^sync/platform-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
@@ -2124,7 +2339,7 @@ jobs:
   synchronize_release:
     name: Open mandatory release synchronization PR
     if: ${{ inputs.publish_release_branch }}
-    needs: [candidate, publish]
+    needs: [candidate, publication_gate, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -2149,6 +2364,11 @@ jobs:
         env:
           ACTOR: ${{ github.actor }}
           API_URL: ${{ github.api_url }}
+          AUTHORIZATION_MODE: ${{ needs.publication_gate.outputs.authorization_mode }}
+          AUTOMATIC_RELEASE: ${{ inputs.automatic_release && 'true' || 'false' }}
+          CALL_EVENT: ${{ github.event_name }}
+          EVENT_SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EVENT_SOURCE_ID: ${{ github.event.workflow_run.id }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           EXPECTED_VERSION: ${{ needs.candidate.outputs.platform_version }}
           GITHUB_TOKEN: ${{ secrets.BUH_RELEASE_PR_TOKEN }}
@@ -2156,13 +2376,30 @@ jobs:
           RELEASE_BRANCH: ${{ needs.publish.outputs.release_branch }}
           RELEASE_COMMIT: ${{ needs.publish.outputs.release_commit }}
           REPOSITORY: ${{ github.repository }}
+          REQUESTED_SOURCE_ATTEMPT: ${{ inputs.source_validation_run_attempt }}
+          REQUESTED_SOURCE_ID: ${{ inputs.source_validation_run_id }}
           SERVER_URL: ${{ github.server_url }}
           SYNC_BRANCH: ${{ needs.publish.outputs.sync_branch }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -Eeuo pipefail
-          [[ "${ACTOR}" == "${OWNER}" ]]
-          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          case "${AUTHORIZATION_MODE}:${AUTOMATIC_RELEASE}" in
+            automatic:true)
+              [[ "${CALL_EVENT}" == "workflow_run" ]]
+              [[ "${EVENT_SOURCE_ID}" == "${REQUESTED_SOURCE_ID}" ]]
+              [[ "${EVENT_SOURCE_ATTEMPT}" == "1" ]]
+              [[ "${REQUESTED_SOURCE_ATTEMPT}" == "1" ]]
+              ;;
+            manual:false)
+              [[ "${CALL_EVENT}" == "workflow_dispatch" ]]
+              [[ "${ACTOR}" == "${OWNER}" ]]
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+              ;;
+            *)
+              echo "Synchronization authorization mode changed before remote write." >&2
+              exit 1
+              ;;
+          esac
           test -n "${GITHUB_TOKEN}" || {
             echo "BUH_RELEASE_PR_TOKEN is required to create a trusted-owner sync PR." >&2
             exit 78

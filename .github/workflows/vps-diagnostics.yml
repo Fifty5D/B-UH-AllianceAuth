@@ -1,4 +1,4 @@
-name: VPS diagnostics
+name: Operations and Recovery
 
 on:
   issue_comment:
@@ -12,10 +12,7 @@ on:
         type: choice
         options: ["5", "15", "30", "60", "180", "360"]
 
-permissions:
-  actions: write
-  contents: read
-  issues: write
+permissions: {}
 
 concurrency:
   group: buh-vps-diagnostics
@@ -28,8 +25,11 @@ jobs:
       github.event.issue.number == 1 &&
       github.event.comment.user.login == github.repository_owner &&
       github.event.comment.body == '/purge-diagnostics'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      actions: write
+      issues: write
     steps:
       - name: Delete diagnostic artifacts
         shell: bash
@@ -56,12 +56,17 @@ jobs:
        github.event.issue.number == 1 &&
        github.event.comment.user.login == github.repository_owner &&
        startsWith(github.event.comment.body, '/diagnostics'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
 
     steps:
       - name: Check out trusted sanitizer
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Validate request
         id: request
@@ -137,7 +142,7 @@ jobs:
           python3 ops/buh-redact-diagnostics.py --validate diagnostics.txt
 
       - name: Upload full diagnostics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: buh-vps-diagnostics-${{ github.run_id }}
           path: diagnostics.txt

@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-legacy_receiver="${1-}"
-case "${legacy_receiver}" in
-  /*) ;;
-  *) echo "Legacy receiver path rejected" >&2; exit 64 ;;
-esac
+legacy_receiver=/usr/local/sbin/buh-moon-tax-platform-remote
+if [ "$#" -ne 1 ] || [ "$1" != "${legacy_receiver}" ]; then
+  echo "Legacy receiver path rejected" >&2
+  exit 64
+fi
 if [ ! -f "${legacy_receiver}" ] || [ ! -x "${legacy_receiver}" ]; then
   echo "Legacy receiver is unavailable" >&2
   exit 69

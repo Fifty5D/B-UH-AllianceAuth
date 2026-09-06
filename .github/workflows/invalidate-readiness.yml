@@ -1,0 +1,706 @@
+name: Validate Work readiness
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Validate PR, Preview UI]
+    types: [requested, in_progress, completed]
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Every meaningful evidence, review, and operator-label event is serialized
+  # per PR. Bot bookkeeping events use a unique group so they cannot replace a
+  # pending invalidation in GitHub's one-pending-run concurrency queue.
+  group: pr-readiness-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}-${{ ((github.event_name == 'pull_request_target' && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'ready-for-work' && github.event.sender.login == 'github-actions[bot]') || ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'needs-codex'))) || (github.event_name == 'issue_comment' && github.event.sender.login == 'github-actions[bot]' && startsWith(github.event.comment.body, '<!-- buh-readiness-record:v2 -->')) || (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Preview UI' && contains(github.event.workflow_run.display_title, ' / labeled / ') && endsWith(github.event.workflow_run.display_title, ' / labeled / ui-preview') == false)) && format('ignored-{0}', github.run_id) || 'state' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  policy:
+    name: Exact-head readiness policy
+    if: >-
+      github.event_name == 'pull_request_review' ||
+      github.event_name == 'pull_request_review_comment' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       (github.event.sender.login != 'github-actions[bot]' ||
+        startsWith(github.event.comment.body, '<!-- buh-readiness-record:v2 -->') == false)) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.pull_requests[0]) ||
+      (github.event_name == 'pull_request_target' &&
+       (github.event.action == 'opened' ||
+         github.event.action == 'reopened' ||
+         github.event.action == 'synchronize' ||
+         github.event.action == 'edited' ||
+        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+         (github.event.label.name == 'codex' ||
+          github.event.label.name == 'ui-preview')) ||
+        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+         github.event.label.name == 'ready-for-work' &&
+         github.event.sender.login != 'github-actions[bot]')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Immediately consume a readiness request
+        id: consume_request
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'ready-for-work' &&
+          github.event.sender.login != 'github-actions[bot]'
+        env:
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -Eeuo pipefail
+          printf 'consumed=false\n' >>"${GITHUB_OUTPUT}"
+          [[ "${PR}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${EVENT_HEAD}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EVENT_HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" ]]
+          [[ "${EVENT_BASE_REPOSITORY}" == "${GITHUB_REPOSITORY}" ]]
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          jq -e '
+            (.number | type) == "number" and
+            (.state | type) == "string" and
+            (.head.sha | type) == "string" and
+            (.head.repo.full_name | type) == "string" and
+            (.base.ref | type) == "string" and
+            (.base.repo.full_name | type) == "string" and
+            (.labels | type) == "array" and
+            all(.labels[]; (.name | type) == "string")
+          ' <<<"${pull}" >/dev/null
+          [[ "$(jq -r '.number' <<<"${pull}")" == "${PR}" ]]
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          [[ "$(jq -r '.base.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          if jq -e '.labels | map(.name) | index("ready-for-work") != null' \
+              <<<"${pull}" >/dev/null; then
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/ready-for-work" --silent
+          fi
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          [[ "$(jq -r '.base.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          jq -e '.labels | map(.name) | index("ready-for-work") == null' \
+            <<<"${pull}" >/dev/null
+          if [[ "${EVENT_BASE_REF}" != "main" ||
+                "$(jq -r '.base.ref' <<<"${pull}")" != "main" ]]; then
+            echo "Removed an ineligible readiness request outside the protected main path." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if ! jq -e '.labels | map(.name) | index("codex") != null' \
+              <<<"${pull}" >/dev/null; then
+            echo "Removed an ineligible readiness request from a non-Codex PR." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          gh label create needs-codex --repo "${GITHUB_REPOSITORY}" \
+            --color D93F0B --description "ChatGPT Work found changes for Codex" --force
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+            --field 'labels[]=needs-codex' --silent
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          jq -e '
+            (.labels | map(.name) | index("codex") != null) and
+            (.labels | map(.name) | index("ready-for-work") == null) and
+            (.labels | map(.name) | index("needs-codex") != null)
+          ' <<<"${pull}" >/dev/null
+          if [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EVENT_HEAD}" ]]; then
+            printf 'consumed=true\n' >>"${GITHUB_OUTPUT}"
+          fi
+
+      # Every event loads this file from the base/default branch. Pin that
+      # trusted policy source and never fetch or execute pull-request files in
+      # this write-capable job.
+      - name: Check out only the trusted base policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ (github.event_name == 'workflow_run' || github.event_name == 'issue_comment') && github.sha || github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the trusted policy checkout
+        env:
+          TRUSTED_SHA: ${{ (github.event_name == 'workflow_run' || github.event_name == 'issue_comment') && github.sha || github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${TRUSTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${TRUSTED_SHA}" ]]
+
+      - name: Resolve one eligible same-repository Codex pull request
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EARLY_REQUEST_CONSUMED: ${{ steps.consume_request.outputs.consumed }}
+          GH_TOKEN: ${{ github.token }}
+          TARGET_ACTION: ${{ github.event.action }}
+          TARGET_HEAD: ${{ github.event.pull_request.head.sha }}
+          TARGET_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          TARGET_LABEL: ${{ github.event.label.name }}
+          TARGET_PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_ACTION: ${{ github.event.action }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_HEAD: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          WORKFLOW_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          WORKFLOW_STATUS: ${{ github.event.workflow_run.status }}
+          WORKFLOW_TITLE: ${{ github.event.workflow_run.display_title }}
+        run: |
+          set -Eeuo pipefail
+          printf 'eligible=false\npublication_request=false\n' >>"${GITHUB_OUTPUT}"
+
+          if [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+            pr="${TARGET_PR}"
+            [[ "${pr}" =~ ^[1-9][0-9]*$ ]]
+            event_pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}")"
+            event_head="$(jq -r '.head.sha' <<<"${event_pull}")"
+            event_head_repository="$(jq -r '.head.repo.full_name' <<<"${event_pull}")"
+          elif [[ "${EVENT_NAME}" != "workflow_run" ]]; then
+            pr="${TARGET_PR}"
+            event_head="${TARGET_HEAD}"
+            event_head_repository="${TARGET_HEAD_REPOSITORY}"
+          else
+            [[ "${WORKFLOW_EVENT}" == "pull_request" ]]
+            case "${WORKFLOW_ACTION}" in
+              requested)
+                [[ "${WORKFLOW_STATUS}" == "queued" ||
+                   "${WORKFLOW_STATUS}" == "requested" ]]
+                ;;
+              in_progress)
+                [[ "${WORKFLOW_STATUS}" == "in_progress" ]]
+                ;;
+              completed)
+                [[ "${WORKFLOW_STATUS}" == "completed" ]]
+                [[ "${WORKFLOW_CONCLUSION}" =~ ^[a-z_]+$ ]]
+                ;;
+              *)
+                echo "Unexpected workflow-run action." >&2
+                exit 1
+                ;;
+            esac
+            jq -e '
+              type == "array" and length == 1 and
+              (.[0].number | type) == "number" and
+              (.[0].head | type) == "object" and
+              (.[0].head.sha | type) == "string"
+            ' <<<"${WORKFLOW_PULL_REQUESTS}" >/dev/null
+            pr="$(jq -r '.[0].number' <<<"${WORKFLOW_PULL_REQUESTS}")"
+            associated_head="$(jq -r '.[0].head.sha' <<<"${WORKFLOW_PULL_REQUESTS}")"
+            event_head="${WORKFLOW_HEAD}"
+            event_head_repository="${WORKFLOW_HEAD_REPOSITORY}"
+            [[ "${associated_head}" == "${event_head}" ]]
+            case "${WORKFLOW_NAME}" in
+              "Validate PR")
+                [[ "${WORKFLOW_PATH}" == ".github/workflows/source-ci.yml" ]]
+                ;;
+              "Preview UI")
+                [[ "${WORKFLOW_PATH}" == ".github/workflows/ui-preview.yml" ]]
+                prefix="Preview UI / PR #${pr} / ${event_head} / "
+                [[ "${WORKFLOW_TITLE}" == "${prefix}"* ]]
+                trigger="${WORKFLOW_TITLE#"${prefix}"}"
+                case "${trigger}" in
+                  "opened / none"|"reopened / none"|"synchronize / none"|"labeled / ui-preview")
+                    ;;
+                  "labeled / "*)
+                    echo "Ignoring the deliberate Preview UI no-op for ${trigger}." \
+                      >>"${GITHUB_STEP_SUMMARY}"
+                    exit 0
+                    ;;
+                  *)
+                    echo "Preview UI run title has an unexpected trigger." >&2
+                    exit 1
+                    ;;
+                esac
+                ;;
+              *)
+                echo "Unexpected triggering workflow." >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          [[ "${pr}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${event_head}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${event_head_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}")"
+          jq -e '
+            (.number | type) == "number" and
+            (.state | type) == "string" and
+            (.head | type) == "object" and
+            (.head.sha | type) == "string" and
+            (.head.repo | type) == "object" and
+            (.head.repo.full_name | type) == "string" and
+            (.base | type) == "object" and
+            (.base.ref | type) == "string" and
+            (.base.repo | type) == "object" and
+            (.base.repo.full_name | type) == "string" and
+            (.labels | type) == "array" and
+            all(.labels[]; (.name | type) == "string")
+          ' <<<"${pull}" >/dev/null
+          current_head="$(jq -r '.head.sha' <<<"${pull}")"
+          current_head_repository="$(jq -r '.head.repo.full_name' <<<"${pull}")"
+          current_base_ref="$(jq -r '.base.ref' <<<"${pull}")"
+          current_base_repository="$(jq -r '.base.repo.full_name' <<<"${pull}")"
+          if [[ "$(jq -r '.state' <<<"${pull}")" != "open" ||
+                "${event_head_repository}" != "${GITHUB_REPOSITORY}" ||
+                "${current_head_repository}" != "${GITHUB_REPOSITORY}" ||
+                "${current_base_repository}" != "${GITHUB_REPOSITORY}" ]]; then
+            echo "Ignoring closed or cross-repository readiness evidence." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          invalidation_only=false
+          if [[ "${current_head}" != "${event_head}" ]]; then
+            invalidation_only=true
+            echo "Stale evidence will invalidate, but never qualify, the current head." \
+              >>"${GITHUB_STEP_SUMMARY}"
+          fi
+          base_main=false
+          if [[ "${current_base_ref}" == "main" ]]; then
+            base_main=true
+          else
+            invalidation_only=true
+            echo "A pull request outside the protected main path can only invalidate readiness." \
+              >>"${GITHUB_STEP_SUMMARY}"
+          fi
+          codex_present=false
+          if jq -e '.labels | map(.name) | index("codex") != null' \
+              <<<"${pull}" >/dev/null; then
+            codex_present=true
+          fi
+          codex_removal=false
+          if [[ "${EVENT_NAME}" == "pull_request_target" &&
+                "${TARGET_ACTION}" == "unlabeled" &&
+                "${TARGET_LABEL}" == "codex" ]]; then
+            codex_removal=true
+          fi
+          if [[ "${codex_present}" != true && "${codex_removal}" != true ]]; then
+            echo "Ignoring a pull request without the codex label." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          publication_request=false
+          if [[ "${EVENT_NAME}" == "pull_request_target" &&
+                "${TARGET_ACTION}" == "labeled" &&
+                "${TARGET_LABEL}" == "ready-for-work" &&
+                "${EARLY_REQUEST_CONSUMED}" == true &&
+                "${base_main}" == true &&
+                "${invalidation_only}" != true ]]; then
+            publication_request=true
+          fi
+          printf 'eligible=true\nbase_main=%s\ncodex_present=%s\ninvalidation_only=%s\npublication_request=%s\npr=%s\nhead_sha=%s\nhead_repository=%s\n' \
+            "${base_main}" "${codex_present}" "${invalidation_only}" "${publication_request}" "${pr}" "${current_head}" \
+            "${current_head_repository}" >>"${GITHUB_OUTPUT}"
+
+      - name: Ensure the workflow labels exist
+        if: >-
+          steps.target.outputs.eligible == 'true' &&
+          steps.target.outputs.codex_present == 'true'
+        env:
+          EXPECTED_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EXPECTED_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          jq -e '.labels | map(.name) | index("codex") != null' \
+            <<<"${pull}" >/dev/null
+          gh label create ready-for-work --repo "${GITHUB_REPOSITORY}" \
+            --color 1D76DB --description "Exact PR head is ready for ChatGPT Work review" --force
+          gh label create needs-codex --repo "${GITHUB_REPOSITORY}" \
+            --color D93F0B --description "ChatGPT Work found changes for Codex" --force
+          gh label create ui-preview --repo "${GITHUB_REPOSITORY}" \
+            --color 5319E7 --description "Force a synthetic UI preview" --force
+
+      - name: Invalidate current readiness before any evaluation
+        id: invalidate
+        if: steps.target.outputs.eligible == 'true'
+        env:
+          EXPECTED_HEAD: ${{ steps.target.outputs.head_sha }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EXPECTED_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          codex_removal=false
+          if [[ "${EVENT_ACTION}" == "unlabeled" && "${EVENT_LABEL}" == "codex" ]]; then
+            codex_removal=true
+            jq -e '.labels | map(.name) | index("codex") == null' \
+              <<<"${pull}" >/dev/null
+          else
+            jq -e '.labels | map(.name) | index("codex") != null' \
+              <<<"${pull}" >/dev/null
+          fi
+          if jq -e '.labels | map(.name) | index("ready-for-work") != null' \
+              <<<"${pull}" >/dev/null; then
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/ready-for-work" --silent
+          fi
+          if [[ "${codex_removal}" != true ]]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+              --field 'labels[]=needs-codex' --silent
+          fi
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EXPECTED_HEAD}" ]]
+          if [[ "${codex_removal}" != true ]]; then
+            jq -e '
+              (.labels | map(.name) | index("codex") != null) and
+              (.labels | map(.name) | index("ready-for-work") == null) and
+              (.labels | map(.name) | index("needs-codex") != null)
+            ' <<<"${pull}" >/dev/null
+          fi
+          echo "Readiness is invalidated for exact head \`${EXPECTED_HEAD}\`." \
+            >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Invalidate the authoritative readiness pointer
+        id: invalidate_pointer
+        if: steps.invalidate.outcome == 'success'
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          marker='<!-- buh-readiness-record:v2 -->'
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EXPECTED_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          comments="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100")"
+          jq -e 'type == "array" and all(.[]; type == "array")' \
+            <<<"${comments}" >/dev/null
+          mapfile -t marker_ids < <(jq -r --arg marker "${marker}" '
+            .[][] |
+            select(
+              (.id | type) == "number" and .id >= 1 and
+              .user.login == "github-actions[bot]" and
+              (.body | type) == "string" and
+              (.body == $marker or (.body | startswith($marker + "\n")))
+            ) | .id
+          ' <<<"${comments}")
+          [[ "${#marker_ids[@]}" -le 1 ]]
+          if [[ "${#marker_ids[@]}" -eq 1 ]]; then
+            payload="$(jq -cn \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --argjson pr "${PR}" \
+              --arg head_sha "${EXPECTED_HEAD}" \
+              --arg event "${EVENT_NAME}" \
+              --arg action "${EVENT_ACTION}" \
+              --argjson workflow_run_id "${GITHUB_RUN_ID}" \
+              '{schema_version: 2, state: "invalidated", repository: $repository,
+                pr: $pr, head_sha: $head_sha, event: $event, action: $action,
+                workflow_run_id: $workflow_run_id}')"
+            body="${marker}"$'\n'"${payload}"
+            response="$(gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${marker_ids[0]}" \
+              --raw-field body="${body}")"
+            jq -e --arg body "${body}" '
+              (.id | type) == "number" and .id >= 1 and
+              .user.login == "github-actions[bot]" and .body == $body
+            ' <<<"${response}" >/dev/null
+          fi
+
+      - name: Evaluate exact-head checks, preview, and reviews
+        id: readiness
+        if: >-
+          steps.invalidate_pointer.outcome == 'success' &&
+          steps.target.outputs.base_main == 'true' &&
+          (steps.target.outputs.publication_request == 'true' ||
+           github.event_name == 'pull_request_review' ||
+           github.event_name == 'pull_request_review_comment' ||
+           github.event_name == 'issue_comment')
+        env:
+          EVENT_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          printf 'attempted=true\nqualified=false\n' >>"${GITHUB_OUTPUT}"
+          mkdir -p "${RUNNER_TEMP}/pr-readiness"
+          if python3 ops/readiness.py github \
+              --repository "${GITHUB_REPOSITORY}" \
+              --pull-request "${PR}" \
+              --event-head "${EVENT_HEAD}" \
+              --api-url "${GITHUB_API_URL}" \
+              --output "${RUNNER_TEMP}/pr-readiness/readiness.json" \
+              2>"${RUNNER_TEMP}/pr-readiness/not-ready.txt"; then
+            printf 'qualified=true\n' >>"${GITHUB_OUTPUT}"
+          else
+            {
+              echo "Exact-head evidence is not ready; readiness remains invalidated."
+              echo
+              echo '```text'
+              head -c 4096 "${RUNNER_TEMP}/pr-readiness/not-ready.txt"
+              echo
+              echo '```'
+            } >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Reverify the record immediately before upload
+        id: reverify
+        if: >-
+          steps.target.outputs.publication_request == 'true' &&
+          steps.readiness.outputs.qualified == 'true'
+        env:
+          EVENT_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/readiness.py github \
+            --repository "${GITHUB_REPOSITORY}" \
+            --pull-request "${PR}" \
+            --event-head "${EVENT_HEAD}" \
+            --api-url "${GITHUB_API_URL}" \
+            --output "${RUNNER_TEMP}/pr-readiness/reverified.json"
+          cmp --silent \
+            "${RUNNER_TEMP}/pr-readiness/readiness.json" \
+            "${RUNNER_TEMP}/pr-readiness/reverified.json"
+          review_digest="$(jq -er '.review_evidence.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+            "${RUNNER_TEMP}/pr-readiness/readiness.json")"
+          printf 'review_digest=%s\nreview_digest_hex=%s\n' \
+            "${review_digest}" "${review_digest#sha256:}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload the trusted exact-head readiness record
+        id: publish
+        if: steps.reverify.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-readiness-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ steps.reverify.outputs.review_digest_hex }}
+          path: ${{ runner.temp }}/pr-readiness/readiness.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+      - name: Publish the sole authoritative readiness pointer
+        id: pointer
+        if: steps.publish.outcome == 'success'
+        env:
+          ARTIFACT_DIGEST: ${{ steps.publish.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.publish.outputs.artifact-id }}
+          ARTIFACT_NAME: pr-readiness-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ steps.reverify.outputs.review_digest_hex }}
+          EXPECTED_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+          REVIEW_DIGEST: ${{ steps.reverify.outputs.review_digest }}
+        run: |
+          set -Eeuo pipefail
+          marker='<!-- buh-readiness-record:v2 -->'
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${REVIEW_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EXPECTED_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          [[ "$(jq -r '.base.ref' <<<"${pull}")" == "main" ]]
+          jq -e '
+            (.labels | map(.name) | index("codex") != null) and
+            (.labels | map(.name) | index("ready-for-work") == null) and
+            (.labels | map(.name) | index("needs-codex") != null)
+          ' <<<"${pull}" >/dev/null
+
+          payload="$(jq -cn \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson pr "${PR}" \
+            --arg head_sha "${EXPECTED_HEAD}" \
+            --arg review_digest "${REVIEW_DIGEST}" \
+            --arg artifact_name "${ARTIFACT_NAME}" \
+            --argjson artifact_id "${ARTIFACT_ID}" \
+            --arg artifact_digest "sha256:${digest}" \
+            --argjson workflow_run_id "${GITHUB_RUN_ID}" \
+            --argjson workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            '{schema_version: 2, state: "qualified", repository: $repository,
+              pr: $pr, head_sha: $head_sha, review_digest: $review_digest,
+              artifact_name: $artifact_name, artifact_id: $artifact_id,
+              artifact_digest: $artifact_digest,
+              workflow: ".github/workflows/invalidate-readiness.yml",
+              workflow_run_id: $workflow_run_id,
+              workflow_run_attempt: $workflow_run_attempt}')"
+          body="${marker}"$'\n'"${payload}"
+          comments="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100")"
+          jq -e 'type == "array" and all(.[]; type == "array")' \
+            <<<"${comments}" >/dev/null
+          mapfile -t marker_ids < <(jq -r --arg marker "${marker}" '
+            .[][] |
+            select(
+              (.id | type) == "number" and .id >= 1 and
+              .user.login == "github-actions[bot]" and
+              (.body | type) == "string" and
+              (.body == $marker or (.body | startswith($marker + "\n")))
+            ) | .id
+          ' <<<"${comments}")
+          [[ "${#marker_ids[@]}" -le 1 ]]
+          if [[ "${#marker_ids[@]}" -eq 1 ]]; then
+            response="$(gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${marker_ids[0]}" \
+              --raw-field body="${body}")"
+          else
+            response="$(gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --raw-field body="${body}")"
+          fi
+          jq -e --arg body "${body}" '
+            (.id | type) == "number" and .id >= 1 and
+            .user.login == "github-actions[bot]" and .body == $body
+          ' <<<"${response}" >/dev/null
+
+      - name: Reverify, clear needs-codex, and signal readiness last
+        id: signal
+        if: steps.pointer.outcome == 'success'
+        env:
+          EVENT_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/readiness.py github \
+            --repository "${GITHUB_REPOSITORY}" \
+            --pull-request "${PR}" \
+            --event-head "${EVENT_HEAD}" \
+            --api-url "${GITHUB_API_URL}" \
+            --output "${RUNNER_TEMP}/pr-readiness/final.json"
+          cmp --silent \
+            "${RUNNER_TEMP}/pr-readiness/readiness.json" \
+            "${RUNNER_TEMP}/pr-readiness/final.json"
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EVENT_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          [[ "$(jq -r '.base.ref' <<<"${pull}")" == "main" ]]
+          jq -e '
+            (.labels | map(.name) | index("codex") != null) and
+            (.labels | map(.name) | index("ready-for-work") == null) and
+            (.labels | map(.name) | index("needs-codex") != null)
+          ' <<<"${pull}" >/dev/null
+          gh api --method DELETE \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/needs-codex" --silent
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EVENT_HEAD}" ]]
+          [[ "$(jq -r '.base.ref' <<<"${pull}")" == "main" ]]
+          jq -e '
+            (.labels | map(.name) | index("codex") != null) and
+            (.labels | map(.name) | index("ready-for-work") == null) and
+            (.labels | map(.name) | index("needs-codex") == null)
+          ' <<<"${pull}" >/dev/null
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+            --field 'labels[]=ready-for-work' --silent
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          [[ "$(jq -r '.head.sha' <<<"${pull}")" == "${EVENT_HEAD}" ]]
+          [[ "$(jq -r '.head.repo.full_name' <<<"${pull}")" == "${GITHUB_REPOSITORY}" ]]
+          [[ "$(jq -r '.base.ref' <<<"${pull}")" == "main" ]]
+          jq -e '
+            (.labels | map(.name) | index("codex") != null) and
+            (.labels | map(.name) | index("ready-for-work") != null) and
+            (.labels | map(.name) | index("needs-codex") == null)
+          ' <<<"${pull}" >/dev/null
+          echo "Trusted readiness is bound to exact head \`${EVENT_HEAD}\`; the label was emitted last." \
+            >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail closed when invalidation or publication is incomplete
+        if: >-
+          always() &&
+          steps.target.outputs.eligible == 'true' &&
+          (steps.invalidate.outcome != 'success' ||
+           steps.invalidate_pointer.outcome != 'success' ||
+           (steps.target.outputs.publication_request == 'true' &&
+            steps.signal.outcome != 'success'))
+        env:
+          EXPECTED_HEAD: ${{ steps.target.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          set -Eeuo pipefail
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          if [[ "$(jq -r '.state' <<<"${pull}")" != "open" ||
+                "$(jq -r '.head.sha' <<<"${pull}")" != "${EXPECTED_HEAD}" ||
+                "$(jq -r '.head.repo.full_name' <<<"${pull}")" != "${GITHUB_REPOSITORY}" ]] ||
+              ! jq -e '.labels | map(.name) | index("codex") != null' \
+                <<<"${pull}" >/dev/null; then
+            echo "No write was made because the current PR is ineligible or changed head." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if jq -e '.labels | map(.name) | index("ready-for-work") != null' \
+              <<<"${pull}" >/dev/null; then
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/ready-for-work" --silent
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+            --field 'labels[]=needs-codex' --silent
+          marker='<!-- buh-readiness-record:v2 -->'
+          comments="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100")"
+          jq -e 'type == "array" and all(.[]; type == "array")' \
+            <<<"${comments}" >/dev/null
+          mapfile -t marker_ids < <(jq -r --arg marker "${marker}" '
+            .[][] |
+            select(
+              (.id | type) == "number" and .id >= 1 and
+              .user.login == "github-actions[bot]" and
+              (.body | type) == "string" and
+              (.body == $marker or (.body | startswith($marker + "\n")))
+            ) | .id
+          ' <<<"${comments}")
+          [[ "${#marker_ids[@]}" -le 1 ]]
+          if [[ "${#marker_ids[@]}" -eq 1 ]]; then
+            payload="$(jq -cn \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --argjson pr "${PR}" \
+              --arg head_sha "${EXPECTED_HEAD}" \
+              --argjson workflow_run_id "${GITHUB_RUN_ID}" \
+              '{schema_version: 2, state: "invalidated", repository: $repository,
+                pr: $pr, head_sha: $head_sha, event: "fail-closed",
+                workflow_run_id: $workflow_run_id}')"
+            body="${marker}"$'\n'"${payload}"
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${marker_ids[0]}" \
+              --raw-field body="${body}" --silent
+          fi
+          echo "Readiness failed closed; \`ready-for-work\` is absent." \
+            >>"${GITHUB_STEP_SUMMARY}"

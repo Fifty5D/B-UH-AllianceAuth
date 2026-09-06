@@ -12,6 +12,89 @@ for script in "${entry}" "${root_script}" "${bootstrap}"; do
 done
 python3 -m py_compile "${redactor}"
 
+# Execute the observer's exact attempt-report parser against a non-root-owned
+# temporary fixture. Only the fixture ownership assertion is disabled in this
+# copied parser; the installed script still requires a private root-owned file.
+attempt_parser="$(mktemp -t buh-attempt-parser.XXXXXX)"
+attempt_fixture="$(mktemp -t buh-attempt-fixture.XXXXXX)"
+awk '
+    />"\$\{raw_attempt\}" <<'"'"'PY'"'"'$/ { capture=1; next }
+    capture && $0 == "PY" { exit }
+    capture { print }
+' "${root_script}" | sed 's/or details\.st_uid != 0/or False/' >"${attempt_parser}"
+chmod 0600 "${attempt_fixture}"
+python3 - "${attempt_fixture}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+attempt = {
+    "schema_version": 1,
+    "operation": "deploy",
+    "attempt_id": "gh-33846197025-1",
+    "repository": "Fifty5D/B-UH-AllianceAuth",
+    "release_commit": "a" * 40,
+    "source_commit": "b" * 40,
+    "platform_version": "0.4.0",
+    "manifest_sha256": "c" * 64,
+    "started_at": "2026-09-06T00:00:00+00:00",
+    "updated_at": "2026-09-06T00:05:00+00:00",
+    "state": "workers_replaced",
+    "result": "failed",
+    "failure": "synthetic stabilization failure",
+    "failure_detail": "synthetic stabilization failure",
+    "recovery": "Traffic switched back and the prior topology was verified.",
+    "verification": {
+        "filename": "HEALTH.json",
+        "sha256": "d" * 64,
+        "result": "failed",
+        "iterations": 2,
+        "allowed_log_findings": 1,
+        "warnings": ["ERROR expected during synthetic probe"],
+        "failure": "CRITICAL synthetic health failure",
+    },
+    "rollback": {
+        "result": "passed",
+        "detail": "Traffic switched back and the prior topology was verified.",
+    },
+    "cleanup": {
+        "result": "failed",
+        "detail": "Post-success cleanup failed; rollback images were retained.",
+    },
+}
+Path(sys.argv[1]).write_text(
+    json.dumps(attempt, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+attempt_output="$(
+    python3 "${attempt_parser}" "${attempt_fixture}" gh-33846197025-1 |
+        python3 "${redactor}" /dev/stdin
+)"
+grep -Fq '"warnings":["ERROR expected during synthetic probe"]' <<<"${attempt_output}"
+grep -Fq '"rollback":{"detail":"Traffic switched back and the prior topology was verified.","result":"passed"}' <<<"${attempt_output}"
+grep -Fq '"cleanup":{"detail":"Post-success cleanup failed; rollback images were retained.","result":"failed"}' <<<"${attempt_output}"
+python3 - "${attempt_fixture}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+path = Path(sys.argv[1])
+attempt = json.loads(path.read_text(encoding="utf-8"))
+attempt["verification"]["allowed_log_findings"] = 2
+path.write_text(
+    json.dumps(attempt, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+if python3 "${attempt_parser}" "${attempt_fixture}" gh-33846197025-1 >/dev/null 2>&1; then
+    echo "Observer accepted inconsistent verification warning evidence." >&2
+    exit 1
+fi
+rm -f -- "${attempt_parser}" "${attempt_fixture}"
+
 if grep -Eq '(^|[^A-Za-z])source[[:space:]]+.*\.env|cat[[:space:]]+.*\.env' "${root_script}"; then
     echo "Observer must never print or source .env." >&2
     exit 1

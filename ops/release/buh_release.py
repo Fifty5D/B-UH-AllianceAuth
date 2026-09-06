@@ -2508,10 +2508,15 @@ def assemble_release(
     )
 
     checked_files = sorted(
-        path for path in output_dir.iterdir() if path.is_file() and path.name != "SHA256SUMS"
+        (
+            path
+            for path in output_dir.iterdir()
+            if path.is_file() and path.name != "SHA256SUMS"
+        ),
+        key=lambda path: path.name,
     )
     sums = "".join(f"{sha256_file(path)}  {path.name}\n" for path in checked_files)
-    (output_dir / "SHA256SUMS").write_text(sums, encoding="ascii")
+    (output_dir / "SHA256SUMS").write_bytes(sums.encode("ascii"))
     verify_release_dir(output_dir)
     if (
         deployment_payload is not None
