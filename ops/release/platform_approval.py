@@ -26,9 +26,11 @@ from typing import Any, Callable, Mapping, Sequence, TextIO
 from open_sync_pr import GitHubClient, SyncConfig, SyncPrError
 
 
-SCHEMA_VERSION = 1
-READY_PREFIX = "<!-- buh-platform-ready:v1 "
-APPROVAL_PREFIX = "<!-- buh-chatgpt-approved:v1 "
+SCHEMA_VERSION = 2
+FEATURE_READINESS_SCHEMA_VERSION = 1
+PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 1
+READY_PREFIX = "<!-- buh-platform-ready:v2 "
+APPROVAL_PREFIX = "<!-- buh-chatgpt-approved:v2 "
 MARKER_SUFFIX = " -->"
 BOT_LOGIN = "github-actions[bot]"
 MAX_PAGES = 100
@@ -39,7 +41,9 @@ VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 )
 NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 
 class ApprovalError(SyncPrError):
@@ -252,6 +256,7 @@ def _source_ci_run(
             and run.get("head_branch") == config.sync_branch
             and _workflow_path(run) == ".github/workflows/source-ci.yml"
             and _repo_name(run.get("head_repository")) == config.repository
+            and _repo_name(run.get("repository")) == config.repository
             and number in _run_pr_numbers(run)
             and type(run.get("id")) is int
         ]
@@ -293,10 +298,10 @@ def _workflow_run(
         or run.get("run_attempt") != run_attempt
         or run.get("event") != "workflow_run"
         or run.get("head_sha") != config.source_sha
+        or run.get("head_branch") != "main"
         or _workflow_path(run) != ".github/workflows/auto-platform-release.yml"
         or _repo_name(run.get("repository")) != config.repository
         or _repo_name(run.get("head_repository")) != config.repository
-        or _login(run.get("actor")) != config.owner
     ):
         raise ApprovalError("Automatic release workflow identity is invalid")
     if completed:
@@ -307,50 +312,252 @@ def _workflow_run(
     return run
 
 
+def _verify_main_run(
+    client: GitHubClient,
+    config: SyncConfig,
+    run_id: int,
+    attempt: int,
+) -> None:
+    run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("run_attempt") != attempt
+        or run.get("status") != "completed"
+        or run.get("conclusion") != "success"
+        or run.get("event") != "push"
+        or run.get("head_sha") != config.source_sha
+        or run.get("head_branch") != "main"
+        or _workflow_path(run) != ".github/workflows/source-ci.yml"
+        or _repo_name(run.get("repository")) != config.repository
+        or _repo_name(run.get("head_repository")) != config.repository
+    ):
+        raise ApprovalError("Recorded main Validate PR evidence is invalid")
+
+
 def _artifact(
     client: GitHubClient,
     config: SyncConfig,
     run_id: int,
     name: str,
+    *,
+    expected_id: int | None = None,
+    expected_digest: str | None = None,
 ) -> dict[str, Any]:
     payload = client.get(
         _path(config.repository, f"actions/runs/{run_id}/artifacts"),
         {"name": name, "per_page": "100"},
     )
     artifacts = payload.get("artifacts") if isinstance(payload, dict) else None
-    exact = [
-        item
-        for item in artifacts or []
-        if isinstance(item, dict)
-        and item.get("name") == name
-        and item.get("expired") is False
-        and type(item.get("id")) is int
-        and item["id"] > 0
-        and type(item.get("size_in_bytes")) is int
-        and 0 < item["size_in_bytes"] <= 40 * 1024 * 1024
-    ]
-    if not isinstance(artifacts, list) or len(exact) != 1:
+    total_count = payload.get("total_count") if isinstance(payload, dict) else None
+    if (
+        not isinstance(artifacts, list)
+        or type(total_count) is not int
+        or total_count != len(artifacts)
+    ):
         raise ApprovalError("Exact retained preflight artifact is unavailable")
-    return exact[0]
+    exact = [item for item in artifacts if isinstance(item, dict) and item.get("name") == name]
+    if len(exact) != 1:
+        raise ApprovalError("Exact retained preflight artifact is unavailable")
+    artifact = exact[0]
+    artifact_id = _safe_int("Preflight artifact ID", artifact.get("id"))
+    size = artifact.get("size_in_bytes")
+    digest = artifact.get("digest")
+    workflow_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is not False
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or not 0 < size <= 40 * 1024 * 1024
+        or not isinstance(digest, str)
+        or DIGEST_RE.fullmatch(digest) is None
+        or not isinstance(workflow_run, dict)
+        or workflow_run.get("id") != run_id
+        or workflow_run.get("head_sha") != config.source_sha
+        or workflow_run.get("head_branch") != "main"
+    ):
+        raise ApprovalError("Exact retained preflight artifact is unavailable")
+    if expected_id is not None and artifact_id != expected_id:
+        raise ApprovalError("Retained preflight artifact ID changed")
+    if expected_digest is not None and digest != expected_digest:
+        raise ApprovalError("Retained preflight artifact digest changed")
+    return artifact
+
+
+def _feature_readiness(
+    value: Any,
+    config: SyncConfig,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "repository",
+        "attestation_mode",
+        "feature_pr",
+        "merger",
+        "merge_source_commit",
+        "feature_validation",
+        "review_digest",
+        "readiness",
+        "preview_required",
+        "preview",
+    }:
+        raise ApprovalError("Feature-readiness evidence schema is invalid")
+    if (
+        value.get("schema_version") != FEATURE_READINESS_SCHEMA_VERSION
+        or value.get("repository") != config.repository
+        or value.get("merge_source_commit") != config.source_sha
+    ):
+        raise ApprovalError("Feature-readiness evidence does not match the release")
+    mode = value.get("attestation_mode")
+    if mode not in {"premerge-published", "first-introduction-postmerge"}:
+        raise ApprovalError("Feature-readiness attestation mode is invalid")
+    merger = value.get("merger")
+    if not isinstance(merger, str) or LOGIN_RE.fullmatch(merger) is None:
+        raise ApprovalError("Feature-readiness merger identity is invalid")
+    feature_pr = value.get("feature_pr")
+    if not isinstance(feature_pr, dict) or set(feature_pr) != {"number", "head_sha"}:
+        raise ApprovalError("Feature-readiness pull-request identity is invalid")
+    feature_number = _safe_int(
+        "Feature pull request number", feature_pr.get("number"), maximum=10**9
+    )
+    if mode == "first-introduction-postmerge" and feature_number != 44:
+        raise ApprovalError("First-introduction readiness is restricted to pull request 44")
+    feature_head = feature_pr.get("head_sha")
+    if (
+        not isinstance(feature_head, str)
+        or COMMIT_RE.fullmatch(feature_head) is None
+        or feature_head == config.source_sha
+    ):
+        raise ApprovalError("Feature-readiness pull-request head is invalid")
+    validation = value.get("feature_validation")
+    if not isinstance(validation, dict) or set(validation) != {
+        "check_run_id",
+        "workflow_run_id",
+        "workflow_run_attempt",
+    }:
+        raise ApprovalError("Feature validation evidence schema is invalid")
+    normalized_validation = {
+        "check_run_id": _safe_int(
+            "Feature validation check run ID", validation.get("check_run_id")
+        ),
+        "workflow_run_id": _safe_int(
+            "Feature validation workflow run ID", validation.get("workflow_run_id")
+        ),
+        "workflow_run_attempt": _safe_int(
+            "Feature validation workflow run attempt",
+            validation.get("workflow_run_attempt"),
+            maximum=10**6,
+        ),
+    }
+    review_digest = value.get("review_digest")
+    if not isinstance(review_digest, str) or DIGEST_RE.fullmatch(review_digest) is None:
+        raise ApprovalError("Feature-readiness review digest is invalid")
+
+    readiness = value.get("readiness")
+    normalized_readiness = None
+    if mode == "premerge-published":
+        if not isinstance(readiness, dict) or set(readiness) != {
+            "workflow_run_id",
+            "workflow_run_attempt",
+            "artifact_id",
+            "artifact_name",
+            "artifact_digest",
+            "review_digest",
+        }:
+            raise ApprovalError("Published readiness evidence schema is invalid")
+        expected_name = (
+            f"pr-readiness-{feature_number}-{feature_head}-"
+            f"{review_digest.removeprefix('sha256:')}"
+        )
+        if readiness.get("artifact_name") != expected_name:
+            raise ApprovalError("Published readiness artifact name is invalid")
+        if readiness.get("review_digest") != review_digest:
+            raise ApprovalError("Published readiness review digest does not match")
+        artifact_digest = readiness.get("artifact_digest")
+        if not isinstance(artifact_digest, str) or DIGEST_RE.fullmatch(
+            artifact_digest
+        ) is None:
+            raise ApprovalError("Published readiness artifact digest is invalid")
+        normalized_readiness = {
+            "workflow_run_id": _safe_int(
+                "Readiness workflow run ID", readiness.get("workflow_run_id")
+            ),
+            "workflow_run_attempt": _safe_int(
+                "Readiness workflow run attempt",
+                readiness.get("workflow_run_attempt"),
+                maximum=10**6,
+            ),
+            "artifact_id": _safe_int(
+                "Readiness artifact ID", readiness.get("artifact_id")
+            ),
+            "artifact_name": expected_name,
+            "artifact_digest": artifact_digest,
+            "review_digest": review_digest,
+        }
+    elif readiness is not None:
+        raise ApprovalError("First-introduction readiness evidence must be null")
+
+    preview_required = value.get("preview_required")
+    if not isinstance(preview_required, bool):
+        raise ApprovalError("Feature preview requirement is invalid")
+    preview = value.get("preview")
+    normalized_preview = None
+    if preview_required:
+        if not isinstance(preview, dict) or set(preview) != {
+            "run_id",
+            "run_attempt",
+            "manifest_artifact_id",
+            "manifest_artifact_digest",
+            "evidence_artifact_id",
+            "evidence_artifact_digest",
+        }:
+            raise ApprovalError("Feature preview evidence schema is invalid")
+        manifest_digest = preview.get("manifest_artifact_digest")
+        evidence_digest = preview.get("evidence_artifact_digest")
+        if (
+            not isinstance(manifest_digest, str)
+            or DIGEST_RE.fullmatch(manifest_digest) is None
+            or not isinstance(evidence_digest, str)
+            or DIGEST_RE.fullmatch(evidence_digest) is None
+        ):
+            raise ApprovalError("Feature preview artifact digest is invalid")
+        normalized_preview = {
+            "run_id": _safe_int("Feature preview run ID", preview.get("run_id")),
+            "run_attempt": _safe_int(
+                "Feature preview run attempt",
+                preview.get("run_attempt"),
+                maximum=10**6,
+            ),
+            "manifest_artifact_id": _safe_int(
+                "Feature preview manifest artifact ID",
+                preview.get("manifest_artifact_id"),
+            ),
+            "manifest_artifact_digest": manifest_digest,
+            "evidence_artifact_id": _safe_int(
+                "Feature preview evidence artifact ID",
+                preview.get("evidence_artifact_id"),
+            ),
+            "evidence_artifact_digest": evidence_digest,
+        }
+    elif preview is not None:
+        raise ApprovalError("Unexpected feature preview evidence is present")
+    return {
+        "schema_version": FEATURE_READINESS_SCHEMA_VERSION,
+        "repository": config.repository,
+        "attestation_mode": mode,
+        "merger": merger,
+        "feature_pr": {"number": feature_number, "head_sha": feature_head},
+        "merge_source_commit": config.source_sha,
+        "feature_validation": normalized_validation,
+        "review_digest": review_digest,
+        "readiness": normalized_readiness,
+        "preview_required": preview_required,
+        "preview": normalized_preview,
+    }
 
 
 def _nonce(fields: Mapping[str, Any]) -> str:
-    bound = {
-        key: fields[key]
-        for key in (
-            "manifest_sha256",
-            "platform_version",
-            "preflight_artifact",
-            "preflight_run_attempt",
-            "preflight_run_id",
-            "pull_request",
-            "release_commit",
-            "repository",
-            "source_ci_run_attempt",
-            "source_ci_run_id",
-            "source_commit",
-        )
-    }
+    bound = {key: value for key, value in fields.items() if key != "approval_nonce"}
     return hashlib.sha256((_canonical(bound) + "\n").encode("ascii")).hexdigest()
 
 
@@ -432,6 +639,9 @@ def ready(
     token: str,
     *,
     number: int,
+    feature_readiness: Mapping[str, Any],
+    main_validation_run_id: int,
+    main_validation_run_attempt: int,
     manifest_sha256: str,
     preflight_run_id: int,
     preflight_run_attempt: int,
@@ -450,18 +660,69 @@ def ready(
     client = GitHubClient(
         config.api_url, token, transport=transport, sleeper=sleeper
     )
+    published = _feature_readiness(feature_readiness, config)
+    main_run_id = _safe_int("Main Validate PR run ID", main_validation_run_id)
+    main_run_attempt = _safe_int(
+        "Main Validate PR run attempt",
+        main_validation_run_attempt,
+        maximum=10**6,
+    )
+    preflight_id = _safe_int("Preflight run ID", preflight_run_id)
+    preflight_attempt = _safe_int(
+        "Preflight run attempt", preflight_run_attempt, maximum=10**6
+    )
     _get_pr(client, config, number, "open")
+    if _read_ref(client, config, "main") != config.source_sha:
+        raise ApprovalError(
+            "Current main advanced before production readiness could be published"
+        )
+    _verify_release(client, config, sync=True)
+    _verify_main_run(
+        client,
+        config,
+        main_run_id,
+        main_run_attempt,
+    )
+    _workflow_run(
+        client,
+        config,
+        preflight_id,
+        preflight_attempt,
+        completed=False,
+    )
+    artifact = _artifact(client, config, preflight_id, preflight_artifact)
+    source_run = _source_ci_run(
+        client, config, number, sleeper=sleeper, polls=polls
+    )
+    _verify_newest_source_run(
+        client,
+        config,
+        number,
+        source_run["id"],
+        source_run["run_attempt"],
+    )
+    # Source CI can take long enough for main, release refs, or retained
+    # preflight evidence to change while this job is polling.  Take one final
+    # live snapshot immediately before publishing the human approval request.
+    if _read_ref(client, config, "main") != config.source_sha:
+        raise ApprovalError(
+            "Current main advanced before production readiness could be published"
+        )
     _verify_release(client, config, sync=True)
     _workflow_run(
         client,
         config,
-        preflight_run_id,
-        preflight_run_attempt,
+        preflight_id,
+        preflight_attempt,
         completed=False,
     )
-    _artifact(client, config, preflight_run_id, preflight_artifact)
-    source_run = _source_ci_run(
-        client, config, number, sleeper=sleeper, polls=polls
+    artifact = _artifact(
+        client,
+        config,
+        preflight_id,
+        preflight_artifact,
+        expected_id=artifact["id"],
+        expected_digest=artifact["digest"],
     )
     existing = [
         item
@@ -471,18 +732,23 @@ def ready(
     if existing:
         raise ApprovalError("A readiness marker already exists for this pull request")
     fields: dict[str, Any] = {
+        "feature_readiness": published,
+        "main_validation_run_attempt": main_run_attempt,
+        "main_validation_run_id": main_run_id,
         "manifest_sha256": manifest_sha256,
         "platform_version": config.version,
         "preflight_artifact": preflight_artifact,
-        "preflight_run_attempt": preflight_run_attempt,
-        "preflight_run_id": preflight_run_id,
+        "preflight_artifact_digest": artifact["digest"],
+        "preflight_artifact_id": artifact["id"],
+        "preflight_run_attempt": preflight_attempt,
+        "preflight_run_id": preflight_id,
         "pull_request": number,
         "release_commit": config.release_commit,
         "repository": config.repository,
         "schema_version": SCHEMA_VERSION,
-        "source_ci_run_attempt": source_run["run_attempt"],
-        "source_ci_run_id": source_run["id"],
         "source_commit": config.source_sha,
+        "sync_validation_run_attempt": source_run["run_attempt"],
+        "sync_validation_run_id": source_run["id"],
     }
     fields["approval_nonce"] = _nonce(fields)
     comment = _post_ready_comment(client, config, number, fields)
@@ -496,18 +762,23 @@ def ready(
 
 READY_KEYS = {
     "approval_nonce",
+    "feature_readiness",
+    "main_validation_run_attempt",
+    "main_validation_run_id",
     "manifest_sha256",
     "platform_version",
     "preflight_artifact",
+    "preflight_artifact_digest",
+    "preflight_artifact_id",
     "preflight_run_attempt",
     "preflight_run_id",
     "pull_request",
     "release_commit",
     "repository",
     "schema_version",
-    "source_ci_run_attempt",
-    "source_ci_run_id",
     "source_commit",
+    "sync_validation_run_attempt",
+    "sync_validation_run_id",
 }
 
 
@@ -526,19 +797,50 @@ def _validate_ready_payload(payload: Mapping[str, Any], config: SyncConfig, numb
         or NONCE_RE.fullmatch(payload["approval_nonce"]) is None
     ):
         raise ApprovalError("Readiness marker does not match the release")
+    feature_readiness = _feature_readiness(payload.get("feature_readiness"), config)
+    main_run_id = _safe_int(
+        "Main Validate PR run ID", payload.get("main_validation_run_id")
+    )
+    main_attempt = _safe_int(
+        "Main Validate PR run attempt",
+        payload.get("main_validation_run_attempt"),
+        maximum=10**6,
+    )
     run_id = _safe_int("Preflight run ID", payload.get("preflight_run_id"))
     run_attempt = _safe_int(
         "Preflight run attempt", payload.get("preflight_run_attempt"), maximum=10**6
     )
-    source_run_id = _safe_int("Source CI run ID", payload.get("source_ci_run_id"))
-    source_attempt = _safe_int(
-        "Source CI run attempt", payload.get("source_ci_run_attempt"), maximum=10**6
+    sync_run_id = _safe_int(
+        "Sync Validate PR run ID", payload.get("sync_validation_run_id")
     )
+    sync_attempt = _safe_int(
+        "Sync Validate PR run attempt",
+        payload.get("sync_validation_run_attempt"),
+        maximum=10**6,
+    )
+    artifact_id = _safe_int(
+        "Preflight artifact ID", payload.get("preflight_artifact_id")
+    )
+    artifact_digest = payload.get("preflight_artifact_digest")
+    if not isinstance(artifact_digest, str) or DIGEST_RE.fullmatch(
+        artifact_digest
+    ) is None:
+        raise ApprovalError("Readiness marker artifact digest is invalid")
     if payload.get("preflight_artifact") != f"platform-v2-preflight-{run_id}-{run_attempt}":
         raise ApprovalError("Readiness marker artifact identity is invalid")
     if payload["approval_nonce"] != _nonce(payload):
         raise ApprovalError("Readiness marker nonce is invalid")
-    return run_id, run_attempt, source_run_id, source_attempt
+    return {
+        "feature_readiness": feature_readiness,
+        "main_run_id": main_run_id,
+        "main_attempt": main_attempt,
+        "preflight_run_id": run_id,
+        "preflight_attempt": run_attempt,
+        "preflight_artifact_id": artifact_id,
+        "preflight_artifact_digest": artifact_digest,
+        "sync_run_id": sync_run_id,
+        "sync_attempt": sync_attempt,
+    }
 
 
 def _verify_source_run(
@@ -560,6 +862,7 @@ def _verify_source_run(
         or run.get("head_branch") != config.sync_branch
         or _workflow_path(run) != ".github/workflows/source-ci.yml"
         or _repo_name(run.get("head_repository")) != config.repository
+        or _repo_name(run.get("repository")) != config.repository
     ):
         raise ApprovalError("Recorded sync PR Source CI evidence is invalid")
     if number in _run_pr_numbers(run):
@@ -584,6 +887,77 @@ def _verify_source_run(
     _timestamp("Source CI associated PR merge timestamp", merged_pr.get("merged_at"))
 
 
+def _verify_newest_source_run(
+    client: GitHubClient,
+    config: SyncConfig,
+    number: int,
+    run_id: int,
+    attempt: int,
+) -> None:
+    """Reject a superseded sync-PR run even when its head SHA is unchanged."""
+
+    payload = client.get(
+        _path(config.repository, "actions/workflows/source-ci.yml/runs"),
+        {
+            "event": "pull_request",
+            "head_sha": config.release_commit,
+            "per_page": "100",
+        },
+    )
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    total_count = payload.get("total_count") if isinstance(payload, dict) else None
+    if (
+        not isinstance(runs, list)
+        or type(total_count) is not int
+        or total_count != len(runs)
+    ):
+        raise ApprovalError("Sync PR Source CI run list is incomplete or malformed")
+
+    exact: list[dict[str, Any]] = []
+    for item in runs:
+        if not isinstance(item, dict):
+            raise ApprovalError("Sync PR Source CI run list is malformed")
+        if (
+            item.get("event") != "pull_request"
+            or item.get("head_sha") != config.release_commit
+            or item.get("head_branch") != config.sync_branch
+            or _workflow_path(item) != ".github/workflows/source-ci.yml"
+            or _repo_name(item.get("head_repository")) != config.repository
+            or _repo_name(item.get("repository")) != config.repository
+            or type(item.get("id")) is not int
+            or item["id"] < 1
+        ):
+            raise ApprovalError("Sync PR Source CI run-list provenance is invalid")
+        _safe_int(
+            "Sync PR Source CI run attempt",
+            item.get("run_attempt"),
+            maximum=10**6,
+        )
+        associations = item.get("pull_requests")
+        if associations != [] and (
+            not isinstance(associations, list)
+            or len(associations) != 1
+            or _run_pr_numbers(item) != {number}
+        ):
+            raise ApprovalError("Sync PR Source CI run-list association is invalid")
+        exact.append(item)
+
+    if not exact:
+        raise ApprovalError("Exact sync PR Source CI run is unavailable")
+    selected = max(
+        exact,
+        key=lambda run: (
+            int(run.get("run_number", 0)),
+            int(run.get("run_attempt", 0)),
+            run["id"],
+        ),
+    )
+    if selected.get("id") != run_id or selected.get("run_attempt") != attempt:
+        raise ApprovalError("Recorded sync PR Source CI is not the newest exact-head run")
+    if selected.get("status") != "completed" or selected.get("conclusion") != "success":
+        raise ApprovalError("Newest exact sync PR Source CI did not pass")
+
+
 def _verify_merge_commit(
     client: GitHubClient,
     config: SyncConfig,
@@ -595,19 +969,15 @@ def _verify_merge_commit(
         not isinstance(parents, list)
         or len(parents) != 2
         or not all(isinstance(item, dict) for item in parents)
+        or parents[0].get("sha") != config.source_sha
         or parents[1].get("sha") != config.release_commit
     ):
-        raise ApprovalError("Synchronization PR was not merged with a merge commit")
-    comparison = client.get(
-        _path(config.repository, f"compare/{merge_commit}...main")
-    )
-    if (
-        not isinstance(comparison, dict)
-        or comparison.get("status") not in {"identical", "ahead"}
-        or not isinstance(comparison.get("merge_base_commit"), dict)
-        or comparison["merge_base_commit"].get("sha") != merge_commit
-    ):
-        raise ApprovalError("Synchronization merge is not an ancestor of current main")
+        raise ApprovalError(
+            "Synchronization PR was not merged with a merge commit directly "
+            "onto its tested source"
+        )
+    if _read_ref(client, config, "main") != merge_commit:
+        raise ApprovalError("Synchronization merge is no longer the current main tip")
     return merge
 
 
@@ -710,14 +1080,15 @@ def authorize(
             "Exactly one GitHub Actions readiness marker is required"
         )
     ready_comment, ready_payload = ready_comments[0]
+    ready_comment_id = _safe_int(
+        "Readiness comment ID", ready_comment.get("id")
+    )
     if _login(ready_comment.get("user")) != BOT_LOGIN:
         raise ApprovalError("Readiness marker was not created by GitHub Actions")
     ready_at = _timestamp("Readiness comment timestamp", ready_comment.get("created_at"))
     if ready_at > merged_at:
         raise ApprovalError("Synchronization PR was merged before readiness")
-    run_id, preflight_attempt, source_run_id, source_attempt = _validate_ready_payload(
-        ready_payload, config, number
-    )
+    evidence = _validate_ready_payload(ready_payload, config, number)
     commit_data = merge.get("commit")
     commit_message = (
         commit_data.get("message") if isinstance(commit_data, dict) else None
@@ -732,28 +1103,100 @@ def authorize(
         "schema_version",
     } or approved != approval_payload(ready_payload):
         raise ApprovalError("ChatGPT approval marker does not match readiness evidence")
-    _workflow_run(client, config, run_id, preflight_attempt, completed=True)
+    _workflow_run(
+        client,
+        config,
+        evidence["preflight_run_id"],
+        evidence["preflight_attempt"],
+        completed=True,
+    )
+    _verify_main_run(
+        client,
+        config,
+        evidence["main_run_id"],
+        evidence["main_attempt"],
+    )
     _verify_source_run(
-        client, config, number, source_run_id, source_attempt
+        client,
+        config,
+        number,
+        evidence["sync_run_id"],
+        evidence["sync_attempt"],
+    )
+    _verify_newest_source_run(
+        client,
+        config,
+        number,
+        evidence["sync_run_id"],
+        evidence["sync_attempt"],
     )
     artifact = _artifact(
-        client, config, run_id, ready_payload["preflight_artifact"]
+        client,
+        config,
+        evidence["preflight_run_id"],
+        ready_payload["preflight_artifact"],
+        expected_id=evidence["preflight_artifact_id"],
+        expected_digest=evidence["preflight_artifact_digest"],
+    )
+    # Authorization may spend time paging comments and checking workflows.  A
+    # newer main commit or deleted artifact while this run was queued must not
+    # survive the last boundary read. Re-pin the immutable release, current
+    # main tip, and exact retained artifact before returning authorization.
+    _verify_release(client, config, sync=False)
+    if _read_ref(client, config, "main") != merge_commit:
+        raise ApprovalError("Synchronization merge is no longer the current main tip")
+    final_ready_comments = []
+    for comment in _comments(client, config, number):
+        payload = _marker_payload(comment.get("body"), READY_PREFIX)
+        if payload is not None:
+            final_ready_comments.append((comment, payload))
+    if len(final_ready_comments) != 1:
+        raise ApprovalError(
+            "Exactly one live GitHub Actions readiness marker is required"
+        )
+    final_ready_comment, final_ready_payload = final_ready_comments[0]
+    if (
+        _safe_int("Readiness comment ID", final_ready_comment.get("id"))
+        != ready_comment_id
+        or _login(final_ready_comment.get("user")) != BOT_LOGIN
+        or final_ready_payload != ready_payload
+        or _timestamp(
+            "Readiness comment timestamp", final_ready_comment.get("created_at")
+        )
+        != ready_at
+    ):
+        raise ApprovalError("Live readiness approval changed during authorization")
+    artifact = _artifact(
+        client,
+        config,
+        evidence["preflight_run_id"],
+        ready_payload["preflight_artifact"],
+        expected_id=artifact["id"],
+        expected_digest=artifact["digest"],
     )
     return {
         "approval_record": "merge-commit",
         "approval_nonce": ready_payload["approval_nonce"],
+        "feature_readiness": evidence["feature_readiness"],
+        "feature_pr_number": evidence["feature_readiness"]["feature_pr"]["number"],
+        "feature_head_sha": evidence["feature_readiness"]["feature_pr"]["head_sha"],
+        "main_validation_run_attempt": evidence["main_attempt"],
+        "main_validation_run_id": evidence["main_run_id"],
         "manifest_sha256": ready_payload["manifest_sha256"],
         "merge_commit": merge_commit,
         "platform_version": version,
         "preflight_artifact": ready_payload["preflight_artifact"],
+        "preflight_artifact_digest": artifact["digest"],
         "preflight_artifact_id": artifact["id"],
-        "preflight_run_attempt": preflight_attempt,
-        "preflight_run_id": run_id,
+        "preflight_run_attempt": evidence["preflight_attempt"],
+        "preflight_run_id": evidence["preflight_run_id"],
         "pull_request": number,
         "release_commit": release_commit,
         "repository": repository,
         "schema_version": SCHEMA_VERSION,
         "source_commit": source_commit,
+        "sync_validation_run_attempt": evidence["sync_attempt"],
+        "sync_validation_run_id": evidence["sync_run_id"],
     }
 
 
@@ -774,6 +1217,12 @@ def verify_artifact(report: Mapping[str, Any], root: Path) -> None:
     attempt = _safe_int(
         "Preflight run attempt", report.get("preflight_run_attempt"), maximum=10**6
     )
+    _safe_int("Preflight artifact ID", report.get("preflight_artifact_id"))
+    artifact_digest = report.get("preflight_artifact_digest")
+    if not isinstance(artifact_digest, str) or DIGEST_RE.fullmatch(
+        artifact_digest
+    ) is None:
+        raise ApprovalError("Approval report preflight artifact digest is invalid")
     if not root.is_dir() or root.is_symlink():
         raise ApprovalError("Downloaded preflight artifact directory is unsafe")
     total = 0
@@ -800,13 +1249,13 @@ def verify_artifact(report: Mapping[str, Any], root: Path) -> None:
         "manifest_sha256": expected["manifest_sha256"],
         "platform_version": expected["platform_version"],
         "result": "preflight-passed",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": PREFLIGHT_EVIDENCE_SCHEMA_VERSION,
     }:
         raise ApprovalError("Receiver evidence does not prove the exact preflight")
     if (
         lines[0] != "B-UH Platform v2 guarded attempt report"
         or not isinstance(attempt_report, dict)
-        or attempt_report.get("schema_version") != SCHEMA_VERSION
+        or attempt_report.get("schema_version") != PREFLIGHT_EVIDENCE_SCHEMA_VERSION
         or attempt_report.get("attempt_id") != f"gh-{run_id}-{attempt}"
         or attempt_report.get("operation") != "preflight"
         or attempt_report.get("result") != "success"
@@ -842,14 +1291,22 @@ def _append_outputs(path: str | None, values: Mapping[str, Any]) -> None:
     selected = {
         key: str(values[key])
         for key in (
+            "feature_head_sha",
+            "feature_pr_number",
+            "main_validation_run_attempt",
+            "main_validation_run_id",
             "manifest_sha256",
             "platform_version",
             "preflight_artifact",
+            "preflight_artifact_digest",
+            "preflight_artifact_id",
             "preflight_run_attempt",
             "preflight_run_id",
             "pull_request",
             "release_commit",
             "source_commit",
+            "sync_validation_run_attempt",
+            "sync_validation_run_id",
         )
         if key in values
     }
@@ -879,6 +1336,11 @@ def _parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--source-commit", required=True)
     ready_parser.add_argument("--release-commit", required=True)
     ready_parser.add_argument("--pull-request", type=int, required=True)
+    ready_parser.add_argument("--feature-readiness", type=Path, required=True)
+    ready_parser.add_argument("--main-validation-run-id", type=int, required=True)
+    ready_parser.add_argument(
+        "--main-validation-run-attempt", type=int, required=True
+    )
     ready_parser.add_argument("--manifest-sha256", required=True)
     ready_parser.add_argument("--preflight-run-id", type=int, required=True)
     ready_parser.add_argument("--preflight-run-attempt", type=int, required=True)
@@ -904,7 +1366,7 @@ def main(
         if args.command == "verify-artifact":
             report = json.loads(args.report.read_text(encoding="utf-8"))
             verify_artifact(report, args.artifact_dir)
-            stdout.write('{"result":"preflight-evidence-verified","schema_version":1}\n')
+            stdout.write('{"result":"preflight-evidence-verified","schema_version":2}\n')
             return 0
         token = environment.get("GITHUB_TOKEN", "")
         if args.command == "ready":
@@ -918,10 +1380,17 @@ def main(
                 server_url=args.server_url,
                 output=args.output,
             )
+            feature_readiness_raw = args.feature_readiness.read_text(encoding="ascii")
+            feature_readiness = json.loads(feature_readiness_raw)
+            if feature_readiness_raw != _canonical(feature_readiness) + "\n":
+                raise ApprovalError("Feature-readiness evidence is not canonical")
             report = ready(
                 config,
                 token,
                 number=args.pull_request,
+                feature_readiness=feature_readiness,
+                main_validation_run_id=args.main_validation_run_id,
+                main_validation_run_attempt=args.main_validation_run_attempt,
                 manifest_sha256=args.manifest_sha256,
                 preflight_run_id=args.preflight_run_id,
                 preflight_run_attempt=args.preflight_run_attempt,

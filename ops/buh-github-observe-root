@@ -95,6 +95,84 @@ if (
     and len(selected["failure_detail"].encode("utf-8")) > 32 * 1024 + 3
 ):
     raise SystemExit("The requested Platform v2 failure detail is oversized")
+
+verification = data.get("verification")
+if verification is not None:
+    expected_verification = {
+        "filename",
+        "sha256",
+        "result",
+        "iterations",
+        "allowed_log_findings",
+        "warnings",
+        "failure",
+    }
+    warnings = verification.get("warnings") if isinstance(verification, dict) else None
+    verification_failure = (
+        verification.get("failure") if isinstance(verification, dict) else None
+    )
+    if (
+        not isinstance(verification, dict)
+        or set(verification) != expected_verification
+        or verification.get("filename") != "HEALTH.json"
+        or not isinstance(verification.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", verification["sha256"])
+        or verification.get("result") not in {"success", "failed"}
+        or type(verification.get("iterations")) is not int
+        or verification["iterations"] < 0
+        or (
+            verification["result"] == "success"
+            and verification["iterations"] < 1
+        )
+        or type(verification.get("allowed_log_findings")) is not int
+        or not isinstance(warnings, list)
+        or len(warnings) > 32
+        or verification["allowed_log_findings"] != len(warnings)
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"[\x20-\x7e]{1,200}", item) is None
+            for item in warnings
+        )
+        or (
+            verification_failure is not None
+            and (
+                not isinstance(verification_failure, str)
+                or re.fullmatch(r"[\x20-\x7e]{1,500}", verification_failure)
+                is None
+            )
+        )
+        or (
+            verification["result"] == "success"
+            and verification_failure is not None
+        )
+        or (
+            verification["result"] == "failed"
+            and verification_failure is None
+        )
+    ):
+        raise SystemExit("The requested Platform v2 verification evidence is unsafe")
+selected["verification"] = verification
+
+rollback = data.get("rollback")
+if rollback is not None and (
+    not isinstance(rollback, dict)
+    or set(rollback) != {"result", "detail"}
+    or rollback.get("result") not in {"passed", "failed"}
+    or not isinstance(rollback.get("detail"), str)
+    or re.fullmatch(r"[\x20-\x7e]{1,500}", rollback["detail"]) is None
+):
+    raise SystemExit("The requested Platform v2 rollback evidence is unsafe")
+selected["rollback"] = rollback
+cleanup = data.get("cleanup")
+if cleanup is not None and (
+    not isinstance(cleanup, dict)
+    or set(cleanup) != {"result", "detail"}
+    or cleanup.get("result") not in {"passed", "failed"}
+    or not isinstance(cleanup.get("detail"), str)
+    or re.fullmatch(r"[\x20-\x7e]{1,500}", cleanup["detail"]) is None
+):
+    raise SystemExit("The requested Platform v2 cleanup evidence is unsafe")
+selected["cleanup"] = cleanup
 print("B-UH Platform v2 guarded attempt report")
 print(json.dumps(selected, sort_keys=True, separators=(",", ":")))
 PY

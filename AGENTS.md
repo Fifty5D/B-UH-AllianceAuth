@@ -26,7 +26,7 @@ production-critical paths.
   validate MariaDB, Redis, Celery, fake ESI, migrations, backup restoration, and
   browser behavior.
 - Inspect failures and fix the same pull request until
-  `Validation lanes / Authoritative validation` succeeds. Do not call work complete
+  `Source test suite / Required source checks` succeeds. Do not call work complete
   while relevant checks are pending, failed, or unrun.
 - Keep secrets, production data, credentials, and unredacted logs out of commits,
   pull requests, test fixtures, and diagnostics.
@@ -44,9 +44,13 @@ production-critical paths.
 ## Review and release boundaries
 
 - Codex owns implementation, focused tests, synthetic preview preparation, and
-  creation or updates of the single feature pull request. Codex may apply
-  `ready-for-work` only after the authoritative validation and any required UI
-  preview pass for the exact current head SHA; a pushed commit invalidates it.
+  creation or updates of the single feature pull request targeting `main`. After
+  the exact head's checks and applicable preview are green, Codex applies
+  `ready-for-work`. The
+  trusted handoff policy removes that request while it validates and publishes
+  the exact-head record, then re-adds it as the final signal. Codex stops only
+  after that handoff succeeds; any head, check, preview, or review change
+  invalidates it and requires Codex to apply it again after the head is green.
 - Codex never merges, publishes, approves, or deploys. ChatGPT Work owns final
   risk review, merge of a validated non-production PR, release/preflight evidence
   verification, the single production-approval request, deployment monitoring,

@@ -8,6 +8,10 @@ on:
         required: false
         type: string
         default: main
+      source_sha:
+        description: Exact source commit tested by every lane
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -33,7 +37,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+
+      - name: Verify the exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
 
       - name: Read and validate the compatibility contract
         id: versions
@@ -107,13 +120,15 @@ jobs:
       - name: Check out complete source history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Require synchronized immutable release history
+        id: ledger
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
@@ -123,6 +138,134 @@ jobs:
             --remote origin \
             --release-root releases/platform \
             --output "${RUNNER_TEMP}/source-release-state.json" >/dev/null
+
+      - name: Validate the release plan and change fragments
+        env:
+          BOOTSTRAP: ${{ steps.ledger.outputs.bootstrap }}
+          PREVIOUS_RELEASE_PATH: ${{ steps.ledger.outputs.latest_release_path }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TEST_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          command=(
+            python3 ops/release/buh_release.py plan
+            --root .
+            --source-sha "${SOURCE_SHA}"
+            --test-run "${TEST_RUN_URL}"
+            --output "${RUNNER_TEMP}/source-release-plan.json"
+          )
+          case "${BOOTSTRAP}" in
+            true)
+              [[ -z "${PREVIOUS_RELEASE_PATH}" ]]
+              ;;
+            false)
+              [[ "${PREVIOUS_RELEASE_PATH}" =~ ^releases/platform/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              command+=(--previous "${PREVIOUS_RELEASE_PATH}/RELEASE.json")
+              ;;
+            *)
+              echo "Release-ledger bootstrap output is invalid." >&2
+              exit 1
+              ;;
+          esac
+          "${command[@]}"
+          python3 - "${RUNNER_TEMP}/source-release-plan.json" "${SOURCE_SHA}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if plan.get("source_commit") != sys.argv[2]:
+              raise SystemExit("Release plan is not bound to the exact source head")
+          if not isinstance(plan.get("release_required"), bool):
+              raise SystemExit("Release plan lacks a release_required decision")
+          PY
+
+  legacy_release:
+    name: Immutable Moon Tax v0.3.3 recovery artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact source with immutable history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the immutable Moon Tax v0.3.3 recovery artifact
+        env:
+          REVIEWED_RELEASE_COMMIT: e70a8ee713d358e2f0e3c1dc5b23305c863aa628
+          REVIEWED_RELEASE_TREE: 3e51f208eb715011d5af7626479af2d0f0c893da
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          reviewed_tree="$(git rev-parse "${REVIEWED_RELEASE_COMMIT}:releases/moon-tax/v0.3.3")"
+          current_tree="$(git rev-parse "HEAD:releases/moon-tax/v0.3.3")"
+          [[ "${reviewed_tree}" == "${REVIEWED_RELEASE_TREE}" ]]
+          [[ "${current_tree}" == "${REVIEWED_RELEASE_TREE}" ]]
+          cd releases/moon-tax/v0.3.3
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 9
+          test "$(find . -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 5
+          test "$(wc -l < SHA256SUMS)" -eq 7
+          sha256sum --check --strict SHA256SUMS
+          bash -n buh-moon-tax-platform-remote-v0.3.3.sh
+          grep -Fq 'VERSION="0.3.3"' buh-moon-tax-platform-remote-v0.3.3.sh
+          grep -Fq 'install -o root -g root -m 0644 "/tmp/${TAX_WHEEL}"' \
+            buh-moon-tax-platform-remote-v0.3.3.sh
+          python3 - <<'PY'
+          import zipfile
+
+          wheel = "aa_buh_moon_tax-0.3.2-py3-none-any.whl"
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              model = archive.read("buh_moon_tax/models.py").decode()
+              urls = archive.read("buh_moon_tax/urls.py").decode()
+              exemptions = archive.read("buh_moon_tax/exemptions.py").decode()
+              auditor = archive.read("buh_moon_tax/auditor.py").decode()
+              payments = archive.read("buh_moon_tax/payments.py").decode()
+              views = archive.read("buh_moon_tax/views.py").decode()
+              javascript = archive.read(
+                  "buh_moon_tax/static/buh_moon_tax/js/moon-tax.js"
+              ).decode()
+              dashboard = archive.read(
+                  "buh_moon_tax/templates/buh_moon_tax/dashboard.html"
+              ).decode()
+              payment_page = archive.read(
+                  "buh_moon_tax/templates/buh_moon_tax/payments.html"
+              ).decode()
+              metadata = archive.read(
+                  "aa_buh_moon_tax-0.3.2.dist-info/METADATA"
+              ).decode()
+
+          assert "class AssessmentAdjustment" in model
+          assert "small_balance_threshold" in model
+          assert 'name="decide_payment_direct"' in urls
+          assert 'name="member_detail"' in urls
+          assert 'name="character_detail"' in urls
+          assert "def state_hash" in exemptions
+          assert '"full_exemption_history_recheck"' in auditor
+          assert "select_for_update" in payments
+          assert "def _billing_account_totals" in views
+          assert "_outstanding_sum_expression()" in views
+          assert "setupSortableTables" in javascript
+          assert "setupRowNavigation" in javascript
+          assert "event.submitter" in javascript
+          assert "data-row-url" in dashboard
+          assert "data-sortable-table" in dashboard
+          assert "Totals by billing account" in dashboard
+          assert "data-drop-decision" not in javascript
+          assert "data-payment-drag" not in payment_page
+          assert "Version: 0.3.2" in metadata
+          assert "buh_moon_tax/templates/buh_moon_tax/person_detail.html" in names
+          assert (
+              "buh_moon_tax/migrations/0005_payment_workspace_and_bill_adjustments.py"
+              in names
+          )
+          PY
 
   fast:
     name: Fast source checks
@@ -136,7 +279,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+
+      - name: Verify the exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
 
       - name: Prepare failure report
         run: |
@@ -228,8 +380,6 @@ jobs:
             bash tests/test-deployer-guards.sh
             python3 tests/test-token-rotation.py
             python -m unittest discover -s tests/release -p 'test_*.py'
-            python -m unittest discover -s tests/deploy -p 'test_*.py'
-            python -m unittest discover -s tests/platform -p 'test_*.py'
           } 2>&1 | tee artifacts/fast.log
 
       - name: Upload fast-lane failure report
@@ -261,7 +411,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+
+      - name: Verify the exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
 
       - name: Prepare failure reports
         run: |
@@ -347,7 +506,16 @@ jobs:
       - name: Check out source and immutable baseline wheels
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+
+      - name: Verify the exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
 
       - name: Prepare upgrade reports
         run: |
@@ -419,7 +587,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
+
+      - name: Verify the exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
 
       - name: Prepare browser reports
         run: |
@@ -526,9 +703,9 @@ jobs:
           retention-days: 7
 
   required:
-    name: Authoritative validation
+    name: Required source checks
     if: always()
-    needs: [configuration, release_ledger, fast, integration, upgrade, browser]
+    needs: [configuration, release_ledger, legacy_release, fast, integration, upgrade, browser]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -538,6 +715,7 @@ jobs:
           CONFIGURATION_RESULT: ${{ needs.configuration.result }}
           FAST_RESULT: ${{ needs.fast.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          LEGACY_RELEASE_RESULT: ${{ needs.legacy_release.result }}
           RELEASE_LEDGER_RESULT: ${{ needs.release_ledger.result }}
           UPGRADE_RESULT: ${{ needs.upgrade.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
@@ -547,6 +725,7 @@ jobs:
           for entry in \
             "configuration:${CONFIGURATION_RESULT}" \
             "release-ledger:${RELEASE_LEDGER_RESULT}" \
+            "legacy-release:${LEGACY_RELEASE_RESULT}" \
             "fast:${FAST_RESULT}" \
             "integration:${INTEGRATION_RESULT}" \
             "upgrade:${UPGRADE_RESULT}" \

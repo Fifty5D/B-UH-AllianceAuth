@@ -10,8 +10,16 @@ release directories are immutable outputs and must never be edited in place.
 3. Add one schema-v1 fragment under `changes/` for every affected application.
 4. Run `platform/testenv/run-fast.sh` while developing.
 5. Let the pull request run the MariaDB/Redis/Celery/fake-ESI and browser lanes.
-6. Merge only after the stable `Required source checks` gate succeeds.
-7. Build a candidate from an exact tested commit. Release publication and
+6. For a UI-relevant change, require the automatic synthetic **Preview UI** run
+   (or the explicit `ui-preview` override) to succeed for the exact current head.
+7. Apply `ready-for-work` only after
+   `Source test suite / Required source checks` and every applicable preview pass
+   for that same head. The trusted readiness record must bind that head, contain
+   no unresolved serious review finding, and leave `needs-codex` absent.
+8. ChatGPT Work performs the final risk review and may merge only that exact
+   qualified head. A stale label or record, a changed head, an expired preview,
+   a pending or failed check, or a new serious finding blocks the merge.
+9. Build a candidate from the exact tested merge. Release publication and
    production deployment are separate guarded actions.
 
 Dependency and image inputs are source contracts. Run

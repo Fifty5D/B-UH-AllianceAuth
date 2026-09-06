@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import os
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ops.deploy.contracts import DeploymentError, ReceiverConfig
-from ops.deploy.receiver import LockBusy, _forced_mode, _open_lock
+from ops.deploy.receiver import LockBusy, _forced_mode, _open_lock, receive
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,21 +26,52 @@ def simulated_root_metadata():
 
     def lstat_as_root(path):
         details = real_lstat(path)
-        return SimpleNamespace(st_mode=details.st_mode, st_uid=0)
+        return SimpleNamespace(
+            st_mode=details.st_mode,
+            st_uid=0,
+            st_dev=details.st_dev,
+            st_ino=details.st_ino,
+        )
 
     def fstat_as_root(descriptor):
         details = real_fstat(descriptor)
-        return SimpleNamespace(st_mode=details.st_mode, st_uid=0)
+        return SimpleNamespace(
+            st_mode=details.st_mode,
+            st_uid=0,
+            st_dev=details.st_dev,
+            st_ino=details.st_ino,
+        )
 
     with mock.patch(
         "ops.deploy.receiver.os.geteuid", return_value=0
     ), mock.patch.object(Path, "lstat", lstat_as_root), mock.patch(
         "ops.deploy.receiver.os.fstat", side_effect=fstat_as_root
+    ), mock.patch(
+        "ops.deploy.receiver._verify_root_owned_ancestors"
     ):
         yield
 
 
 class ReceiverBoundaryTests(unittest.TestCase):
+    def test_incomplete_recovery_is_consumed_before_new_archive_bytes(self):
+        source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
+        stream = io.BytesIO(b"must-not-be-read")
+        read_descriptor, write_descriptor = os.pipe()
+        os.close(write_descriptor)
+        with mock.patch(
+            "ops.deploy.receiver.ReceiverConfig.load", return_value=source
+        ), mock.patch(
+            "ops.deploy.receiver._open_lock", return_value=read_descriptor
+        ), mock.patch(
+            "ops.deploy.receiver.DockerHost.recover_incomplete_plan",
+            return_value="Recovered an incomplete prior deployment.",
+        ) as recover, self.assertRaisesRegex(
+            DeploymentError, "new archive was not read"
+        ):
+            receive(Path("receiver.json"), stream, "deploy")
+        recover.assert_called_once_with(source)
+        self.assertEqual(stream.tell(), 0)
+
     def test_original_command_accepts_only_two_exact_operations(self):
         for command, expected in (
             ("preflight platform-v2", "preflight"),
@@ -70,7 +102,10 @@ class ReceiverBoundaryTests(unittest.TestCase):
         source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
-            config = dataclasses.replace(source, state_dir=state)
+            backup = Path(temporary) / "backup"
+            state.mkdir(mode=0o700)
+            backup.mkdir(mode=0o700)
+            config = dataclasses.replace(source, state_dir=state, backup_dir=backup)
             with simulated_root_metadata():
                 first = _open_lock(config)
                 try:
@@ -87,11 +122,68 @@ class ReceiverBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             state.mkdir(mode=0o755)
-            config = dataclasses.replace(source, state_dir=state)
+            state.chmod(0o755)
+            backup = Path(temporary) / "backup"
+            backup.mkdir(mode=0o700)
+            config = dataclasses.replace(source, state_dir=state, backup_dir=backup)
             with simulated_root_metadata(), self.assertRaisesRegex(
                 DeploymentError, "private"
             ):
                 _open_lock(config)
+
+    def test_exact_inherited_lock_descriptor_reuses_production_lock(self):
+        source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            backup = Path(temporary) / "backup"
+            state.mkdir(mode=0o700)
+            backup.mkdir(mode=0o700)
+            config = dataclasses.replace(source, state_dir=state, backup_dir=backup)
+            with simulated_root_metadata():
+                parent = _open_lock(config)
+                try:
+                    inherited = _open_lock(config, parent)
+                    os.close(inherited)
+                    unrelated_path = Path(temporary) / "unrelated.lock"
+                    unrelated_path.touch(mode=0o600)
+                    unrelated = os.open(unrelated_path, os.O_RDWR)
+                    try:
+                        with self.assertRaisesRegex(DeploymentError, "identity"):
+                            _open_lock(config, unrelated)
+                    finally:
+                        os.close(unrelated)
+                finally:
+                    os.close(parent)
+
+    def test_missing_state_directory_is_rejected_without_creation(self):
+        source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "missing-state"
+            backup = Path(temporary) / "backup"
+            backup.mkdir(mode=0o700)
+            config = dataclasses.replace(source, state_dir=state, backup_dir=backup)
+            with simulated_root_metadata(), self.assertRaisesRegex(
+                DeploymentError, "unavailable"
+            ):
+                _open_lock(config)
+            self.assertFalse(state.exists())
+
+    def test_writable_lock_ancestor_is_rejected_before_lock_creation(self):
+        source = ReceiverConfig.load(ROOT / "ops/deploy/receiver-config.example.json")
+        config = dataclasses.replace(
+            source,
+            state_dir=Path("/unsafe-parent/state"),
+            backup_dir=Path("/safe-parent/backup"),
+        )
+
+        def details(path):
+            mode = 0o40777 if path == Path("/unsafe-parent") else 0o40755
+            return SimpleNamespace(st_mode=mode, st_uid=0)
+
+        with mock.patch.object(Path, "lstat", side_effect=details), mock.patch(
+            "ops.deploy.receiver.os.geteuid", return_value=0
+        ), self.assertRaisesRegex(DeploymentError, "ancestor is unsafe"):
+            _open_lock(config)
 
 
 if __name__ == "__main__":

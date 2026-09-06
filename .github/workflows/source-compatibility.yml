@@ -18,5 +18,6 @@ jobs:
     uses: ./.github/workflows/reusable-source-tests.yml
     with:
       cache_scope: ${{ github.event_name == 'schedule' && 'compatibility-main' || format('compatibility-{0}', github.run_id) }}
+      source_sha: ${{ github.sha }}
     permissions:
       contents: read

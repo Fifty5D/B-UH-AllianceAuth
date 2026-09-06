@@ -18,20 +18,63 @@ directory.
 ## Routine delivery and responsibility boundary
 
 The operator-facing Actions stages are **Validate PR**, **Preview UI**, **Prepare
-Release**, **Deploy Production**, and **Operations and Recovery**. `Validate PR /
-Validation lanes / Authoritative validation` is the single required status for
-`main`; its fan-out includes the complete fast, integration, upgrade, restore,
-browser, migration, permission, accounting, and release-plan lanes.
+Release**, **Deploy Production**, and **Operations and Recovery**. The Validate
+PR check `Source test suite / Required source checks` remains the single required
+status for `main`, preserving the existing protected context while presenting
+the consolidated workflow name. Its fan-out includes the complete fast,
+integration, upgrade, restore, browser, migration, permission, accounting,
+release-plan, and immutable legacy-artifact lanes. Every lane checks out the
+exact PR head rather than GitHub's synthetic merge ref.
 
 Codex opens or updates one feature PR. UI paths (templates, static assets,
 JavaScript/CSS, themes, and browser tests) automatically run the synthetic
 preview; `ui-preview` remains a manual override. Every preview artifact is
-retained for three days and its JSON manifest binds the PR number and head SHA.
-A `synchronize` event removes `ready-for-work` before new-head validation. Codex
-may restore that label only when the exact head is green and applicable preview
-evidence matches. ChatGPT Work then performs the final risk/review assessment and
-may merge this non-production PR. Neither the label nor that merge authorizes
-production.
+retained for three days and its JSON manifest binds the repository, PR, head,
+workflow run and attempt, artifact name, screenshot inventory, and Playwright
+report. The base-branch-only readiness workflow never checks out PR code with its
+write token, never writes to forks, and never qualifies a PR without the existing
+`codex` label or an exact `main` base; it may only remove an ineligible readiness
+label from another same-repository PR. A head, base retarget, preview-policy,
+check-run, review, review-comment, or PR-conversation-comment change removes `ready-for-work`, adds
+`needs-codex`, and never restores readiness on its own; a requested or in-progress
+rerun invalidates readiness before it can finish.
+After both exact-head workflows are green, Codex applies `ready-for-work`. The
+trusted workflow immediately removes that request label, re-fetches the current
+required check, review state, workflow run, non-expired artifact IDs and digests,
+and bounded manifest, and publishes a three-day readiness record. The record
+contains a deterministic digest and metadata-only snapshot of latest reviews,
+review threads, and ordinary PR conversation comments (IDs, authors, states,
+resolution, and update times; never comment bodies). A conversation comment with
+a serious marker remains blocking until its author edits away the finding or
+deletes the obsolete comment and readiness is requested again. The reserved
+GitHub-Actions-owned readiness-pointer comment is excluded from that snapshot.
+One bot-owned PR comment is the sole authoritative pointer
+to the current record and artifact digest, explicitly superseding older artifacts.
+Only after that pointer exists does the workflow remove `needs-codex` and re-add
+`ready-for-work` as its final external signal. Its own label event is ignored, so
+it cannot loop or publish a duplicate. ChatGPT Work must require the current head,
+absence of `needs-codex`, and the qualified pointer before performing the final
+risk/review assessment or merging this non-production PR. Neither the label nor
+that merge authorizes production.
+
+Configure a ChatGPT Work GitHub-event task for feature PRs when
+`ready-for-work` is added. Use this operating prompt (with the repository and
+status names unchanged):
+
+> Review the current head of this same-repository pull request targeting `main`.
+> Require the exact `Source test suite / Required source checks` success for that
+> head, no pending or failed checks, no `needs-codex` label, and the current
+> GitHub-Actions-owned `buh-readiness-record:v2` pointer. Inspect every applicable
+> three-day preview manifest, desktop/mobile screenshot, browser result, artifact
+> ID and digest. Review all current review findings, threads, and PR conversation comments, migrations and
+> backward compatibility, authentication and permission boundaries, Moon Tax
+> accounting integrity, and deployment risk. Re-read the PR head and evidence
+> immediately before acting. If anything is missing, stale, expired, unresolved,
+> or unsafe, do not merge: remove `ready-for-work`, add `needs-codex`, report the
+> exact evidence to Anthony, and give him one exact prompt to paste into Codex to
+> fix this same PR. If everything passes, merge only this exact non-production
+> feature head into `main` with a two-parent merge commit. Never deploy, approve a
+> production release, alter release refs, rerun Actions, or bypass a failed gate.
 
 After merge, Prepare Release builds one immutable release and performs the
 no-change receiver preflight. Work presents the bound readiness record and asks
@@ -44,18 +87,43 @@ retry a production failure.
 ## Required repository settings (one-time audit)
 
 Configure a `main` ruleset requiring pull requests and the exact status
-`Validate PR / Validation lanes / Authoritative validation`; block force pushes
-and branch deletion, require branches to be up to date, and permit only merge
-commits. Give the ChatGPT Work identity Contents read and Pull requests
-read/write so it can merge an unchanged, validated non-production head, but no
-Actions, Environments, Administration, or Secrets write access. Restrict
-production SSH secrets to the protected `production` environment and the Deploy
-Production workflow. Protect `release/platform-v*` against update/deletion and
-restrict creation to the release publisher. Repository administrators must
-audit these settings in GitHub because source code cannot enforce ruleset actors,
-environment reviewers, or secret scope.
+`Source test suite / Required source checks` from Validate PR; block force
+pushes and branch deletion, require branches to be up to date, and permit only
+merge commits. Give the ChatGPT Work identity **Contents: write**, **Pull
+requests: read/write**, and **Actions: read** so it can inspect evidence and merge
+an unchanged, validated non-production head. Give **Issues: read/write** only when
+the task will manage `ready-for-work`/`needs-codex` labels or publish evidence;
+read-only is sufficient if those actions are handled elsewhere. Give it no Actions
+write, Administration, Environments, or Secrets access. Set the repository Actions
+variable `BUH_CHATGPT_WORK_ACTOR` to the exact GitHub login used by the connected
+Work task (not a display name, and never empty when Work differs from `Fifty5D`).
+Trusted workflows allow only `Fifty5D` and that one nonempty configured login as
+feature-merger identities. Keep the deploy-capable `BUH_DEPLOY_SSH_KEY` only in
+the protected `production` environment and expose it only through Deploy
+Production. The forced-command `BUH_OBSERVER_SSH_KEY` is a separate, read-only
+credential used by Deploy Production, Operations and Recovery, and Production
+runtime fingerprint. With the current workflow layout, make that observer key
+and `BUH_VPS_KNOWN_HOSTS` repository-level Actions secrets so the two observer-only
+workflows can read them without entering the deploy-capable `production`
+environment; keep host, port, and observer user values in repository Actions
+variables. Never expose `BUH_DEPLOY_SSH_KEY` to either observer-only workflow.
+Protect `release/platform-v*` against update/deletion and restrict creation to
+the release publisher. Repository administrators must audit these settings in
+GitHub because source code cannot enforce ruleset actors, environment reviewers,
+or secret scope.
 
-Create the workflow labels once (the commands are idempotent):
+The trusted readiness workflow creates or normalizes the labels idempotently. For
+PR #44, which first introduces that `pull_request_target` workflow, no normal
+premerge bot pointer can exist because the workflow is not yet available from
+`main`. Reviewers must validate its exact head manually and must not work around
+the bootstrap by running PR code with a write token. After—and only after—a
+protected two-parent merge of PR #44, trusted-main Prepare Release may use the
+PR-44-specific `first-introduction-postmerge` attestation. That path proves the
+first parent lacks the workflow, the merge adds it, the second parent is the exact
+feature head, the merger is explicitly allowlisted, and the exact check, preview,
+labels, and reviews still pass. Any failure stops release preparation and requires
+manual investigation; it never deploys. These commands are the idempotent manual
+label bootstrap fallback:
 
 ```bash
 gh label create ready-for-work --repo Fifty5D/B-UH-AllianceAuth --color 1D76DB --force
@@ -77,9 +145,12 @@ trust boundary:
 
 `.github/workflows/build-platform-release.yml` can run only against an exact main
 commit that already has a successful Validate PR push run. It builds and verifies
-one candidate artifact. Optional publication is separately restricted to the
-repository owner plus an exact confirmation phrase, re-verifies the downloaded
-candidate, and, under one repository-wide publication lock, atomically creates
+one candidate artifact. Automatic publication accepts only a first-attempt,
+successful same-repository Validate PR `workflow_run` for the exact main merge,
+plus the twice-reverified canonical feature-readiness lineage. Manual publication
+remains restricted to the repository owner and exact confirmation phrase. Both
+modes reverify the downloaded candidate and, under one repository-wide publication
+lock, atomically create
 an immutable release ref and a disposable sync ref at one release commit whose
 sole parent is the tested source. It never updates main or connects to the VPS.
 
@@ -105,6 +176,13 @@ and tested, as is a previous-production upgrade/restore rehearsal. The reviewed
 production runtime-image digest is pinned. Receiver installation is operationally
 separate from application promotion; a successful no-change preflight and an
 explicitly approved deployment are still promotion gates.
+
+The one-time receiver upgrade is transported as a commit-bound current-tree tar
+and blob inventory, never as reachable Git history. Its retained receiver backup
+contains an exact recovery source/config and a transaction marker. If an
+uncatchable interruption leaves `recovery_required: true`, follow the exact-path,
+same-commit locked recovery command in `ops/deploy/README.md`; never choose a
+backup by recency, retry the upgrade, or alter the database first.
 
 The release builder also refuses publication until
 `production_runtime.base_image` contains that reviewed digest. Candidate builds
@@ -165,17 +243,23 @@ fingerprint, and release provenance remain authoritative.
     `BUH_RELEASE_PR_TOKEN`, allowing Validate PR to start without a GitHub run-
     approval click. The token cannot publish a release or deploy production.
 12. Run Validate PR on the exact sync head and run the production receiver in
-    no-change `preflight` mode. A workflow-authored readiness marker binds both
-    successful runs, the retained artifact, manifest hash, source, release, and
-    PR into one approval nonce.
+    no-change `preflight` mode. A workflow-authored readiness marker binds the
+    successful feature, main, and sync validation runs; feature readiness and
+    preview artifact IDs/digests; exact preflight artifact ID/digest and run
+    provenance; manifest hash; source; release; and PR into one approval nonce.
 13. Have ChatGPT present that evidence and wait for one explicit approval from
     the repository owner. ChatGPT places the exact matching approval marker in
     the merge commit message and performs one merge action; never squash or
     rebase this PR.
 14. Revalidate the merged PR, readiness marker, approval-bearing merge commit,
-    both workflow runs, release lineage, merge ancestry, and downloaded preflight
-    evidence, then deploy the exact immutable release. A result comment returns
-    success or failure to ChatGPT.
+    feature/main/sync workflow runs, release lineage, merge ancestry, and exact
+    preflight artifact. Re-run published feature readiness and byte/canonical-
+    compare it with the approval record, so changed reviews or labels and missing,
+    expired, or replaced readiness/preview artifacts fail closed. The outer
+    authorization job repeats this after downloading and validating the preflight
+    artifact; the reusable deploy job repeats it again after packaging and
+    immediately before forced-command SSH. Only then deploy the exact immutable
+    release. A result comment returns success or failure to ChatGPT.
 15. Require release-ref/main parity before planning any later release. The sync
     ref may be updated or deleted after merge; the release ref may not.
 
@@ -228,13 +312,14 @@ Connect the same GitHub account to ChatGPT and create one event-triggered task
 for pull-request activity in `Fifty5D/B-UH-AllianceAuth`, filtered to titles
 beginning `Sync platform release v`. The task must:
 
-1. react to the `buh-platform-ready:v1` comment by reading the PR, required
-   checks, referenced workflow runs, and retained preflight artifact;
+1. react to the `buh-platform-ready:v2` comment by reading the PR, canonical
+   feature-readiness lineage, required checks, referenced workflow runs, and
+   retained preflight artifact;
 2. show the version, source/release commits, manifest hash, Validate PR result,
    preflight result, and PR URL, then wait for the owner's explicit approval;
 3. after approval, re-read the unchanged head and checks, then perform exactly
    one merge action using a merge commit with the expected head SHA and the
-   supplied `buh-chatgpt-approved:v1` marker in its commit message; and
+   supplied `buh-chatgpt-approved:v2` marker in its commit message; and
 4. react to the `buh-platform-deploy-result:v1` comment by inspecting the deploy
    run and retained diagnostics and reporting success or the precise safe
    failure. It must never retry or roll forward production automatically.
@@ -244,6 +329,9 @@ The automatic release trigger deliberately requires the newest successful
 Release synchronization deletes consumed fragments, so merging a sync PR cannot
 start another release. If `main` advances while a release is queued, the older
 run stops and the newer tested commit collects the still-unconsumed fragments.
+The trusted automatic no-change preflight may be initiated by the repository owner
+or the exact nonempty `BUH_CHATGPT_WORK_ACTOR`; manual preflight dispatch and every
+production deployment remain owner-only.
 
 Do not configure a second required-reviewer click on the `production`
 environment when the one-approval ChatGPT flow is active. Keep the environment
@@ -262,6 +350,11 @@ Each verified wheel is force-reinstalled from its SHA-256-bound bytes, even when
 the distribution version matches the live image. Wheel files remain in their
 immutable build layer because a later non-root layer cannot remove a root-owned
 `COPY`, and deleting them later would not reduce image size.
+Before a candidate build, every Auth service's resolved Compose definition must
+use the exact application directory as its build context and the reviewed custom
+Dockerfile. The resulting image must change from the captured live image and
+must expose exact receiver-generated labels binding it to the platform version,
+source commit, release commit, manifest hash, and digest-pinned runtime base.
 
 Production preflight executes the same cached candidate build, per-service
 package-version probes, Django checks, and migration plan as deployment. It then
@@ -328,7 +421,8 @@ Success requires all of the following:
 - no pending or unexpected migrations;
 - Django system checks pass;
 - Gunicorn, workers, beat, MariaDB, and Redis are healthy;
-- authenticated and unauthenticated smoke routes behave as expected;
+- authenticated and unauthenticated smoke routes use their fixed per-route
+  status policies, with every 5xx response rejected;
 - required Celery tasks are registered and a worker heartbeat succeeds;
 - fatal startup patterns and restart loops are absent; and
 - sanitized post-deployment diagnostics were collected and validated.
@@ -345,10 +439,13 @@ the first-line failure plus a bounded diagnostic tail, avoiding ambiguous
 
 ## Temporary visual preview
 
-Major UI changes may create an expiring preview from the same source-built test
-image. It uses a temporary database, fake ESI, synthetic users, no production
-secrets, no Discord/ESI egress, a three-day artifact, and unconditional teardown.
-Minor backend changes do not need a preview.
+Every preview-relevant change automatically creates an expiring preview from the
+same source-built test image; `ui-preview` forces the same path for a change that
+falls outside the automatic path policy. It uses a temporary database, fake ESI,
+synthetic users, no production secrets, no Discord/ESI egress, a three-day
+artifact, and unconditional teardown. A change with neither a relevant path nor
+the override records that no preview applies and does not publish preview
+artifacts.
 
 ## Promotion checklist
 

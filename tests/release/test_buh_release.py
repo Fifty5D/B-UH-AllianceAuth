@@ -75,13 +75,13 @@ def make_wheel(
 
 def rewrite_checksums(directory: Path) -> None:
     payloads = sorted(
-        path for path in directory.iterdir() if path.name != "SHA256SUMS"
+        (path for path in directory.iterdir() if path.name != "SHA256SUMS"),
+        key=lambda path: path.name,
     )
-    (directory / "SHA256SUMS").write_text(
+    (directory / "SHA256SUMS").write_bytes(
         "".join(
             f"{release.sha256_file(path)}  {path.name}\n" for path in payloads
-        ),
-        encoding="ascii",
+        ).encode("ascii")
     )
 
 
@@ -768,6 +768,18 @@ class AssemblyTests(unittest.TestCase):
         )
         return output
 
+    def test_checksum_entries_use_ascii_filename_order_on_every_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            output = self._bootstrap(fixture)
+            raw = (output / "SHA256SUMS").read_bytes()
+            text = raw.decode("ascii")
+            self.assertNotIn("\r", text)
+            names = [line.split("  ", 1)[1] for line in text.splitlines()]
+            self.assertEqual(names, sorted(names))
+            self.assertLess(names.index("INSTALL_PLAN.json"), names.index("README.md"))
+            self.assertLess(names.index("RELEASE.json"), names.index("aa_alpha-1.0.0-py3-none-any.whl"))
+
     def test_changed_wheel_build_and_unchanged_wheel_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             fixture = RepoFixture(Path(temp))
@@ -786,7 +798,12 @@ class AssemblyTests(unittest.TestCase):
                 release._canonical_json_bytes(previous_manifest)
             )
             sums = sorted(
-                path for path in previous_dir.iterdir() if path.name != "SHA256SUMS"
+                (
+                    path
+                    for path in previous_dir.iterdir()
+                    if path.name != "SHA256SUMS"
+                ),
+                key=lambda path: path.name,
             )
             (previous_dir / "SHA256SUMS").write_text(
                 "".join(f"{release.sha256_file(path)}  {path.name}\n" for path in sums),

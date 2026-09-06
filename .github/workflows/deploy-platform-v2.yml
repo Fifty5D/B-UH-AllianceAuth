@@ -19,6 +19,76 @@ on:
         description: Exact preflight or deployment confirmation phrase
         required: true
         type: string
+      feature_pr_number:
+        description: Approved feature PR for the normal production path
+        required: false
+        default: ""
+        type: string
+      feature_head_sha:
+        description: Exact approved feature head for the normal production path
+        required: false
+        default: ""
+        type: string
+      source_commit:
+        description: Exact tested main merge for the normal production path
+        required: false
+        default: ""
+        type: string
+      feature_readiness:
+        description: Canonical live-verified feature-readiness attestation
+        required: false
+        default: ""
+        type: string
+      main_validation_run_id:
+        description: Exact approved main Validate PR workflow run
+        required: false
+        default: ""
+        type: string
+      main_validation_run_attempt:
+        description: Exact approved main Validate PR workflow run attempt
+        required: false
+        default: ""
+        type: string
+      manifest_sha256:
+        description: Exact approved immutable release manifest hash
+        required: false
+        default: ""
+        type: string
+      preflight_run_id:
+        description: Approved no-change preflight workflow run
+        required: false
+        default: ""
+        type: string
+      preflight_run_attempt:
+        description: Approved no-change preflight workflow run attempt
+        required: false
+        default: ""
+        type: string
+      preflight_artifact:
+        description: Approved retained no-change preflight artifact name
+        required: false
+        default: ""
+        type: string
+      preflight_artifact_id:
+        description: Approved retained no-change preflight artifact ID
+        required: false
+        default: ""
+        type: string
+      preflight_artifact_digest:
+        description: Approved retained no-change preflight artifact digest
+        required: false
+        default: ""
+        type: string
+      sync_validation_run_id:
+        description: Exact approved synchronization PR Validate PR workflow run
+        required: false
+        default: ""
+        type: string
+      sync_validation_run_attempt:
+        description: Exact approved synchronization PR Validate PR run attempt
+        required: false
+        default: ""
+        type: string
     secrets:
       BUH_DEPLOY_SSH_KEY:
         description: Forced-command Platform v2 deploy identity
@@ -85,27 +155,106 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     environment: production
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
       artifact_name: ${{ steps.artifact.outputs.name }}
       manifest_sha256: ${{ steps.release.outputs.manifest_sha256 }}
     steps:
-      - name: Validate owner, mode, version, and immutable release ref
+      - name: Validate caller, mode, version, and immutable release ref
         env:
           ACTOR: ${{ github.actor }}
           API_URL: ${{ github.api_url }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          EVENT_NAME: ${{ github.event_name }}
+          FEATURE_HEAD_SHA: ${{ inputs.feature_head_sha }}
+          FEATURE_PR_NUMBER: ${{ inputs.feature_pr_number }}
+          FEATURE_READINESS: ${{ inputs.feature_readiness }}
           GITHUB_TOKEN: ${{ github.token }}
+          MAIN_VALIDATION_RUN_ATTEMPT: ${{ inputs.main_validation_run_attempt }}
+          MAIN_VALIDATION_RUN_ID: ${{ inputs.main_validation_run_id }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
           MODE: ${{ inputs.mode }}
           OWNER: ${{ github.repository_owner }}
           PLATFORM_VERSION: ${{ inputs.platform_version }}
+          PREFLIGHT_ARTIFACT: ${{ inputs.preflight_artifact }}
+          PREFLIGHT_ARTIFACT_DIGEST: ${{ inputs.preflight_artifact_digest }}
+          PREFLIGHT_ARTIFACT_ID: ${{ inputs.preflight_artifact_id }}
+          PREFLIGHT_RUN_ATTEMPT: ${{ inputs.preflight_run_attempt }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           REPOSITORY: ${{ github.repository }}
           SELECTED_REF: ${{ github.ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SYNC_VALIDATION_RUN_ATTEMPT: ${{ inputs.sync_validation_run_attempt }}
+          SYNC_VALIDATION_RUN_ID: ${{ inputs.sync_validation_run_id }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
-          [[ "${ACTOR}" == "${OWNER}" ]]
-          [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          fi
+          is_release_actor() {
+            [[ "$1" == "${OWNER}" || (-n "${WORK_ACTOR}" && "$1" == "${WORK_ACTOR}") ]]
+          }
+          case "${EVENT_NAME}:${MODE}" in
+            workflow_run:preflight)
+              is_release_actor "${ACTOR}"
+              is_release_actor "${TRIGGERING_ACTOR}"
+              [[ -z "${FEATURE_PR_NUMBER}" && -z "${FEATURE_HEAD_SHA}" &&
+                 -z "${SOURCE_COMMIT}" && -z "${FEATURE_READINESS}" &&
+                 -z "${MAIN_VALIDATION_RUN_ID}" &&
+                 -z "${MAIN_VALIDATION_RUN_ATTEMPT}" &&
+                 -z "${MANIFEST_SHA256}" &&
+                 -z "${PREFLIGHT_RUN_ID}" && -z "${PREFLIGHT_RUN_ATTEMPT}" &&
+                 -z "${PREFLIGHT_ARTIFACT}" && -z "${PREFLIGHT_ARTIFACT_ID}" &&
+                 -z "${PREFLIGHT_ARTIFACT_DIGEST}" &&
+                 -z "${SYNC_VALIDATION_RUN_ID}" &&
+                 -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
+              ;;
+            pull_request_target:deploy)
+              [[ "${ACTOR}" == "${OWNER}" ]]
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+              [[ "${FEATURE_PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${FEATURE_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+              [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+              [[ -n "${FEATURE_READINESS}" ]]
+              [[ "${MAIN_VALIDATION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${MAIN_VALIDATION_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+              [[ "${PREFLIGHT_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${PREFLIGHT_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${PREFLIGHT_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${PREFLIGHT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+              [[ "${PREFLIGHT_ARTIFACT}" == \
+                 "platform-v2-preflight-${PREFLIGHT_RUN_ID}-${PREFLIGHT_RUN_ATTEMPT}" ]]
+              [[ "${SYNC_VALIDATION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${SYNC_VALIDATION_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+              ;;
+            workflow_dispatch:preflight|workflow_dispatch:deploy)
+              [[ "${ACTOR}" == "${OWNER}" ]]
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+              [[ -z "${FEATURE_PR_NUMBER}" && -z "${FEATURE_HEAD_SHA}" &&
+                 -z "${SOURCE_COMMIT}" && -z "${FEATURE_READINESS}" &&
+                 -z "${MAIN_VALIDATION_RUN_ID}" &&
+                 -z "${MAIN_VALIDATION_RUN_ATTEMPT}" &&
+                 -z "${MANIFEST_SHA256}" &&
+                 -z "${PREFLIGHT_RUN_ID}" && -z "${PREFLIGHT_RUN_ATTEMPT}" &&
+                 -z "${PREFLIGHT_ARTIFACT}" && -z "${PREFLIGHT_ARTIFACT_ID}" &&
+                 -z "${PREFLIGHT_ARTIFACT_DIGEST}" &&
+                 -z "${SYNC_VALIDATION_RUN_ID}" &&
+                 -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
+              ;;
+            *)
+              echo "This event is not authorized for the requested operation." >&2
+              exit 64
+              ;;
+          esac
           [[ "${SELECTED_REF}" == "refs/heads/main" ]]
           [[ "${PLATFORM_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
@@ -295,6 +444,169 @@ jobs:
                           add_bytes(f"release/{path.name}", path.read_bytes())
           if archive_path.stat().st_size > 256 * 1024 * 1024:
               raise SystemExit("Deployment archive exceeds the receiver maximum")
+          PY
+
+      - name: Reauthorize the queued production operation
+        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREFLIGHT_ARTIFACT: ${{ inputs.preflight_artifact }}
+          PREFLIGHT_ARTIFACT_DIGEST: ${{ inputs.preflight_artifact_digest }}
+          PREFLIGHT_ARTIFACT_ID: ${{ inputs.preflight_artifact_id }}
+          PREFLIGHT_RUN_ATTEMPT: ${{ inputs.preflight_run_attempt }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/platform_approval.py authorize \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${GITHUB_EVENT_PATH}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-deploy-boundary-initial.json >/dev/null
+          jq -e \
+            --arg artifact "${PREFLIGHT_ARTIFACT}" \
+            --arg digest "${PREFLIGHT_ARTIFACT_DIGEST}" \
+            --argjson artifact_id "${PREFLIGHT_ARTIFACT_ID}" \
+            --argjson run_attempt "${PREFLIGHT_RUN_ATTEMPT}" \
+            --argjson run_id "${PREFLIGHT_RUN_ID}" '
+              .preflight_artifact == $artifact and
+              .preflight_artifact_digest == $digest and
+              .preflight_artifact_id == $artifact_id and
+              .preflight_run_attempt == $run_attempt and
+              .preflight_run_id == $run_id
+            ' build/platform-deploy-boundary-initial.json >/dev/null
+
+      - name: Download the still-retained production preflight artifact
+        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ inputs.preflight_artifact_id }}
+          path: build/production-boundary-preflight
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.preflight_run_id }}
+          merge-multiple: true
+
+      - name: Reverify live feature readiness at the production boundary
+        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        env:
+          EXPECTED_FEATURE_READINESS: ${{ inputs.feature_readiness }}
+          FEATURE_HEAD_SHA: ${{ inputs.feature_head_sha }}
+          FEATURE_PR_NUMBER: ${{ inputs.feature_pr_number }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_VALIDATION_RUN_ATTEMPT: ${{ inputs.main_validation_run_attempt }}
+          MAIN_VALIDATION_RUN_ID: ${{ inputs.main_validation_run_id }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          PLATFORM_VERSION: ${{ inputs.platform_version }}
+          PREFLIGHT_ARTIFACT: ${{ inputs.preflight_artifact }}
+          PREFLIGHT_ARTIFACT_DIGEST: ${{ inputs.preflight_artifact_digest }}
+          PREFLIGHT_ARTIFACT_ID: ${{ inputs.preflight_artifact_id }}
+          PREFLIGHT_RUN_ATTEMPT: ${{ inputs.preflight_run_attempt }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RELEASE_MANIFEST_SHA256: ${{ steps.release.outputs.manifest_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SYNC_VALIDATION_RUN_ATTEMPT: ${{ inputs.sync_validation_run_attempt }}
+          SYNC_VALIDATION_RUN_ID: ${{ inputs.sync_validation_run_id }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/platform_approval.py verify-artifact \
+            --report build/platform-deploy-boundary-initial.json \
+            --artifact-dir build/production-boundary-preflight >/dev/null
+          [[ "$(git rev-parse HEAD^)" == "${SOURCE_COMMIT}" ]]
+          [[ "${MANIFEST_SHA256}" == "${RELEASE_MANIFEST_SHA256}" ]]
+          expected="${RUNNER_TEMP}/approved-feature-readiness.json"
+          current="${RUNNER_TEMP}/current-feature-readiness.json"
+          EXPECTED_PATH="${expected}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ["EXPECTED_FEATURE_READINESS"]
+          value = json.loads(raw)
+          canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+          if raw != canonical:
+              raise SystemExit("Approved feature readiness is not canonical")
+          Path(os.environ["EXPECTED_PATH"]).write_text(
+              canonical + "\n", encoding="ascii"
+          )
+          PY
+          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
+          fi
+          first_introduction=()
+          if [[ "${FEATURE_PR_NUMBER}" == "44" ]]; then
+            first_introduction=(--allow-first-introduction --first-introduction-pr 44)
+          fi
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request "${FEATURE_PR_NUMBER}" \
+            --feature-head "${FEATURE_HEAD_SHA}" \
+            --merge-source-commit "${SOURCE_COMMIT}" \
+            "${allowed_mergers[@]}" \
+            "${first_introduction[@]}" \
+            --api-url "${GITHUB_API_URL}" \
+            --output "${current}" >/dev/null
+          cmp --silent "${expected}" "${current}"
+          # This is deliberately the final remote read before SSH materialization.
+          # It closes concurrency-queue, artifact deletion/expiry, and approval
+          # replacement races after the potentially slower readiness verification.
+          python3 ops/release/platform_approval.py authorize \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${GITHUB_EVENT_PATH}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-deploy-boundary-final.json >/dev/null
+          cmp --silent \
+            build/platform-deploy-boundary-initial.json \
+            build/platform-deploy-boundary-final.json
+          APPROVAL_PATH=build/platform-deploy-boundary-final.json \
+          CURRENT_PATH="${current}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          approval = json.loads(Path(os.environ["APPROVAL_PATH"]).read_text(encoding="ascii"))
+          current = json.loads(Path(os.environ["CURRENT_PATH"]).read_text(encoding="ascii"))
+          expected = {
+              "feature_head_sha": os.environ["FEATURE_HEAD_SHA"],
+              "feature_pr_number": int(os.environ["FEATURE_PR_NUMBER"]),
+              "main_validation_run_attempt": int(
+                  os.environ["MAIN_VALIDATION_RUN_ATTEMPT"]
+              ),
+              "main_validation_run_id": int(os.environ["MAIN_VALIDATION_RUN_ID"]),
+              "manifest_sha256": os.environ["MANIFEST_SHA256"],
+              "platform_version": os.environ["PLATFORM_VERSION"],
+              "preflight_artifact": os.environ["PREFLIGHT_ARTIFACT"],
+              "preflight_artifact_digest": os.environ["PREFLIGHT_ARTIFACT_DIGEST"],
+              "preflight_artifact_id": int(os.environ["PREFLIGHT_ARTIFACT_ID"]),
+              "preflight_run_attempt": int(os.environ["PREFLIGHT_RUN_ATTEMPT"]),
+              "preflight_run_id": int(os.environ["PREFLIGHT_RUN_ID"]),
+              "release_commit": os.environ["RELEASE_COMMIT"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "sync_validation_run_attempt": int(
+                  os.environ["SYNC_VALIDATION_RUN_ATTEMPT"]
+              ),
+              "sync_validation_run_id": int(os.environ["SYNC_VALIDATION_RUN_ID"]),
+          }
+          for key, value in expected.items():
+              if approval.get(key) != value:
+                  raise SystemExit(f"Queued production approval changed {key}")
+          if approval.get("feature_readiness") != current:
+              raise SystemExit("Queued production approval changed feature readiness")
           PY
 
       - name: Configure guarded deploy and observer SSH identities

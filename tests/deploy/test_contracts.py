@@ -67,6 +67,7 @@ class ReceiverConfigTests(unittest.TestCase):
     def test_canonical_example_loads_with_expected_production_boundary(self):
         path = ROOT / "ops/deploy/receiver-config.example.json"
         config = contracts.ReceiverConfig.load(path)
+        self.assertEqual(config.schema_version, 2)
         self.assertEqual(config.repository, "Fifty5D/B-UH-AllianceAuth")
         self.assertEqual(config.app_dir, Path("/opt/aa-docker"))
         self.assertEqual(config.legacy_platform_version, "0.3.3")
@@ -74,6 +75,14 @@ class ReceiverConfigTests(unittest.TestCase):
         self.assertEqual(config.database_service, "auth_mysql")
         self.assertEqual(config.redis_service, "redis")
         self.assertEqual(config.proxy_service, "nginx")
+        self.assertEqual(config.beat_service, "allianceauth_beat")
+        self.assertEqual(config.stabilization_seconds, 300)
+        self.assertEqual(config.stabilization_interval_seconds, 15)
+        self.assertEqual(config.fatal_log_allowlist, ())
+        self.assertEqual(
+            config.nginx_upstream_container_file,
+            "/etc/nginx/buh-platform-v2/upstream.conf",
+        )
         self.assertEqual(
             config.auth_services,
             (
@@ -114,6 +123,169 @@ class ReceiverConfigTests(unittest.TestCase):
             source["smoke_checks"][0]["url"] = "http://auth.b-uh.com/"
             write_canonical(path, source)
             with self.assertRaisesRegex(contracts.DeploymentError, "HTTPS"):
+                contracts.ReceiverConfig.load(path)
+
+    def test_smoke_statuses_are_fixed_per_route_and_never_accept_5xx(self):
+        source = json.loads(
+            (ROOT / "ops/deploy/receiver-config.example.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            all_502 = json.loads(json.dumps(source))
+            for check in all_502["smoke_checks"]:
+                check["statuses"] = [502]
+            write_canonical(path, all_502)
+            with self.assertRaisesRegex(contracts.DeploymentError, "invalid statuses"):
+                contracts.ReceiverConfig.load(path)
+
+            narrowed = json.loads(json.dumps(source))
+            narrowed["smoke_checks"][0]["statuses"] = [200]
+            write_canonical(path, narrowed)
+            with self.assertRaisesRegex(contracts.DeploymentError, "fixed status policy"):
+                contracts.ReceiverConfig.load(path)
+
+    def test_smoke_routes_reject_probe_queries_and_noncanonical_origin_aliases(self):
+        source = json.loads(
+            (ROOT / "ops/deploy/receiver-config.example.json").read_text()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            for url in (
+                "https://auth.b-uh.com/?probe=candidate",
+                "https://auth.b-uh.com:443/",
+                "https://AUTH.B-UH.COM/",
+                "https://auth.b-uh.com//",
+                "https://auth.b-uh.com/%2F",
+            ):
+                case = json.loads(json.dumps(source))
+                case["smoke_checks"][0]["url"] = url
+                write_canonical(path, case)
+                with self.subTest(url=url), self.assertRaisesRegex(
+                    contracts.DeploymentError, "production HTTPS origin"
+                ):
+                    contracts.ReceiverConfig.load(path)
+
+    def test_scheduler_health_and_log_contracts_fail_closed(self):
+        source = json.loads(
+            (ROOT / "ops/deploy/receiver-config.example.json").read_text()
+        )
+        cases = (
+            ("beat_service", "allianceauth_worker", "must be distinct"),
+            ("stabilization_seconds", 299, "outside its safe range"),
+            (
+                "fatal_log_allowlist",
+                ["component=worker|exception=ProbeError|message=unsafe\nprobe message here"],
+                "structured signatures",
+            ),
+            (
+                "fatal_log_allowlist",
+                [
+                    "component=discord|exception=ForbiddenError|"
+                    "message=HTTP 403 missing permissions code 50013"
+                ],
+                "broad or forbidden",
+            ),
+            (
+                "fatal_log_allowlist",
+                [
+                    "component=structure_ops|exception=ForbiddenError|"
+                    "message=403 Forbidden (error code: 50013): Missing Permissions"
+                ],
+                "broad or forbidden",
+            ),
+            (
+                "fatal_log_allowlist",
+                [
+                    "component=worker|exception=Error|"
+                    "message=expected synthetic readiness probe message"
+                ],
+                "broad or forbidden",
+            ),
+            ("required_celery_queues", ["bad queue"], "safe unique strings"),
+            ("required_celery_tasks", [], "safe unique strings"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "receiver.json"
+                changed = dict(source)
+                changed[field] = value
+                write_canonical(path, changed)
+                with self.assertRaisesRegex(contracts.DeploymentError, message):
+                    contracts.ReceiverConfig.load(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            exact = dict(source)
+            exact["fatal_log_allowlist"] = [
+                "component=structure_ops|exception=Forbidden|"
+                "message=403 Forbidden (error code: 50013): Missing Permissions"
+            ]
+            write_canonical(path, exact)
+            self.assertEqual(
+                contracts.ReceiverConfig.load(path).fatal_log_allowlist,
+                tuple(exact["fatal_log_allowlist"]),
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            missing_route = dict(source)
+            missing_route["smoke_checks"] = source["smoke_checks"][:-1]
+            write_canonical(path, missing_route)
+            with self.assertRaisesRegex(contracts.DeploymentError, "uniquely cover"):
+                contracts.ReceiverConfig.load(path)
+
+    def test_archived_v1_config_loads_with_strict_safe_defaults(self):
+        source = json.loads(
+            (ROOT / "ops/deploy/receiver-config.example.json").read_text()
+        )
+        v1_schema = json.loads(
+            (ROOT / "ops/deploy/receiver-config-v1.schema.json").read_text()
+        )
+        old = {
+            key: value
+            for key, value in source.items()
+            if key in v1_schema["properties"]
+        }
+        old["schema_version"] = 1
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            write_canonical(path, old)
+            config = contracts.ReceiverConfig.load(path)
+        self.assertEqual(config.schema_version, 1)
+        self.assertEqual(config.beat_service, "allianceauth_beat")
+        self.assertEqual(config.stabilization_seconds, 300)
+        self.assertEqual(config.fatal_log_allowlist, ())
+        self.assertEqual(
+            {check.url for check in config.smoke_checks},
+            {
+                "https://auth.b-uh.com/",
+                "https://auth.b-uh.com/account/login/",
+                "https://auth.b-uh.com/moon-tax/",
+                "https://auth.b-uh.com/structure-operations/",
+                "https://auth.b-uh.com/mining-analytics/",
+            },
+        )
+
+    def test_schema_v1_rejects_duplicate_route_paths(self):
+        source = json.loads(
+            (ROOT / "ops/deploy/receiver-config.example.json").read_text()
+        )
+        v1_schema = json.loads(
+            (ROOT / "ops/deploy/receiver-config-v1.schema.json").read_text()
+        )
+        old = {
+            key: value
+            for key, value in source.items()
+            if key in v1_schema["properties"]
+        }
+        old["schema_version"] = 1
+        old["smoke_checks"].append(
+            {"statuses": [200], "url": "https://auth.b-uh.com/"}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receiver.json"
+            write_canonical(path, old)
+            with self.assertRaisesRegex(contracts.DeploymentError, "unique route"):
                 contracts.ReceiverConfig.load(path)
 
 
@@ -190,6 +362,35 @@ class ArchiveTests(unittest.TestCase):
                         ),
                         Path(temporary) / "large",
                     )
+
+
+class RetainedTextRedactionTests(unittest.TestCase):
+    def test_every_supported_credential_shape_is_redacted_to_a_fixed_point(self):
+        source = (
+            '{"access_token":"json-secret"} '
+            "https://example.invalid/path?token=query-secret "
+            "Authorization: Bearer bearer-secret "
+            "Cookie: sessionid=cookie-secret; csrftoken=csrf-secret "
+            "Set-Cookie: refresh_token=refresh-secret; "
+            "Bot abcdefghijklmnop "
+            "https://discord.com/api/webhooks/123/webhook-secret "
+            "eyJabcdefghijk.abcdefghijk.abcdefghijk"
+        )
+        redacted = contracts.redact_sensitive_text(source)
+        for secret in (
+            "json-secret",
+            "query-secret",
+            "bearer-secret",
+            "cookie-secret",
+            "csrf-secret",
+            "refresh-secret",
+            "abcdefghijklmnop",
+            "webhook-secret",
+            "eyJabcdefghijk",
+        ):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("<redacted>", redacted)
+        self.assertEqual(contracts.redact_sensitive_text(redacted), redacted)
 
 
 class BundleTests(unittest.TestCase):

@@ -2,10 +2,12 @@
 
 ## Status and boundary
 
-This tree is the candidate source-first platform. It does **not** replace the
-production deployment yet. Production remains on the checked, manually approved
-Moon Tax `v0.3.x` bundles and their forced-command receiver until every
-Platform v2 promotion gate below passes.
+Platform v2 is the current production deployment generation and this tree is its
+source of truth. The checked Moon Tax `v0.3.x` bundles, legacy forced-command
+receiver, and rollback artifacts remain available until the new process has
+completed a successful production deployment and separately approved rollback
+drill. A receiver or infrastructure change still requires its one-time reviewed
+host upgrade before that change can be used.
 
 The repository owns B-UH application source and platform automation. It does not
 own AllianceAuth upstream source, production data, credentials, Docker volumes,
@@ -24,11 +26,12 @@ or unredacted logs.
   Append-only Validate PR checks and exact release-ref/main parity fail closed
   before any later release. A repository ruleset grants only the reviewed
   publisher permission to create release refs and forbids their update or
-  deletion. Validate PR and a no-change production preflight run automatically.
-  ChatGPT presents their exact retained evidence and waits for one explicit
-  repository-owner approval. It places the exact approval marker in the merge
-  commit message and performs one merge action; squash and rebase are not valid
-  synchronization.
+  deletion. After a qualified feature PR is merged, Validate PR runs against the
+  exact `main` commit; its successful push run prepares one release and starts a
+  no-change production preflight automatically. ChatGPT presents their exact
+  retained evidence and waits for one explicit repository-owner approval. It
+  places the exact approval marker in the merge commit message and performs one
+  merge action; squash and rebase are not valid synchronization.
 - Publication and preflight never change production. Only a sync PR carrying
   the matching GitHub Actions readiness marker and merge commit carrying its
   exact ChatGPT approval marker can start guarded production deployment.
@@ -70,8 +73,10 @@ preview run.
   integration lane.
 - Pull requests, main pushes, merge queues, and the weekly compatibility run use
   the same reusable, fail-closed source-test workflow.
-- Major UI work can opt into an expiring synthetic screenshot preview; ordinary
-  changes do not pay that cost.
+- UI templates, JavaScript (including JSX/TypeScript), CSS, shared themes, browser
+  tests, and preview/readiness infrastructure automatically run an expiring
+  synthetic screenshot preview. The `ui-preview` label remains a manual override
+  for changes outside the automatic path policy.
 - The test network is internal and uses synthetic identities and test-only
   credentials.
 - Compatibility and application registries use `schema_version = 1`.
@@ -114,10 +119,12 @@ preview run.
   candidate checks, verified backup restoration, atomic deployment journals, and
   rollback-aware container replacement.
 
-These pieces are foundations, not proof that Platform v2 is production ready.
-A digest-pinned production runtime image, one-time receiver bootstrap, a
-successful no-change host preflight, and an approved full production/rollback
-cycle remain promotion gates.
+These controls define the current generation; repository code alone is never
+proof that a particular release is ready. Each release still needs its exact
+required checks, applicable preview, immutable build, no-change host preflight,
+and one recorded production approval. Receiver changes additionally need the
+reviewed one-time upgrade, and the legacy path remains until a successful
+production deployment and approved rollback drill are recorded.
 
 ## Compatibility and upgrade policy
 

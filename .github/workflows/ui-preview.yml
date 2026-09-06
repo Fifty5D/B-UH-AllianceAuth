@@ -1,7 +1,13 @@
 name: Preview UI
+run-name: Preview UI / PR #${{ github.event.pull_request.number || inputs.pull_request }} / ${{ github.event.pull_request.head.sha || 'manual' }} / ${{ github.event.action || 'workflow_dispatch' }} / ${{ github.event.label.name || 'none' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Open pull request number to preview (manual evidence is diagnostic only)
+        required: true
+        type: string
   pull_request:
     types: [opened, labeled, synchronize, reopened]
 
@@ -20,7 +26,7 @@ defaults:
 jobs:
   preview:
     name: Fake-data desktop and mobile preview
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'ui-preview' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -29,39 +35,95 @@ jobs:
       BUH_TEST_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}-preview
     permissions:
       contents: read
+      pull-requests: read
     steps:
+      - name: Resolve the exact open pull-request head
+        id: target
+        env:
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR: ${{ inputs.pull_request }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            pr="${EVENT_PR}"
+          else
+            pr="${INPUT_PR}"
+          fi
+          [[ "${pr}" =~ ^[1-9][0-9]*$ ]]
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}")"
+          [[ "$(jq -r '.state' <<<"${pull}")" == "open" ]]
+          head="$(jq -r '.head.sha' <<<"${pull}")"
+          head_repository="$(jq -r '.head.repo.full_name' <<<"${pull}")"
+          changed_files="$(jq -r '.changed_files' <<<"${pull}")"
+          [[ "${head}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${head_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "${changed_files}" =~ ^[0-9]+$ ]]
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            [[ "${head}" == "${EVENT_HEAD}" ]]
+          fi
+          printf 'pr=%s\nhead_sha=%s\nhead_repository=%s\nchanged_files=%s\n' \
+            "${pr}" "${head}" "${head_repository}" "${changed_files}" \
+            >>"${GITHUB_OUTPUT}"
+
       - name: Check out the selected source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ steps.target.outputs.head_sha }}
           persist-credentials: false
+
+      - name: Verify the exact checked-out head
+        env:
+          PREVIEW_REF: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${PREVIEW_REF}" ]]
 
       - name: Detect preview-relevant changes
         id: relevance
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.target.outputs.pr }}
           MANUAL_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'ui-preview') }}
           EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_CHANGED_FILES: ${{ steps.target.outputs.changed_files }}
         run: |
           set -Eeuo pipefail
+          [[ "${EXPECTED_CHANGED_FILES}" =~ ^[0-9]+$ ]]
+          if (( EXPECTED_CHANGED_FILES >= 3000 )); then
+            echo "Changed-file evidence reaches GitHub's 3,000-file enumeration limit." >&2
+            exit 1
+          fi
+          files="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100")"
+          jq -e '
+            type == "array" and
+            all(.[]; type == "array") and
+            all(.[][]; type == "object" and (.filename | type == "string"))
+          ' <<<"${files}" >/dev/null
+          actual_changed_files="$(jq '[.[][]] | length' <<<"${files}")"
+          [[ "${actual_changed_files}" == "${EXPECTED_CHANGED_FILES}" ]]
           relevant=false
           if [[ "${EVENT_NAME}" == workflow_dispatch || "${MANUAL_OVERRIDE}" == true ]]; then
             relevant=true
-          else
-            files="$(gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
-              --jq '.[].filename')"
-            if grep -Eiq '(^|/)(templates?|static|themes?|browser)(/|$)|\.(css|scss|sass|less|js|mjs|cjs|ts|tsx|html)$' <<<"${files}"; then
-              relevant=true
-            fi
+          elif jq -e '
+            any(.[][];
+              .filename | test(
+                "(^|/)(templates?|static|themes?|browser)(/|$)|^\\.github/workflows/(ui-preview|invalidate-readiness)\\.ya?ml$|^ops/readiness\\.py$|^platform/test(auth|env)/|^tests/platform/test_(readiness|configuration)\\.py$|\\.(css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|html)$";
+                "i"
+              )
+            )
+          ' <<<"${files}" >/dev/null; then
+            relevant=true
           fi
           printf 'relevant=%s\n' "${relevant}" >>"${GITHUB_OUTPUT}"
 
       - name: Read the reviewed test-image contract
         if: steps.relevance.outputs.relevant == 'true'
         env:
-          PREVIEW_CACHE_SCOPE: ui-preview-${{ github.event.pull_request.number || github.run_id }}
+          PREVIEW_CACHE_SCOPE: ui-preview-${{ steps.target.outputs.pr }}
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
@@ -108,29 +170,9 @@ jobs:
 
       - name: Prepare the synthetic artifact directory
         if: steps.relevance.outputs.relevant == 'true'
-        env:
-          PREVIEW_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-          PREVIEW_EVENT: ${{ github.event_name }}
-          PREVIEW_PR: ${{ github.event.pull_request.number || 0 }}
         run: |
           set -Eeuo pipefail
           mkdir -p artifacts/ui-preview/screenshots artifacts/ui-preview/playwright-report
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          manifest = {
-              "schema_version": 1,
-              "pr": int(os.environ["PREVIEW_PR"]),
-              "head_sha": os.environ["PREVIEW_REF"],
-              "event": os.environ["PREVIEW_EVENT"],
-              "data": "synthetic-only",
-              "network": "compose-internal-only",
-          }
-          Path("artifacts/ui-preview/manifest.json").write_text(
-              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
-              encoding="ascii",
-          )
-          PY
           : >artifacts/ui-preview/run.log
 
       - name: Set up Docker Buildx
@@ -172,10 +214,10 @@ jobs:
             if docker container inspect "${PREVIEW_CONTAINER}" >/dev/null 2>&1; then
               docker cp \
                 "${PREVIEW_CONTAINER}:/browser/preview-output/." \
-                "${REPORT_DIR}/screenshots/" 2>>"${REPORT_DIR}/run.log" || true
+                "${REPORT_DIR}/screenshots/" 2>>"${REPORT_DIR}/run.log"
               docker cp \
                 "${PREVIEW_CONTAINER}:/browser/playwright-report/." \
-                "${REPORT_DIR}/playwright-report/" 2>>"${REPORT_DIR}/run.log" || true
+                "${REPORT_DIR}/playwright-report/" 2>>"${REPORT_DIR}/run.log"
               docker rm --force "${PREVIEW_CONTAINER}" \
                 >>"${REPORT_DIR}/run.log" 2>&1 || true
             fi
@@ -200,7 +242,9 @@ jobs:
           run_logged "${COMPOSE[@]}" run --name "${PREVIEW_CONTAINER}" \
             -e BUH_PREVIEW_OUTPUT_DIR=/browser/preview-output \
             -e PLAYWRIGHT_HTML_OUTPUT_DIR=/browser/playwright-report \
-            browser npx --no-install playwright test preview.spec.ts
+            browser npx --no-install playwright test \
+              preview.spec.ts console-preview.spec.ts \
+              moon-tax.spec.ts console-theme.spec.ts
 
       - name: Enforce teardown even after cancellation or setup failure
         if: ${{ always() && steps.relevance.outputs.relevant == 'true' }}
@@ -216,17 +260,33 @@ jobs:
             down --volumes --remove-orphans \
             >>artifacts/ui-preview/teardown.log 2>&1
 
-      - name: Reject unsafe preview artifact entries
+      - name: Verify exact-head preview evidence and write its manifest
         id: artifact_guard
-        if: ${{ always() && steps.relevance.outputs.relevant == 'true' }}
+        if: steps.relevance.outputs.relevant == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_ARTIFACT: ui-preview-pr-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          PREVIEW_EVENT: ${{ github.event_name }}
+          PREVIEW_HEAD_REPOSITORY: ${{ steps.target.outputs.head_repository }}
+          PREVIEW_PR: ${{ steps.target.outputs.pr }}
+          PREVIEW_REF: ${{ steps.target.outputs.head_sha }}
+          PREVIEW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PREVIEW_RUN_ID: ${{ github.run_id }}
         run: |
           set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${PREVIEW_REF}" ]]
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PREVIEW_PR}" --jq '.head.sha')"
+          [[ "${current}" == "${PREVIEW_REF}" ]]
           python3 - <<'PY'
+          import json
+          import os
           import stat
           from pathlib import Path
+          from ops.readiness import _verify_png
 
           root = Path("artifacts/ui-preview")
           total = 0
+          inventory = []
           for path in root.rglob("*"):
               mode = path.lstat().st_mode
               if stat.S_ISLNK(mode):
@@ -239,17 +299,66 @@ jobs:
               if size > 64 * 1024 * 1024:
                   raise SystemExit(f"Artifact file exceeds 64 MiB: {path}")
               total += size
+              inventory.append(path.relative_to(root).as_posix())
           if total > 256 * 1024 * 1024:
               raise SystemExit("Preview artifact tree exceeds 256 MiB")
+          screenshots = sorted(
+              path for path in inventory
+              if path.startswith("screenshots/") and path.endswith(".png")
+          )
+          if not any(path.startswith("screenshots/desktop/") for path in screenshots):
+              raise SystemExit("Preview artifact lacks desktop screenshots")
+          if not any(path.startswith("screenshots/mobile/") for path in screenshots):
+              raise SystemExit("Preview artifact lacks mobile screenshots")
+          for theme in ("darkly", "flatly", "materia", "bootstrap", "bootstrap-dark"):
+              for viewport in ("desktop", "mobile"):
+                  prefix = f"screenshots/themes/{theme}/{viewport}/"
+                  if not any(path.startswith(prefix) for path in screenshots):
+                      raise SystemExit(f"Preview artifact lacks {theme} {viewport} screenshots")
+          for relative in screenshots:
+              _verify_png((root / relative).read_bytes(), relative)
+          report = "playwright-report/index.html"
+          if report not in inventory:
+              raise SystemExit("Preview artifact lacks the Playwright HTML report")
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "pr": int(os.environ["PREVIEW_PR"]),
+              "head_sha": os.environ["PREVIEW_REF"],
+              "head_repository": os.environ["PREVIEW_HEAD_REPOSITORY"],
+              "event": os.environ["PREVIEW_EVENT"],
+              "workflow": ".github/workflows/ui-preview.yml",
+              "run_id": int(os.environ["PREVIEW_RUN_ID"]),
+              "run_attempt": int(os.environ["PREVIEW_RUN_ATTEMPT"]),
+              "evidence_artifact": os.environ["PREVIEW_ARTIFACT"],
+              "data": "synthetic-only",
+              "network": "compose-internal-only",
+              "screenshots": screenshots,
+              "playwright_report": report,
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="ascii",
+          )
           PY
 
       - name: Upload the short-lived synthetic preview
-        if: ${{ always() && steps.artifact_guard.outcome == 'success' }}
+        if: ${{ success() && steps.artifact_guard.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ui-preview-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_attempt }}
+          name: ui-preview-pr-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ui-preview/
           if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload the bounded provenance manifest
+        if: ${{ success() && steps.artifact_guard.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-preview-pr-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}-manifest
+          path: artifacts/ui-preview/manifest.json
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 3
 
       - name: Record that no preview is applicable
