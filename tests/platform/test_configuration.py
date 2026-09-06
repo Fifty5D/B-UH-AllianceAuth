@@ -524,6 +524,57 @@ class PlatformConfigurationContracts(TestCase):
                         )
         self.assertEqual(calls, 5)
 
+    def test_local_reusable_workflow_callers_cover_callee_job_permissions(self):
+        workflows = {
+            path.name: _load_workflow(path)
+            for path in WORKFLOWS.glob("*.yml")
+        }
+        permission_rank = {"none": 0, "read": 1, "write": 2}
+        calls = 0
+        for caller_name, caller in workflows.items():
+            for job_name, job in caller.get("jobs", {}).items():
+                target = job.get("uses")
+                if not isinstance(target, str) or not target.startswith(
+                    "./.github/workflows/"
+                ):
+                    continue
+                calls += 1
+                callee_name = Path(target).name
+                callee = workflows[callee_name]
+                caller_permissions = job.get("permissions", {})
+                callee_permissions = callee.get("permissions", {})
+                with self.subTest(caller=caller_name, job=job_name):
+                    self.assertIsInstance(caller_permissions, dict)
+                    self.assertIsInstance(callee_permissions, dict)
+                for called_job_name, called_job in callee.get("jobs", {}).items():
+                    required_permissions = called_job.get(
+                        "permissions", callee_permissions
+                    )
+                    with self.subTest(
+                        caller=caller_name,
+                        job=job_name,
+                        callee=callee_name,
+                        called_job=called_job_name,
+                    ):
+                        self.assertIsInstance(required_permissions, dict)
+                    for permission, required in required_permissions.items():
+                        granted = caller_permissions.get(permission, "none")
+                        with self.subTest(
+                            caller=caller_name,
+                            job=job_name,
+                            callee=callee_name,
+                            called_job=called_job_name,
+                            permission=permission,
+                        ):
+                            self.assertIn(required, permission_rank)
+                            self.assertIn(granted, permission_rank)
+                            self.assertGreaterEqual(
+                                permission_rank[granted],
+                                permission_rank[required],
+                                "caller permission caps the called workflow job",
+                            )
+        self.assertEqual(calls, 5)
+
     def test_supply_chain_python_setup_uses_configuration_output(self):
         workflow = _load_workflow(WORKFLOWS / "source-supply-chain.yml")
         configuration = workflow["jobs"]["configuration"]
