@@ -151,3 +151,30 @@ window.
 
 Legacy v1 remains available until a complete Platform v2 production cycle and a
 separately approved rollback drill have succeeded.
+
+## Reviewed one-time receiver upgrade
+
+Receiver changes do not ride an application release. After this PR is reviewed,
+Anthony must use a clean checkout of its exact commit on the VPS and run the
+root-only installer; never run it from a floating branch or archive with local
+changes. The installer verifies that every installed source is tracked, records
+the exact commit and hashes, validates configuration, and preserves the legacy
+receiver and both SSH forced-command identities. Before activation, run the
+receiver/deployment suite and make a root-only backup of
+`/usr/local/lib/buh-platform-v2`, `/usr/local/sbin/buh-platform-v2-receiver`,
+`/usr/local/sbin/buh-deploy-dispatch`, `/etc/buh-platform-v2`, and the v2 sudoers
+file. Install into a temporary sibling path and rename it into place; if either
+installation or the exact-release no-change preflight fails, restore the backup
+before leaving the maintenance session.
+
+From Windows PowerShell, the one-time command is (replace the two placeholders
+only after review; PowerShell history must not contain a token or key):
+
+```powershell
+ssh -T buh-vps "sudo /opt/buh-source/ops/deploy/upgrade-receiver.sh '<REVIEWED_40_HEX_SHA>' /etc/buh-platform-v2/receiver.json /usr/local/sbin/buh-moon-tax-platform-remote '<SIGNED_PREFLIGHT_REQUEST>'"
+```
+
+`<SIGNED_PREFLIGHT_REQUEST>` is a root-readable local path on the VPS, not its
+contents. The helper must never be run by CI and must never print `.env`, request
+payloads, credentials, database data, or raw logs. This operation upgrades
+receiver infrastructure only; it does not deploy an application release.

@@ -1,4 +1,4 @@
-name: Deploy ChatGPT-approved platform release
+name: Deploy Production
 
 on:
   pull_request_target:

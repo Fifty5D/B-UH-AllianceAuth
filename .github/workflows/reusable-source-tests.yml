@@ -224,7 +224,12 @@ jobs:
           set -Eeuo pipefail
           {
             bash platform/testenv/run-fast.sh
+            bash tests/test-observer-guards.sh
+            bash tests/test-deployer-guards.sh
+            python3 tests/test-token-rotation.py
             python -m unittest discover -s tests/release -p 'test_*.py'
+            python -m unittest discover -s tests/deploy -p 'test_*.py'
+            python -m unittest discover -s tests/platform -p 'test_*.py'
           } 2>&1 | tee artifacts/fast.log
 
       - name: Upload fast-lane failure report
@@ -521,7 +526,7 @@ jobs:
           retention-days: 7
 
   required:
-    name: Required source checks
+    name: Authoritative validation
     if: always()
     needs: [configuration, release_ledger, fast, integration, upgrade, browser]
     runs-on: ubuntu-24.04

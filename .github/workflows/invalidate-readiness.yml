@@ -1,0 +1,38 @@
+name: Invalidate stale readiness
+
+on:
+  pull_request_target:
+    types: [synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  invalidate:
+    name: Remove readiness from a changed head
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Ensure workflow labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh label create ready-for-work --repo "${GITHUB_REPOSITORY}" --color 1D76DB --force
+          gh label create needs-codex --repo "${GITHUB_REPOSITORY}" --color D93F0B --force
+          gh label create ui-preview --repo "${GITHUB_REPOSITORY}" --color 5319E7 --force
+
+      - name: Remove ready-for-work and mark for Codex
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+              --jq '.[].name' | grep -Fxq ready-for-work; then
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/ready-for-work" --silent
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" \
+            --field 'labels[]=needs-codex' --silent

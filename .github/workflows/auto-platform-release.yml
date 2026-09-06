@@ -1,8 +1,8 @@
-name: Automatic platform release
+name: Prepare Release
 
 on:
   workflow_run:
-    workflows: [Source CI]
+    workflows: [Validate PR]
     types: [completed]
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
       release_needed: ${{ steps.fragments.outputs.release_needed }}
       source_commit: ${{ steps.event.outputs.source_commit }}
     steps:
-      - name: Validate the trusted Source CI completion
+      - name: Validate the trusted Validate PR completion
         id: event
         env:
           ACTOR: ${{ github.actor }}
@@ -51,7 +51,7 @@ jobs:
           [[ "${ACTOR}" == "${OWNER}" ]]
           [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
           [[ "${RUN_ATTEMPT}" == "1" ]]
-          [[ "${WORKFLOW_NAME}" == "Source CI" ]]
+          [[ "${WORKFLOW_NAME}" == "Validate PR" ]]
           [[ "${WORKFLOW_PATH%%@*}" == ".github/workflows/source-ci.yml" ]]
           [[ "${STATUS}" == "completed" && "${CONCLUSION}" == "success" ]]
           [[ "${EVENT}" == "push" && "${HEAD_BRANCH}" == "main" ]]
@@ -62,7 +62,7 @@ jobs:
           # CI completion will collect every still-unconsumed change fragment.
           if [[ "${CURRENT_MAIN_SHA}" != "${SOURCE_COMMIT}" ]]; then
             echo "release_needed=false" >>"${GITHUB_OUTPUT}"
-            echo "main advanced; its newer Source CI run owns release automation." >>"${GITHUB_STEP_SUMMARY}"
+            echo "main advanced; its newer Validate PR run owns release automation." >>"${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Check out the exact tested source

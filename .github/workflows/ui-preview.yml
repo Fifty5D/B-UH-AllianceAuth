@@ -1,12 +1,13 @@
-name: Temporary synthetic UI preview
+name: Preview UI
 
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [opened, labeled, synchronize, reopened]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ui-preview-${{ github.event.pull_request.number || github.ref }}
@@ -19,9 +20,7 @@ defaults:
 jobs:
   preview:
     name: Fake-data desktop and mobile preview
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ui-preview')
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -34,9 +33,33 @@ jobs:
       - name: Check out the selected source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Detect preview-relevant changes
+        id: relevance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MANUAL_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'ui-preview') }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          relevant=false
+          if [[ "${EVENT_NAME}" == workflow_dispatch || "${MANUAL_OVERRIDE}" == true ]]; then
+            relevant=true
+          else
+            files="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+              --jq '.[].filename')"
+            if grep -Eiq '(^|/)(templates?|static|themes?|browser)(/|$)|\.(css|scss|sass|less|js|mjs|cjs|ts|tsx|html)$' <<<"${files}"; then
+              relevant=true
+            fi
+          fi
+          printf 'relevant=%s\n' "${relevant}" >>"${GITHUB_OUTPUT}"
+
       - name: Read the reviewed test-image contract
+        if: steps.relevance.outputs.relevant == 'true'
         env:
           PREVIEW_CACHE_SCOPE: ui-preview-${{ github.event.pull_request.number || github.run_id }}
         run: |
@@ -84,24 +107,38 @@ jobs:
           PY
 
       - name: Prepare the synthetic artifact directory
+        if: steps.relevance.outputs.relevant == 'true'
         env:
-          PREVIEW_REF: ${{ github.sha }}
+          PREVIEW_REF: ${{ github.event.pull_request.head.sha || github.sha }}
           PREVIEW_EVENT: ${{ github.event_name }}
+          PREVIEW_PR: ${{ github.event.pull_request.number || 0 }}
         run: |
           set -Eeuo pipefail
           mkdir -p artifacts/ui-preview/screenshots artifacts/ui-preview/playwright-report
-          {
-            printf 'source_commit=%s\n' "${PREVIEW_REF}"
-            printf 'event=%s\n' "${PREVIEW_EVENT}"
-            printf 'data=synthetic-only\n'
-            printf 'network=compose-internal-only\n'
-          } >artifacts/ui-preview/manifest.txt
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          manifest = {
+              "schema_version": 1,
+              "pr": int(os.environ["PREVIEW_PR"]),
+              "head_sha": os.environ["PREVIEW_REF"],
+              "event": os.environ["PREVIEW_EVENT"],
+              "data": "synthetic-only",
+              "network": "compose-internal-only",
+          }
+          Path("artifacts/ui-preview/manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="ascii",
+          )
+          PY
           : >artifacts/ui-preview/run.log
 
       - name: Set up Docker Buildx
+        if: steps.relevance.outputs.relevant == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build cached Auth and browser images
+        if: steps.relevance.outputs.relevant == 'true'
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
           source: .
@@ -114,6 +151,7 @@ jobs:
             browser.args.PLAYWRIGHT_IMAGE=${{ env.BUH_PLAYWRIGHT_IMAGE }}
 
       - name: Capture fake-data previews on an isolated network
+        if: steps.relevance.outputs.relevant == 'true'
         env:
           PREVIEW_CONTAINER: buh-ui-preview-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -165,7 +203,7 @@ jobs:
             browser npx --no-install playwright test preview.spec.ts
 
       - name: Enforce teardown even after cancellation or setup failure
-        if: always()
+        if: ${{ always() && steps.relevance.outputs.relevant == 'true' }}
         env:
           PREVIEW_CONTAINER: buh-ui-preview-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -180,7 +218,7 @@ jobs:
 
       - name: Reject unsafe preview artifact entries
         id: artifact_guard
-        if: always()
+        if: ${{ always() && steps.relevance.outputs.relevant == 'true' }}
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
@@ -213,3 +251,7 @@ jobs:
           path: artifacts/ui-preview/
           if-no-files-found: error
           retention-days: 3
+
+      - name: Record that no preview is applicable
+        if: steps.relevance.outputs.relevant != 'true'
+        run: echo "No preview-relevant paths or ui-preview override were present." >>"${GITHUB_STEP_SUMMARY}"

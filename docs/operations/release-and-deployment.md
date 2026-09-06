@@ -6,13 +6,62 @@ There are two deliberately separate generations:
 
 1. **Legacy v1:** the production-tested Moon Tax `v0.3.x` bundles, guarded GitHub
    workflow, and forced-command VPS receiver.
-2. **Platform v2 candidate:** source-built multi-application releases described
+2. **Platform v2 (current production generation):** source-built multi-application releases described
    by `RELEASE.json` and `INSTALL_PLAN.json`.
 
-Legacy v1 remains the production authority. Do not edit, regenerate, or silently
-replace an existing `v0.3.x` directory. Platform v2 receives a separate release
-path and deployment entry point and may replace v1 only after all promotion gates
-in the architecture document pass.
+Platform v2 is the current routine production deployment generation. Legacy v1
+artifacts and its forced-command route remain immutable recovery assets until a
+successful Platform v2 deployment and separately approved rollback drill are
+recorded. Do not edit, regenerate, or silently replace an existing `v0.3.x`
+directory.
+
+## Routine delivery and responsibility boundary
+
+The operator-facing Actions stages are **Validate PR**, **Preview UI**, **Prepare
+Release**, **Deploy Production**, and **Operations and Recovery**. `Validate PR /
+Validation lanes / Authoritative validation` is the single required status for
+`main`; its fan-out includes the complete fast, integration, upgrade, restore,
+browser, migration, permission, accounting, and release-plan lanes.
+
+Codex opens or updates one feature PR. UI paths (templates, static assets,
+JavaScript/CSS, themes, and browser tests) automatically run the synthetic
+preview; `ui-preview` remains a manual override. Every preview artifact is
+retained for three days and its JSON manifest binds the PR number and head SHA.
+A `synchronize` event removes `ready-for-work` before new-head validation. Codex
+may restore that label only when the exact head is green and applicable preview
+evidence matches. ChatGPT Work then performs the final risk/review assessment and
+may merge this non-production PR. Neither the label nor that merge authorizes
+production.
+
+After merge, Prepare Release builds one immutable release and performs the
+no-change receiver preflight. Work presents the bound readiness record and asks
+Anthony once for production approval. Deploy Production accepts only the exact
+approval-marked release evidence. Receiver upgrades, emergency rollback, and
+diagnostics are not routine application releases: use the separately reviewed
+receiver procedure below or Operations and Recovery, and never automatically
+retry a production failure.
+
+## Required repository settings (one-time audit)
+
+Configure a `main` ruleset requiring pull requests and the exact status
+`Validate PR / Validation lanes / Authoritative validation`; block force pushes
+and branch deletion, require branches to be up to date, and permit only merge
+commits. Give the ChatGPT Work identity Contents read and Pull requests
+read/write so it can merge an unchanged, validated non-production head, but no
+Actions, Environments, Administration, or Secrets write access. Restrict
+production SSH secrets to the protected `production` environment and the Deploy
+Production workflow. Protect `release/platform-v*` against update/deletion and
+restrict creation to the release publisher. Repository administrators must
+audit these settings in GitHub because source code cannot enforce ruleset actors,
+environment reviewers, or secret scope.
+
+Create the workflow labels once (the commands are idempotent):
+
+```bash
+gh label create ready-for-work --repo Fifty5D/B-UH-AllianceAuth --color 1D76DB --force
+gh label create needs-codex --repo Fifty5D/B-UH-AllianceAuth --color D93F0B --force
+gh label create ui-preview --repo Fifty5D/B-UH-AllianceAuth --color 5319E7 --force
+```
 
 ## Current release-builder and publisher boundary
 
@@ -27,7 +76,7 @@ trust boundary:
 - `verify` validates the assembled bundle, wheel metadata/records, and checksums.
 
 `.github/workflows/build-platform-release.yml` can run only against an exact main
-commit that already has a successful Source CI push run. It builds and verifies
+commit that already has a successful Validate PR push run. It builds and verifies
 one candidate artifact. Optional publication is separately restricted to the
 repository owner plus an exact confirmation phrase, re-verifies the downloaded
 candidate, and, under one repository-wide publication lock, atomically creates
@@ -42,7 +91,7 @@ without changing published release identity. The helper accepts an advanced
 fails closed. If repository policy blocks Actions from creating pull requests,
 the publication run fails closed after recording a one-click manual recovery
 URL. That PR records the exact published release state on `main`; the publisher
-never pushes `main` directly. Source CI protects the append-only release ledger
+never pushes `main` directly. Validate PR protects the append-only release ledger
 by rejecting changes or removals to prior release state and additions that do
 not match their immutable release ref. Before another release can be planned, an
 exact parity gate requires the highest release ref and the latest release state
@@ -113,9 +162,9 @@ fingerprint, and release provenance remain authoritative.
     release ref and one absent disposable sync ref at the release commit, whose
     sole parent is the tested source commit.
 11. Create the mandatory synchronization PR with the repository-owner
-    `BUH_RELEASE_PR_TOKEN`, allowing Source CI to start without a GitHub run-
+    `BUH_RELEASE_PR_TOKEN`, allowing Validate PR to start without a GitHub run-
     approval click. The token cannot publish a release or deploy production.
-12. Run Source CI on the exact sync head and run the production receiver in
+12. Run Validate PR on the exact sync head and run the production receiver in
     no-change `preflight` mode. A workflow-authored readiness marker binds both
     successful runs, the retained artifact, manifest hash, source, release, and
     PR into one approval nonce.
@@ -134,7 +183,7 @@ A release is never rebuilt after publication. A correction receives new app and
 platform versions. Publication and synchronization do not deploy or authorize a
 deployment.
 
-GitHub can return an empty `pull_requests` array on a successful Source CI run
+GitHub can return an empty `pull_requests` array on a successful Validate PR run
 after its PR is merged. Post-merge authorization verifies the recorded run ID,
 attempt, workflow, event, repository, branch, and exact release commit first.
 Only for an explicitly empty array, it then uses the release commit's associated
@@ -181,7 +230,7 @@ beginning `Sync platform release v`. The task must:
 
 1. react to the `buh-platform-ready:v1` comment by reading the PR, required
    checks, referenced workflow runs, and retained preflight artifact;
-2. show the version, source/release commits, manifest hash, Source CI result,
+2. show the version, source/release commits, manifest hash, Validate PR result,
    preflight result, and PR URL, then wait for the owner's explicit approval;
 3. after approval, re-read the unchanged head and checks, then perform exactly
    one merge action using a merge commit with the expected head SHA and the
@@ -191,7 +240,7 @@ beginning `Sync platform release v`. The task must:
    failure. It must never retry or roll forward production automatically.
 
 The automatic release trigger deliberately requires the newest successful
-`Source CI` push run on `main` and at least one tracked `changes/*.toml` file.
+`Validate PR` push run on `main` and at least one tracked `changes/*.toml` file.
 Release synchronization deletes consumed fragments, so merging a sync PR cannot
 start another release. If `main` advances while a release is queued, the older
 run stops and the newer tested commit collects the still-unconsumed fragments.

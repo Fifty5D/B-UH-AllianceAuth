@@ -26,7 +26,7 @@ Change kinds are `fix`, `security`, `performance`, `internal`, `feature`, and
 changed application lacks an explicit fragment. Changes to registered platform
 inputs (including browser tests and synthetic test setup) also require an
 `app = "platform"` fragment. Validate the release plan against the latest
-synchronized `RELEASE.json` before merging, not just after Source CI passes.
+synchronized `RELEASE.json` before merging, not just after Validate PR passes.
 
 ## Safety rules
 

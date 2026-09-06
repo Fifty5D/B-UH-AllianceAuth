@@ -21,10 +21,10 @@ or unredacted logs.
   a disposable `sync/platform-vX.Y.Z` ref at that exact commit. Only the sync ref
   is used as the mandatory pull-request head, so branch updates can never mutate
   the release ref. Publication opens, but never merges, that pull request.
-  Append-only Source CI checks and exact release-ref/main parity fail closed
+  Append-only Validate PR checks and exact release-ref/main parity fail closed
   before any later release. A repository ruleset grants only the reviewed
   publisher permission to create release refs and forbids their update or
-  deletion. Source CI and a no-change production preflight run automatically.
+  deletion. Validate PR and a no-change production preflight run automatically.
   ChatGPT presents their exact retained evidence and waits for one explicit
   repository-owner approval. It places the exact approval marker in the merge
   commit message and performs one merge action; squash and rebase are not valid
@@ -87,7 +87,7 @@ preview run.
   source commit IDs, selective builds, SHA-256 verification, and reuse metadata
   for unchanged wheels.
 - Release and install manifests have published JSON Schema v1 definitions.
-- A successful Source CI push run on the newest `main` automatically starts a
+- A successful Validate PR push run on the newest `main` automatically starts a
   release only when reviewed change fragments remain unconsumed. The same
   workflow remains manually dispatchable for recovery. Publication creates one
   absent immutable release branch under a repository-wide lock. The release
@@ -99,7 +99,7 @@ preview run.
   accepts it only when the release source remains an ancestor; divergence fails
   closed. It never merges or pushes `main`, and the immutable release ref is
   never the PR head.
-  Source CI rejects modification or removal of prior ledger entries, and the
+  Validate PR rejects modification or removal of prior ledger entries, and the
   next release cannot proceed unless the highest release ref exactly matches the
   latest release state on `main`.
 - The reusable receiver workflow accepts only an immutable release-branch

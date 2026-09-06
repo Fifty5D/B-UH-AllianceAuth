@@ -118,7 +118,7 @@ creates a disposable `sync/platform-vX.Y.Z` ref at that commit. It never writes
 main or deploys production. After publication it opens, but never merges, the
 exact release-state synchronization PR from the sync ref; the immutable release
 ref is never an updateable PR head. `auto-platform-release.yml` runs this path
-after successful newest-main Source CI when change fragments remain, then runs
+after successful newest-main Validate PR when change fragments remain, then runs
 the no-change production preflight and publishes canonical approval evidence.
 The repository owner gives the only production approval in ChatGPT; ChatGPT
 places the supplied marker in the merge commit message and performs one merge
@@ -130,7 +130,7 @@ reference the existing Git object instead of uploading the wheel.
 
 The sync PR is created with the narrowly scoped `BUH_RELEASE_PR_TOKEN` Actions
 secret so GitHub treats it as an owner-created same-repository PR and starts
-Source CI without a separate workflow-approval click. The token needs only
+Validate PR without a separate workflow-approval click. The token needs only
 repository Contents read plus Pull requests read/write and is not passed to
 candidate, publication, preflight, approval, or deployment jobs.
 

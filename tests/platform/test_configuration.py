@@ -20,6 +20,7 @@ SOURCE_WORKFLOWS = (
     "source-compatibility.yml",
     "source-supply-chain.yml",
     "ui-preview.yml",
+    "invalidate-readiness.yml",
 )
 PRODUCTION_V2_WORKFLOWS = (
     "auto-platform-release.yml",
@@ -29,7 +30,6 @@ PRODUCTION_V2_WORKFLOWS = (
     "production-runtime-fingerprint.yml",
 )
 LEGACY_WORKFLOWS = (
-    "ci.yml",
     "deploy-moon-tax.yml",
     "vps-diagnostics.yml",
 )
@@ -682,7 +682,7 @@ class PlatformConfigurationContracts(TestCase):
             triggers,
             {
                 "workflow_run": {
-                    "workflows": ["Source CI"],
+                    "workflows": ["Validate PR"],
                     "types": ["completed"],
                 }
             },
