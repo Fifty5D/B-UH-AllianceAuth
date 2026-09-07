@@ -21,7 +21,7 @@ concurrency:
   # Every meaningful evidence, review, and operator-label event is serialized
   # per PR. Bot bookkeeping events use a unique group so they cannot replace a
   # pending invalidation in GitHub's one-pending-run concurrency queue.
-  group: pr-readiness-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}-${{ ((github.event_name == 'pull_request_target' && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'ready-for-work' && github.event.sender.login == 'github-actions[bot]') || ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'needs-codex'))) || (github.event_name == 'issue_comment' && github.event.sender.login == 'github-actions[bot]' && startsWith(github.event.comment.body, '<!-- buh-readiness-record:v2 -->')) || (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Preview UI' && contains(github.event.workflow_run.display_title, ' / labeled / ') && endsWith(github.event.workflow_run.display_title, ' / labeled / ui-preview') == false)) && format('ignored-{0}', github.run_id) || 'state' }}
+  group: pr-readiness-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}-${{ ((github.event_name == 'pull_request_target' && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'ready-for-work' && github.event.sender.login == 'github-actions[bot]') || ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name == 'needs-codex'))) || (github.event_name == 'issue_comment' && github.event.sender.login == 'github-actions[bot]' && startsWith(github.event.comment.body, '<!-- buh-readiness-record:v2 -->')) || (github.event_name == 'workflow_run' && github.event.workflow_run.path == '.github/workflows/ui-preview.yml' && contains(github.event.workflow_run.display_title, ' / labeled / ') && endsWith(github.event.workflow_run.display_title, ' / labeled / ui-preview') == false)) && format('ignored-{0}', github.run_id) || 'state' }}
   cancel-in-progress: false
 
 defaults:
@@ -59,7 +59,8 @@ jobs:
       checks: read
       contents: read
       issues: write
-      pull-requests: read
+      # GitHub requires PR-object write access when this issues endpoint labels a PR.
+      pull-requests: write
     steps:
       - name: Immediately consume a readiness request
         id: consume_request
@@ -218,15 +219,17 @@ jobs:
             event_head="${WORKFLOW_HEAD}"
             event_head_repository="${WORKFLOW_HEAD_REPOSITORY}"
             [[ "${associated_head}" == "${event_head}" ]]
-            case "${WORKFLOW_NAME}" in
-              "Validate PR")
-                [[ "${WORKFLOW_PATH}" == ".github/workflows/source-ci.yml" ]]
+            # A workflow run-name replaces workflow_run.name; the immutable path
+            # remains the workflow identity and the full title carries PR/head.
+            case "${WORKFLOW_PATH}" in
+              ".github/workflows/source-ci.yml")
+                [[ "${WORKFLOW_NAME}" == "Validate PR" ]]
                 ;;
-              "Preview UI")
-                [[ "${WORKFLOW_PATH}" == ".github/workflows/ui-preview.yml" ]]
+              ".github/workflows/ui-preview.yml")
                 prefix="Preview UI / PR #${pr} / ${event_head} / "
-                [[ "${WORKFLOW_TITLE}" == "${prefix}"* ]]
-                trigger="${WORKFLOW_TITLE#"${prefix}"}"
+                [[ "${WORKFLOW_NAME}" == "${WORKFLOW_TITLE}" ]]
+                [[ "${WORKFLOW_NAME}" == "${prefix}"* ]]
+                trigger="${WORKFLOW_NAME#"${prefix}"}"
                 case "${trigger}" in
                   "opened / none"|"reopened / none"|"synchronize / none"|"labeled / ui-preview")
                     ;;

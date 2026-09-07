@@ -726,7 +726,7 @@ class PlatformConfigurationContracts(TestCase):
                 "checks": "read",
                 "contents": "read",
                 "issues": "write",
-                "pull-requests": "read",
+                "pull-requests": "write",
             },
         )
         checkouts = [
@@ -849,6 +849,66 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertNotIn(
             "ref: ${{ github.event.pull_request.head.sha }}", text
+        )
+
+    def test_trusted_readiness_permissions_cover_pr_label_handoff(self):
+        workflow = _load_workflow(WORKFLOWS / "invalidate-readiness.yml")
+        policy = workflow["jobs"]["policy"]
+        scripts = "\n".join(
+            step.get("run", "") for step in policy["steps"]
+        )
+
+        self.assertIn("/issues/${PR}/labels", scripts)
+        self.assertGreaterEqual(scripts.count("/issues/${PR}/labels"), 4)
+        self.assertEqual(policy["permissions"]["issues"], "write")
+        self.assertEqual(policy["permissions"]["pull-requests"], "write")
+
+    def test_trusted_readiness_binds_preview_identity_to_path_and_run_title(self):
+        workflow = _load_workflow(WORKFLOWS / "invalidate-readiness.yml")
+        policy = workflow["jobs"]["policy"]
+        resolve = next(
+            step
+            for step in policy["steps"]
+            if step["name"]
+            == "Resolve one eligible same-repository Codex pull request"
+        )
+        script = resolve["run"]
+
+        self.assertIn('case "${WORKFLOW_PATH}" in', script)
+        self.assertNotIn('case "${WORKFLOW_NAME}" in', script)
+        self.assertIn('".github/workflows/source-ci.yml")', script)
+        self.assertIn('[[ "${WORKFLOW_NAME}" == "Validate PR" ]]', script)
+        self.assertIn('".github/workflows/ui-preview.yml")', script)
+        self.assertIn(
+            'prefix="Preview UI / PR #${pr} / ${event_head} / "', script
+        )
+        self.assertIn(
+            '[[ "${WORKFLOW_NAME}" == "${WORKFLOW_TITLE}" ]]', script
+        )
+        self.assertIn('[[ "${WORKFLOW_NAME}" == "${prefix}"* ]]', script)
+        self.assertIn(
+            'trigger="${WORKFLOW_NAME#"${prefix}"}"', script
+        )
+        for permitted in (
+            '"opened / none"',
+            '"reopened / none"',
+            '"synchronize / none"',
+            '"labeled / ui-preview"',
+        ):
+            self.assertIn(permitted, script)
+        self.assertIn('[[ "${WORKFLOW_EVENT}" == "pull_request" ]]', script)
+        self.assertIn(
+            '"${event_head_repository}" != "${GITHUB_REPOSITORY}"',
+            script,
+        )
+        self.assertIn('[[ "${associated_head}" == "${event_head}" ]]', script)
+        concurrency = workflow["concurrency"]["group"]
+        self.assertIn(
+            "github.event.workflow_run.path == '.github/workflows/ui-preview.yml'",
+            concurrency,
+        )
+        self.assertNotIn(
+            "github.event.workflow_run.name == 'Preview UI'", concurrency
         )
 
     def test_release_plan_and_legacy_recovery_artifact_remain_required(self):

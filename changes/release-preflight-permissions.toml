@@ -1,3 +1,3 @@
 app = "platform"
 kind = "fix"
-summary = "Grant the automatic release preflight the read-only permissions required by its reusable deployment workflow."
+summary = "Fix automatic release preflight permissions and exact-head readiness handoff identity and label writes."
