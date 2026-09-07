@@ -1,3 +1,0 @@
-app = "platform"
-kind = "feature"
-summary = "Add exact-head Work readiness, synthetic previews, consolidated delivery stages, and candidate/active production switching with verified rollback."
