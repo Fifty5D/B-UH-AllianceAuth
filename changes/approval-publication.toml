@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Report expected approval-publication failures safely and grant the publisher PR-comment permission."

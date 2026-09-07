@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import json
 import copy
+import io
+import json
 import sys
 import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -144,6 +146,50 @@ def _ready_payload() -> dict[str, Any]:
     }
     payload["approval_nonce"] = approval._nonce(payload)
     return payload
+
+
+def _ready_main_arguments(root: Path) -> list[str]:
+    feature_readiness = root / "feature-readiness.json"
+    feature_readiness.write_text(
+        json.dumps(_published_readiness(), sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="ascii",
+    )
+    return [
+        "ready",
+        "--owner",
+        OWNER,
+        "--repository",
+        REPOSITORY,
+        "--api-url",
+        "https://api.github.com",
+        "--server-url",
+        "https://github.com",
+        "--output",
+        str(root / "approval.json"),
+        "--version",
+        VERSION,
+        "--source-commit",
+        SOURCE,
+        "--release-commit",
+        RELEASE,
+        "--pull-request",
+        str(PR_NUMBER),
+        "--feature-readiness",
+        str(feature_readiness),
+        "--main-validation-run-id",
+        str(MAIN_RUN),
+        "--main-validation-run-attempt",
+        "1",
+        "--manifest-sha256",
+        MANIFEST,
+        "--preflight-run-id",
+        str(PREFLIGHT_RUN),
+        "--preflight-run-attempt",
+        "1",
+        "--preflight-artifact",
+        ARTIFACT,
+    ]
 
 
 def _event() -> dict[str, Any]:
@@ -355,6 +401,24 @@ class ReadyTransport(ApprovalTransport):
                     ).encode(),
                 )
         return super().request(method, url, {}, body, 0)
+
+
+class DeniedReadyTransport(ReadyTransport):
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout: int,
+    ) -> sync.HttpResponse:
+        parsed = urllib.parse.urlsplit(url)
+        suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        if suffix == f"issues/{PR_NUMBER}/comments" and method == "POST":
+            del headers, body, timeout
+            self.calls.append((method, parsed.path))
+            return sync.HttpResponse(403, b'{"message":"private response body"}\n')
+        return super().request(method, url, headers, body, timeout)
 
 
 class PlatformApprovalTests(unittest.TestCase):
@@ -991,6 +1055,70 @@ class PlatformApprovalTests(unittest.TestCase):
             ("POST", f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments"),
             transport.calls,
         )
+
+    def test_ready_reports_denied_comment_publication_without_response_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = approval._config(
+                owner=OWNER,
+                repository=REPOSITORY,
+                version=VERSION,
+                source_commit=SOURCE,
+                release_commit=RELEASE,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "ready.json",
+            )
+            with self.assertRaises(sync.SyncPrError) as raised:
+                approval.ready(
+                    config,
+                    TOKEN,
+                    number=PR_NUMBER,
+                    feature_readiness=_published_readiness(),
+                    main_validation_run_id=MAIN_RUN,
+                    main_validation_run_attempt=1,
+                    manifest_sha256=MANIFEST,
+                    preflight_run_id=PREFLIGHT_RUN,
+                    preflight_run_attempt=1,
+                    preflight_artifact=ARTIFACT,
+                    transport=DeniedReadyTransport(),
+                    sleeper=lambda _: None,
+                    polls=1,
+                )
+        message = str(raised.exception)
+        self.assertEqual(
+            message,
+            "GitHub denied readiness comment publication with HTTP 403",
+        )
+        self.assertNotIn(TOKEN, message)
+        self.assertNotIn("private response body", message)
+        self.assertNotIn("Authorization", message)
+
+    def test_main_reports_expected_client_failure_safely_and_bounded(self) -> None:
+        operation = "GitHub denied readiness comment publication with HTTP 403"
+        unsafe_tail = "x" * 600 + "\nAuthorization: Bearer private-token\nprivate body"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            approval,
+            "ready",
+            side_effect=sync.SyncPrError(operation + unsafe_tail),
+        ):
+            result = approval.main(
+                _ready_main_arguments(Path(temp)),
+                environment={"GITHUB_TOKEN": TOKEN},
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        rendered = stderr.getvalue()
+        self.assertTrue(rendered.startswith("platform approval error: " + operation))
+        summary = rendered.removeprefix("platform approval error: ").rstrip()
+        self.assertLessEqual(len(summary), 500)
+        self.assertNotIn("unexpected internal failure", rendered)
+        self.assertNotIn(TOKEN, rendered)
+        self.assertNotIn("Authorization", rendered)
+        self.assertNotIn("private body", rendered)
 
 
 if __name__ == "__main__":
