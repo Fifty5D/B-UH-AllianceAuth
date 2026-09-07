@@ -296,6 +296,7 @@ jobs:
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
+          mkdir -p build
           [[ "${FEATURE_PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]
           [[ "${FEATURE_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
           allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
