@@ -524,6 +524,57 @@ class PlatformConfigurationContracts(TestCase):
                         )
         self.assertEqual(calls, 5)
 
+    def test_local_reusable_workflow_callers_cover_callee_job_permissions(self):
+        workflows = {
+            path.name: _load_workflow(path)
+            for path in WORKFLOWS.glob("*.yml")
+        }
+        permission_rank = {"none": 0, "read": 1, "write": 2}
+        calls = 0
+        for caller_name, caller in workflows.items():
+            for job_name, job in caller.get("jobs", {}).items():
+                target = job.get("uses")
+                if not isinstance(target, str) or not target.startswith(
+                    "./.github/workflows/"
+                ):
+                    continue
+                calls += 1
+                callee_name = Path(target).name
+                callee = workflows[callee_name]
+                caller_permissions = job.get("permissions", {})
+                callee_permissions = callee.get("permissions", {})
+                with self.subTest(caller=caller_name, job=job_name):
+                    self.assertIsInstance(caller_permissions, dict)
+                    self.assertIsInstance(callee_permissions, dict)
+                for called_job_name, called_job in callee.get("jobs", {}).items():
+                    required_permissions = called_job.get(
+                        "permissions", callee_permissions
+                    )
+                    with self.subTest(
+                        caller=caller_name,
+                        job=job_name,
+                        callee=callee_name,
+                        called_job=called_job_name,
+                    ):
+                        self.assertIsInstance(required_permissions, dict)
+                    for permission, required in required_permissions.items():
+                        granted = caller_permissions.get(permission, "none")
+                        with self.subTest(
+                            caller=caller_name,
+                            job=job_name,
+                            callee=callee_name,
+                            called_job=called_job_name,
+                            permission=permission,
+                        ):
+                            self.assertIn(required, permission_rank)
+                            self.assertIn(granted, permission_rank)
+                            self.assertGreaterEqual(
+                                permission_rank[granted],
+                                permission_rank[required],
+                                "caller permission caps the called workflow job",
+                            )
+        self.assertEqual(calls, 5)
+
     def test_supply_chain_python_setup_uses_configuration_output(self):
         workflow = _load_workflow(WORKFLOWS / "source-supply-chain.yml")
         configuration = workflow["jobs"]["configuration"]
@@ -675,7 +726,7 @@ class PlatformConfigurationContracts(TestCase):
                 "checks": "read",
                 "contents": "read",
                 "issues": "write",
-                "pull-requests": "read",
+                "pull-requests": "write",
             },
         )
         checkouts = [
@@ -798,6 +849,66 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertNotIn(
             "ref: ${{ github.event.pull_request.head.sha }}", text
+        )
+
+    def test_trusted_readiness_permissions_cover_pr_label_handoff(self):
+        workflow = _load_workflow(WORKFLOWS / "invalidate-readiness.yml")
+        policy = workflow["jobs"]["policy"]
+        scripts = "\n".join(
+            step.get("run", "") for step in policy["steps"]
+        )
+
+        self.assertIn("/issues/${PR}/labels", scripts)
+        self.assertGreaterEqual(scripts.count("/issues/${PR}/labels"), 4)
+        self.assertEqual(policy["permissions"]["issues"], "write")
+        self.assertEqual(policy["permissions"]["pull-requests"], "write")
+
+    def test_trusted_readiness_binds_preview_identity_to_path_and_run_title(self):
+        workflow = _load_workflow(WORKFLOWS / "invalidate-readiness.yml")
+        policy = workflow["jobs"]["policy"]
+        resolve = next(
+            step
+            for step in policy["steps"]
+            if step["name"]
+            == "Resolve one eligible same-repository Codex pull request"
+        )
+        script = resolve["run"]
+
+        self.assertIn('case "${WORKFLOW_PATH}" in', script)
+        self.assertNotIn('case "${WORKFLOW_NAME}" in', script)
+        self.assertIn('".github/workflows/source-ci.yml")', script)
+        self.assertIn('[[ "${WORKFLOW_NAME}" == "Validate PR" ]]', script)
+        self.assertIn('".github/workflows/ui-preview.yml")', script)
+        self.assertIn(
+            'prefix="Preview UI / PR #${pr} / ${event_head} / "', script
+        )
+        self.assertIn(
+            '[[ "${WORKFLOW_NAME}" == "${WORKFLOW_TITLE}" ]]', script
+        )
+        self.assertIn('[[ "${WORKFLOW_NAME}" == "${prefix}"* ]]', script)
+        self.assertIn(
+            'trigger="${WORKFLOW_NAME#"${prefix}"}"', script
+        )
+        for permitted in (
+            '"opened / none"',
+            '"reopened / none"',
+            '"synchronize / none"',
+            '"labeled / ui-preview"',
+        ):
+            self.assertIn(permitted, script)
+        self.assertIn('[[ "${WORKFLOW_EVENT}" == "pull_request" ]]', script)
+        self.assertIn(
+            '"${event_head_repository}" != "${GITHUB_REPOSITORY}"',
+            script,
+        )
+        self.assertIn('[[ "${associated_head}" == "${event_head}" ]]', script)
+        concurrency = workflow["concurrency"]["group"]
+        self.assertIn(
+            "github.event.workflow_run.path == '.github/workflows/ui-preview.yml'",
+            concurrency,
+        )
+        self.assertNotIn(
+            "github.event.workflow_run.name == 'Preview UI'", concurrency
         )
 
     def test_release_plan_and_legacy_recovery_artifact_remain_required(self):

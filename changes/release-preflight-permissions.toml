@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Fix automatic release preflight permissions and exact-head readiness handoff identity and label writes."

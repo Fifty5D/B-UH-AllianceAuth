@@ -293,7 +293,11 @@ jobs:
       confirmation: PREFLIGHT PLATFORM V2
     secrets: inherit
     permissions:
+      actions: read
+      checks: read
       contents: read
+      issues: read
+      pull-requests: read
 
   ready:
     name: Publish ChatGPT approval evidence
