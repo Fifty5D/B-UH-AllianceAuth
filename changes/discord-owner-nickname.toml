@@ -1,3 +1,0 @@
-app = "structure-ops"
-kind = "fix"
-summary = "Skip impossible Discord nickname updates for the configured guild owner ID."
