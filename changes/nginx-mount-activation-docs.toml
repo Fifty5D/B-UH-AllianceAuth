@@ -1,3 +1,0 @@
-app = "platform"
-kind = "fix"
-summary = "Correct the one-time Nginx mount activation and restoration runbook."

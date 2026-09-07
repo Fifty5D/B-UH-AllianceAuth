@@ -1,3 +1,0 @@
-app = "platform"
-kind = "fix"
-summary = "Initialize fresh release workspaces before writing feature-readiness evidence."
