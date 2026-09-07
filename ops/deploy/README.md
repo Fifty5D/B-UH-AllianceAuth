@@ -169,13 +169,31 @@ schema-v1 configuration during its own upgrade: it synthesizes the five minimum
 health routes and skips the not-yet-provisioned managed upstream. That
 compatibility cannot fall back to the former force-recreate deployment path.
 
-Before the first schema-v2 preflight, provision the following from the exact
-reviewed checkout in a separately approved maintenance window:
+Before the first schema-v2 preflight, stage and validate the following from the
+exact reviewed checkout. Staging does not authorize any live production
+container change.
 
-1. Back up the active Nginx configuration, the literal `.env` `COMPOSE_FILE`
-   value and every named Compose file, and the receiver configuration. Keep all
-   existing overlays in their existing order.
-2. Create `conf/buh-platform-v2/nginx/upstream.conf` below the AllianceAuth
+### Stage and validate the complete configuration
+
+1. From `/opt/aa-docker`, reconcile the complete current Compose file set in its
+   effective order. Start with `/opt/aa-docker/docker-compose.yml`, read the
+   literal `.env` `COMPOSE_FILE` value, and inspect the current service or
+   operator invocation for additional `-f` overlays. The running container's
+   `com.docker.compose.project.config_files` label is only a creation-time
+   record; do not treat it as authoritative because overlays may have been
+   added later. Verify every reconciled file is a regular in-tree file, render
+   the explicit full set with `docker compose ... config`, and prepare that same
+   ordered set for the reviewed literal `COMPOSE_FILE` value without installing
+   it yet.
+2. Record `docker inspect aa-docker-nginx-1`, including its exact `.Image` ID,
+   restart count, and complete mount list. Back up the active
+   `conf/nginx.conf`, `.env`, every reconciled Compose file and overlay, and the
+   receiver configuration while preserving owner and mode. The proposed
+   configuration must retain every existing overlay and mount. In particular,
+   it must retain the host `conf/nginx.conf` bind at
+   `/etc/nginx/nginx.conf` and the existing static volume at
+   `/var/www/myauth/static`.
+3. Create `conf/buh-platform-v2/nginx/upstream.conf` below the AllianceAuth
    application directory with these initial reviewed bytes, which still route
    only to the current live service:
 
@@ -187,9 +205,10 @@ reviewed checkout in a separately approved maintenance window:
    }
    ```
 
-3. Add a dedicated Compose overlay that mounts the containing directory into
-   the existing Nginx service, then append that overlay to the literal
-   `COMPOSE_FILE` value. Mount the directory, not the individual file: the
+4. Add a dedicated Compose overlay that mounts the containing directory into
+   the existing Nginx service, then prepare a literal `COMPOSE_FILE` value that
+   appends the overlay. Do not install that value during staging. Mount the
+   directory, not the individual file: the
    receiver replaces the file atomically and a single-file bind mount would
    keep the old inode. The relevant overlay contract is:
 
@@ -200,21 +219,70 @@ reviewed checkout in a separately approved maintenance window:
          - ./conf/buh-platform-v2/nginx:/etc/nginx/buh-platform-v2:ro
    ```
 
-4. Inside the Nginx `http` context, include
+5. Stage, but do not yet install, a replacement for `conf/nginx.conf`. Inside
+   its `http` context, include
    `/etc/nginx/buh-platform-v2/upstream.conf` exactly once. Change the existing
    AllianceAuth proxy location to contain exactly one
    `proxy_pass http://buh_platform_v2_active;`; no other `proxy_pass` may occur
-   in an `auth.b-uh.com` server block. Validate the complete explicit
-   Compose file set, confirm the host/container upstream SHA-256 values match,
-   run `nginx -t`, reload Nginx, and verify `/`, `/account/login/`, `/moon-tax/`,
-   `/structure-operations/`, and `/mining-analytics/`. Do not restart Nginx; if any
-   check fails, restore the backed-up configuration while the old service stays
-   live.
-5. Derive a canonical schema-v2 receiver configuration from
+   in an `auth.b-uh.com` server block.
+6. Render the proposed complete Compose set with the new mount overlay and a
+   root-only temporary validation overlay that mounts the staged Nginx file at
+   `/etc/nginx/nginx.conf`. Confirm the resolved Nginx image reference maps to
+   the exact image ID recorded from `aa-docker-nginx-1`; do not build or pull an
+   image. Use that proposed set to run a disposable, non-published Nginx
+   container with `--no-deps` and execute both `nginx -t` and the reviewed
+   `nginx -T` assertions. Confirm the resolved mounts still include every
+   original mount plus `/etc/nginx/buh-platform-v2`. A validation failure leaves
+   the running container and live configuration unchanged.
+7. Derive a canonical schema-v2 receiver configuration from
    `receiver-config.example.json`. Keep `fatal_log_allowlist` empty unless a
    narrowly reviewed fingerprint has its own regression test. Validate this
    configuration from the exact reviewed source before using the receiver
    upgrade helper.
+
+### Activate the mount once, with separate approval
+
+The directory bind does not exist in `aa-docker-nginx-1` today. An Nginx reload
+cannot add a container mount, so activating it requires one separately approved
+maintenance operation after staging passes. This is not a normal Platform v2
+deployment.
+
+1. Reconfirm the backup, complete ordered Compose set, exact running Nginx image
+   ID, unchanged restart count, and staged validation result. Atomically install
+   the staged `conf/nginx.conf` with its original owner and mode, and activate
+   the reviewed `COMPOSE_FILE` value containing the new overlay.
+2. Re-render the complete explicit file set. Reconfirm that its Nginx image
+   resolves locally to the recorded image ID and that all original overlays and
+   mounts remain present. With an additional explicit approval for this host
+   change, run the equivalent of:
+
+   ```text
+   docker compose <every verified -f file in order> up -d --no-deps --no-build --pull never --force-recreate nginx
+   ```
+
+   This command must target only the `nginx` service. It must not recreate,
+   restart, build, pull, or scale any other service.
+3. Require the replacement container's `.Image` to equal the recorded image ID
+   and inspect its mounts. Verify the preserved `/etc/nginx/nginx.conf` and
+   `/var/www/myauth/static` mounts, every other original mount, and the new
+   read-only `/etc/nginx/buh-platform-v2` directory. Run `nginx -t`, confirm the
+   host/container upstream SHA-256 values match, and repeat the reviewed
+   `nginx -T` assertions. Verify `/`, `/account/login/`, `/moon-tax/`,
+   `/structure-operations/`, and `/mining-analytics/` before declaring the
+   activation successful.
+4. If recreation, mount inspection, Nginx validation, or any route check fails,
+   restore the backed-up `.env`, Compose files, overlays, and `conf/nginx.conf`.
+   Recreate only `nginx` from the original complete file set with `--no-deps`,
+   `--no-build`, and `--pull never`, using the exact recorded image. Reverify
+   its image ID, original mounts, `nginx -t`, and all five routes. Do not restart
+   any application, worker, database, or Redis service; retain the failure and
+   restoration evidence for review.
+
+After this one-time mount activation succeeds, routine Platform v2 deployments
+must not recreate or restart Nginx. They only atomically replace the already
+mounted `upstream.conf`, verify its exact bytes and parsed configuration, run
+`nginx -t`, and reload Nginx at the guarded traffic-switch boundaries described
+above.
 
 The receiver then proves the managed file is a regular file, its bytes are
 visible inside Nginx, and the parsed `nginx -T` scopes bind the sole named
