@@ -1371,7 +1371,7 @@ class PlatformConfigurationContracts(TestCase):
                 "checks": "read",
                 "contents": "read",
                 "issues": "write",
-                "pull-requests": "read",
+                "pull-requests": "write",
             },
         )
         self.assertIn("platform_approval.py ready", automatic_text)

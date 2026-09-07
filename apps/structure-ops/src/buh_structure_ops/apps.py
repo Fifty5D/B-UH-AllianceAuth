@@ -13,3 +13,6 @@ class BuhStructureOpsConfig(AppConfig):
 
     def ready(self):
         from . import checks  # noqa: F401
+        from .discord_owner import install_discord_owner_nickname_guard
+
+        install_discord_owner_nickname_guard()

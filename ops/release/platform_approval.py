@@ -1416,7 +1416,7 @@ def main(
         _append_outputs(environment.get("GITHUB_OUTPUT"), output_values)
         stdout.write(_canonical(report) + "\n")
         return 0
-    except (ApprovalError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (SyncPrError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         stderr.write(f"platform approval error: {str(exc).splitlines()[0][:500]}\n")
         return 2
     except Exception:

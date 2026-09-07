@@ -6,6 +6,23 @@ fuel and extraction monitoring, and operational alerts.
 Compatibility and exact release pins live in `../../platform/compatibility.toml`.
 Published release wheels are immutable build outputs.
 
+## Discord guild-owner nickname exclusion
+
+Discord does not permit a bot to change the guild owner's nickname. Alliance Auth
+5.2.0 has no owner-exclusion setting, so a deployment may identify that one account
+by its Discord user ID in the private `conf/local.py` file:
+
+```python
+BUH_DISCORD_GUILD_OWNER_ID = 123456789012345678
+```
+
+Use Discord's **Copy User ID** action on the confirmed guild owner and replace the
+example value with that decimal ID. Back up `conf/local.py` before the separately
+approved configuration change. The guard becomes active when an approved release
+containing this application starts; it logs each owner nickname skip as a warning.
+It does not change the five-minute schedule, ordinary-member nickname updates,
+Discord role updates, username synchronization, retries, or error handling.
+
 ## Shared console appearance
 
 `console-theme.css` uses Moon Tax's palette and applies only to Moon Tax,
