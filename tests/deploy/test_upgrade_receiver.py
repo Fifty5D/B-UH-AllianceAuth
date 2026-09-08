@@ -1815,6 +1815,224 @@ class ReceiverRootBootstrapContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("root-private reviewed receiver bootstrap", result.stderr)
 
+    @unittest.skipUnless(
+        os.name == "posix" and BASH and PYTHON3 and shutil.which("git"),
+        "requires POSIX, Bash, Python, and Git",
+    )
+    def test_shell_handoff_forwards_verified_inventory_identity(self):
+        """Drive the real env-i array into the real Python source verifier."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            reviewed_repo = base / "reviewed-repo"
+            exported = base / "isolated-export"
+            reviewed_repo.mkdir()
+            exported.mkdir()
+            config = base / "receiver.json"
+            legacy = base / "legacy-receiver"
+            request = base / "preflight-request.tar.gz"
+            config.write_text("{}\n", encoding="ascii")
+            legacy.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            request.write_bytes(b"synthetic no-change preflight request\n")
+            config.chmod(0o600)
+            legacy.chmod(0o700)
+            request.chmod(0o600)
+
+            required = powershell_required_sources()
+            for relative in required:
+                destination = reviewed_repo / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+
+            upgrade = reviewed_repo / "ops/deploy/upgrade-receiver.sh"
+            script = upgrade.read_text(encoding="utf-8")
+            replacements = {
+                "canonical_config=/etc/buh-platform-v2/receiver.json": (
+                    f"canonical_config={config}"
+                ),
+                "canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote": (
+                    f"canonical_legacy={legacy}"
+                ),
+            }
+            for original, replacement in replacements.items():
+                self.assertEqual(script.count(original), 1)
+                script = script.replace(original, replacement, 1)
+
+            suite_command = (
+                '"${python_environment[@]}" python3 -P -m unittest discover \\\n'
+                '  -s "${repo_root}/tests/deploy" -t "${repo_root}" '
+                "-p 'test_*.py'"
+            )
+            self.assertEqual(script.count(suite_command), 1)
+            script = script.replace(
+                suite_command,
+                ": # Focused regression stubs the already-covered deployment suite.",
+                1,
+            )
+            upgrade_command = (
+                '"${python_environment[@]}" python3 -P '
+                "-m ops.deploy.receiver_upgrade upgrade \\\n"
+                '  "${expected_commit}" "${repo_root}" "${config}" '
+                '"${legacy}" "${request}"'
+            )
+            verification_command = (
+                '"${python_environment[@]}" python3 -P -c '
+                "'import os, sys; from pathlib import Path; "
+                "from ops.deploy.receiver_upgrade import _verify_reviewed_source; "
+                'assert "BUH_UNTRUSTED_SENTINEL" not in os.environ; '
+                "_verify_reviewed_source(Path(sys.argv[2]), sys.argv[1]); "
+                "print(\"SANITIZED-INVENTORY-HANDOFF-PASSED\")' \\\n"
+                '  "${expected_commit}" "${repo_root}"'
+            )
+            self.assertEqual(script.count(upgrade_command), 1)
+            script = script.replace(upgrade_command, verification_command, 1)
+            upgrade.write_text(script, encoding="utf-8", newline="\n")
+            upgrade.chmod(0o755)
+
+            commands = (
+                ("git", "init", "--quiet", reviewed_repo),
+                ("git", "-C", reviewed_repo, "config", "user.name", "Receiver Gate"),
+                (
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "config",
+                    "user.email",
+                    "receiver-gate@example.invalid",
+                ),
+                ("git", "-C", reviewed_repo, "add", "--", *required),
+                ("git", "-C", reviewed_repo, "commit", "--quiet", "-m", "handoff"),
+            )
+            for command in commands:
+                result = subprocess.run(
+                    [str(item) for item in command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+            commit = subprocess.run(
+                ["git", "-C", reviewed_repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory = base / "TRACKED"
+            inventory.write_text(
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        reviewed_repo,
+                        "ls-tree",
+                        "-r",
+                        "--full-tree",
+                        commit,
+                        "--",
+                        *required,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                encoding="ascii",
+                newline="\n",
+            )
+            inventory.chmod(0o600)
+            archive_path = base / "receiver-tree.tar"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive_path}",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                check=True,
+            )
+            with tarfile.open(archive_path, "r:") as archive:
+                archive.extractall(exported, filter="data")
+            exported.chmod(0o700)
+            for directory in (
+                path for path in exported.rglob("*") if path.is_dir()
+            ):
+                directory.chmod(0o700)
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "BUH_LEGACY_RECEIVER_PATH": str(legacy),
+                    "BUH_PINNED_CONFIG_SHA256": hashlib.sha256(
+                        config.read_bytes()
+                    ).hexdigest(),
+                    "BUH_PINNED_LEGACY_SHA256": hashlib.sha256(
+                        legacy.read_bytes()
+                    ).hexdigest(),
+                    "BUH_PINNED_REQUEST_SHA256": hashlib.sha256(
+                        request.read_bytes()
+                    ).hexdigest(),
+                    "BUH_RECEIVER_CONFIG_PATH": str(config),
+                    "BUH_REVIEWED_COMMIT": commit,
+                    "BUH_REVIEWED_INVENTORY": str(inventory),
+                    "BUH_REVIEWED_INVENTORY_SHA256": hashlib.sha256(
+                        inventory.read_bytes()
+                    ).hexdigest(),
+                    "BUH_UNTRUSTED_SENTINEL": secrets.token_hex(24),
+                }
+            )
+            wrapper = r'''
+id() {
+  if [[ "${1-}" == "-u" ]]; then printf '0\n'; else command id "$@"; fi
+}
+stat() {
+  if [[ "${1-}" == "-c" && "${2-}" == "%u" ]]; then
+    printf '0\n'
+  elif [[ "${1-}" == "-c" && "${2-}" == "%u:%a" ]]; then
+    printf '0:%s\n' "$(command stat -c '%a' -- "${@: -1}")"
+  else
+    command stat "$@"
+  fi
+}
+source "$1" "${@:2}"
+'''
+
+            def run_handoff():
+                return subprocess.run(
+                    [
+                        BASH,
+                        "-c",
+                        wrapper,
+                        "receiver-shell-handoff-test",
+                        exported / "ops/deploy/upgrade-receiver.sh",
+                        commit,
+                        config,
+                        legacy,
+                        request,
+                    ],
+                    cwd=exported,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+
+            accepted = run_handoff()
+            bounded = (accepted.stdout[-1200:] + accepted.stderr[-1600:]).strip()
+            self.assertEqual(accepted.returncode, 0, bounded)
+            self.assertIn("SANITIZED-INVENTORY-HANDOFF-PASSED", accepted.stdout)
+
+            inventory.write_bytes(inventory.read_bytes() + b"tampered\n")
+            rejected = run_handoff()
+            bounded = (rejected.stdout[-1200:] + rejected.stderr[-1600:]).strip()
+            self.assertNotEqual(rejected.returncode, 0, bounded)
+            self.assertIn("Reviewed tree inventory changed.", rejected.stderr)
+            self.assertNotIn("SANITIZED-INVENTORY-HANDOFF-PASSED", rejected.stdout)
+
 
 class ReceiverPowerShellPackageTests(unittest.TestCase):
     def test_helper_exports_only_the_explicit_commit_bound_allowlist(self):

@@ -1,5 +1,5 @@
 schema_version = 1
 app = "platform"
 kind = "fix"
-summary = "Restore the guarded release path with self-contained receiver tests, complete lineage checkout, exact owner diagnostics, root-private staging, and umask-stable permission coverage."
+summary = "Restore the guarded release path with self-contained receiver tests, complete lineage checkout, exact owner diagnostics, root-private staging, umask-stable permissions, and a verified inventory handoff."
 deployment_predecessor = "0.5.6"
