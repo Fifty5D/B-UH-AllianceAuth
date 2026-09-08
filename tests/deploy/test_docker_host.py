@@ -1620,6 +1620,8 @@ class DockerHostContracts(unittest.TestCase):
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
             live_settings = config.app_dir / config.local_settings
             host.original_local_settings.write_bytes(live_settings.read_bytes())
+            if os.name != "nt":
+                live_settings.chmod(0o640)
             details = live_settings.stat()
             host.original_local_settings_metadata = (
                 details.st_uid,

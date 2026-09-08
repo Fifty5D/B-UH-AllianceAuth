@@ -1841,6 +1841,7 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
 
     @unittest.skipUnless(
         os.name == "posix"
+        and BASH
         and shutil.which("git")
         and shutil.which("python3")
         and os.environ.get("BUH_EXPORTED_GATE_CHILD") != "1",
@@ -1970,6 +1971,10 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
             (base / "root-home").mkdir()
             gate = subprocess.run(
                 [
+                    BASH,
+                    "-c",
+                    'umask 077\nexec "$@"',
+                    "receiver-export-gate",
                     "python3",
                     "-P",
                     "-m",
