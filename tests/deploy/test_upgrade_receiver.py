@@ -1523,6 +1523,9 @@ source "$1" "${@:2}"
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["BUH_REVIEWED_COMMIT"] = commit
             environment["BUH_REVIEWED_INVENTORY"] = str(inventory)
+            environment["BUH_REVIEWED_INVENTORY_SHA256"] = hashlib.sha256(
+                inventory.read_bytes()
+            ).hexdigest()
             environment["BUH_RECEIVER_CONFIG_PATH"] = (
                 receiver_upgrade.CANONICAL_CONFIG_PATH
             )
@@ -1531,6 +1534,9 @@ source "$1" "${@:2}"
             )
             environment["BUH_PINNED_LEGACY_SHA256"] = hashlib.sha256(
                 legacy_bytes
+            ).hexdigest()
+            environment["BUH_PINNED_CONFIG_SHA256"] = hashlib.sha256(
+                config.read_bytes()
             ).hexdigest()
             result = subprocess.run(
                 [
