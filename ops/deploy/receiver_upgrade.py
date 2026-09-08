@@ -545,11 +545,15 @@ def _verify_real_staged_contract(
         "ops/__init__.py": "ops/__init__.py",
         "ops/deploy/__init__.py": "ops/deploy/__init__.py",
         "ops/deploy/contracts.py": "ops/deploy/contracts.py",
+        "ops/deploy/coordinated-recovery.json": (
+            "ops/deploy/coordinated-recovery.json"
+        ),
         "ops/deploy/docker_host.py": "ops/deploy/docker_host.py",
         "ops/deploy/engine.py": "ops/deploy/engine.py",
         "ops/deploy/receiver.py": "ops/deploy/receiver.py",
         "ops/release/__init__.py": "ops/release/__init__.py",
         "ops/release/buh_release.py": "ops/release/buh_release.py",
+        "ops/release/recovery_policy.py": "ops/release/recovery_policy.py",
     }
     for installed, relative in library_mapping.items():
         expected_files[f"/usr/local/lib/buh-platform-v2/{installed}"] = (
