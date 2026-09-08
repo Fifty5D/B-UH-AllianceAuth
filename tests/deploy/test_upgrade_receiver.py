@@ -2079,6 +2079,201 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(
+        os.name == "posix" and BASH and shutil.which("git"),
+        "requires POSIX, Bash, and Git",
+    )
+    def test_embedded_root_bootstrap_pins_under_root_and_rejects_unsafe_parents(self):
+        privilege = []
+        if os.geteuid() != 0:
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                self.skipTest("requires root or passwordless sudo")
+            probe = subprocess.run(
+                [sudo, "-n", "true"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if probe.returncode != 0:
+                self.skipTest("requires root or passwordless sudo")
+            privilege = [sudo, "-n"]
+
+        helper = (ROOT / "setup/Upgrade-BUH-PlatformV2Receiver.ps1").read_text()
+        bootstrap = helper.split("$RootBootstrap = @'\n", 1)[1].split(
+            "\n'@", 1
+        )[0]
+        self.assertIn(
+            'root_stage="$(mktemp -d /root/buh-reviewed-receiver.XXXXXXXX)"',
+            bootstrap,
+        )
+        self.assertNotIn("/var/tmp/buh-reviewed-receiver.", bootstrap)
+        self.assertNotEqual(
+            stat.S_IMODE(Path("/var/tmp").stat().st_mode) & 0o022,
+            0,
+            "/var/tmp must exercise an unsafe parent",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo = base / "reviewed"
+            stub = repo / "ops/deploy/upgrade-receiver.sh"
+            stub.parent.mkdir(parents=True)
+            stub.write_text(
+                """#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$#" -eq 4 ]]
+[[ "$1" =~ ^[0-9a-f]{40}$ ]]
+input_root="$(dirname -- "$2")"
+[[ "$input_root" == /root/buh-reviewed-receiver.????????/inputs ]]
+[[ "$3" == "$input_root/legacy" ]]
+[[ "$4" == "$input_root/request.tar" ]]
+[[ "$(stat -c '%a' "$2")" == 600 ]]
+[[ "$(stat -c '%a' "$3")" == 500 ]]
+[[ "$(stat -c '%a' "$4")" == 600 ]]
+[[ "$(stat -c '%a' "$input_root/SHA256")" == 600 ]]
+[[ "$(wc -l < "$input_root/SHA256")" -eq 3 ]]
+[[ "$(sha256sum "$2" | cut -d' ' -f1)" == "$BUH_PINNED_CONFIG_SHA256" ]]
+[[ "$(sha256sum "$3" | cut -d' ' -f1)" == "$BUH_PINNED_LEGACY_SHA256" ]]
+[[ "$(sha256sum "$4" | cut -d' ' -f1)" == "$BUH_PINNED_REQUEST_SHA256" ]]
+printf '%s\n' 'INSTALL-STUB-HANDOFF'
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            stub.chmod(0o755)
+            subprocess.run(["git", "init", "--quiet", repo], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "config", "user.name", "Bootstrap Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "config",
+                    "user.email",
+                    "bootstrap@example.invalid",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "-C", repo, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "commit", "--quiet", "-m", "stub"],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory = base / "TRACKED"
+            inventory.write_text(
+                subprocess.run(
+                    ["git", "-C", repo, "ls-tree", "-r", "--full-tree", commit],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                encoding="ascii",
+                newline="\n",
+            )
+            archive = base / "receiver-tree.tar"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive}",
+                    commit,
+                ],
+                check=True,
+            )
+            request = base / "preflight-request.tar"
+            request.write_bytes(b"synthetic no-change preflight request\n")
+            archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+            inventory_hash = hashlib.sha256(inventory.read_bytes()).hexdigest()
+            request_hash = hashlib.sha256(request.read_bytes()).hexdigest()
+            wrapper = """set -Eeuo pipefail
+fixture_root="$1"
+config="$2"
+legacy="$3"
+bootstrap="$4"
+shift 4
+[[ "$fixture_root" =~ ^/(root|var/tmp)/buh-bootstrap-test-[0-9a-f]{24}$ ]]
+[[ "$config" == "$fixture_root/config.json" ]]
+[[ "$legacy" == "$fixture_root/legacy" ]]
+trap 'rm -rf -- "$fixture_root"' EXIT
+install -d -m 0700 "$fixture_root"
+printf '%s\n' '{}' > "$config"
+chmod 0600 "$config"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$legacy"
+chmod 0755 "$legacy"
+/usr/bin/env -i HOME=/root LANG=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /bin/bash -seu -- "$@" < "$bootstrap"
+"""
+
+            def execute(fixture_root: str, label: str):
+                config = f"{fixture_root}/config.json"
+                legacy = f"{fixture_root}/legacy"
+                selected = bootstrap.replace(
+                    "canonical_config=/etc/buh-platform-v2/receiver.json",
+                    f"canonical_config={config}",
+                ).replace(
+                    "canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote",
+                    f"canonical_legacy={legacy}",
+                )
+                bootstrap_path = base / f"bootstrap-{label}.sh"
+                bootstrap_path.write_text(
+                    selected, encoding="utf-8", newline="\n"
+                )
+                return subprocess.run(
+                    [
+                        *privilege,
+                        BASH,
+                        "-c",
+                        wrapper,
+                        "receiver-bootstrap-test",
+                        fixture_root,
+                        config,
+                        legacy,
+                        bootstrap_path,
+                        archive,
+                        archive_hash,
+                        str(archive.stat().st_size),
+                        inventory,
+                        inventory_hash,
+                        str(inventory.stat().st_size),
+                        commit,
+                        "upgrade",
+                        request,
+                        config,
+                        legacy,
+                        str(request.stat().st_size),
+                        request_hash,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+
+            token = secrets.token_hex(12)
+            success = execute(f"/root/buh-bootstrap-test-{token}", "protected")
+            bounded = (success.stdout[-1200:] + success.stderr[-1200:]).strip()
+            self.assertEqual(success.returncode, 0, bounded)
+            self.assertIn("INSTALL-STUB-HANDOFF", success.stdout)
+
+            unsafe = execute(f"/var/tmp/buh-bootstrap-test-{token}", "unsafe")
+            bounded = (unsafe.stdout[-1200:] + unsafe.stderr[-1200:]).strip()
+            self.assertEqual(unsafe.returncode, 65, bounded)
+            self.assertIn("Receiver input pinning failed.", unsafe.stderr)
+            self.assertNotIn("INSTALL-STUB-HANDOFF", unsafe.stdout)
+
+    @unittest.skipUnless(
         os.name == "posix" and POWERSHELL and shutil.which("git"),
         "requires POSIX, PowerShell, and Git",
     )

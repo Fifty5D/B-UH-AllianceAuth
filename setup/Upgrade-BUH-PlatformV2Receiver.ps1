@@ -237,7 +237,7 @@ subject_size="${12}"
 subject_hash="${13}"
 canonical_config=/etc/buh-platform-v2/receiver.json
 canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote
-root_stage="$(mktemp -d /var/tmp/buh-reviewed-receiver.XXXXXXXX)"
+root_stage="$(mktemp -d /root/buh-reviewed-receiver.XXXXXXXX)"
 cleanup() { rm -rf -- "$root_stage"; }
 trap cleanup EXIT
 install -d -m 0700 "$root_stage/home" "$root_stage/source" "$root_stage/inputs"
