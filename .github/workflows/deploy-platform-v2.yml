@@ -288,7 +288,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_commit }}
-          fetch-depth: 2
+          # Recovery archives verify every immutable release in the fixed
+          # lineage locally before any request crosses the SSH boundary.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify release lineage, bundle, and production compatibility

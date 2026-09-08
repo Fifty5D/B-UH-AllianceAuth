@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import copy
 import gzip
+import hashlib
 import io
 import json
-import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -54,16 +54,6 @@ def recovery_request_data() -> dict:
             "releases": policy["published_releases"],
         },
     )
-
-
-def git_file(commit: str, path: str) -> bytes:
-    return subprocess.run(
-        ["git", "show", f"{commit}:{path}"],
-        cwd=ROOT,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ).stdout
 
 
 def tar_bytes(entries, *, pax=False) -> bytes:
@@ -510,22 +500,33 @@ class BundleTests(unittest.TestCase):
             target_path = (
                 f"releases/platform/v{target['platform_version']}/RELEASE.json"
             )
-            target_bytes = git_file(target["release_commit"], target_path)
+            # These four immutable files are an explicit part of the reviewed
+            # receiver export.  Reading them from the exported tree keeps the
+            # mandatory root-side gate independent of an enclosing Git object
+            # database while the repository-only archive tests retain the
+            # complete commit-history verification.
+            target_bytes = (ROOT / target_path).read_text(encoding="ascii").encode(
+                "ascii"
+            )
             target_manifest = json.loads(target_bytes)
             (release_dir / "RELEASE.json").write_bytes(target_bytes)
             (release_dir / "INSTALL_PLAN.json").write_bytes(
-                git_file(
-                    target["release_commit"],
-                    f"releases/platform/v{target['platform_version']}/INSTALL_PLAN.json",
-                )
+                (
+                    ROOT
+                    / f"releases/platform/v{target['platform_version']}/INSTALL_PLAN.json"
+                ).read_text(encoding="ascii").encode("ascii")
             )
             for identity in policy["published_releases"][:-1]:
                 version = identity["platform_version"]
+                manifest_bytes = (
+                    ROOT / f"releases/platform/v{version}/RELEASE.json"
+                ).read_text(encoding="ascii").encode("ascii")
+                self.assertEqual(
+                    hashlib.sha256(manifest_bytes).hexdigest(),
+                    identity["manifest_sha256"],
+                )
                 (lineage_dir / f"v{version}.RELEASE.json").write_bytes(
-                    git_file(
-                        identity["release_commit"],
-                        f"releases/platform/v{version}/RELEASE.json",
-                    )
+                    manifest_bytes
                 )
             request = recovery_request_data()
             write_canonical(root / "REQUEST.json", request)

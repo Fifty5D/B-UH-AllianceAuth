@@ -1819,7 +1819,169 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
         self.assertIn("ls-tree -r --full-tree $ReviewedCommit -- $RequiredSources", helper)
         self.assertEqual(len(required), len(set(required)))
         self.assertIn("tests/deploy/test_upgrade_receiver.py", required)
+        self.assertEqual(
+            {
+                "releases/platform/v0.5.6/RELEASE.json",
+                "releases/platform/v0.6.0/RELEASE.json",
+                "releases/platform/v0.6.1/INSTALL_PLAN.json",
+                "releases/platform/v0.6.1/RELEASE.json",
+            },
+            {item for item in required if item.startswith("releases/")},
+        )
         self.assertNotIn(".env", required)
+
+    @unittest.skipUnless(
+        os.name == "posix"
+        and shutil.which("git")
+        and shutil.which("python3")
+        and os.environ.get("BUH_EXPORTED_GATE_CHILD") != "1",
+        "requires a POSIX receiver environment and is skipped inside its child gate",
+    )
+    def test_exact_export_passes_root_gate_without_an_enclosing_git_repository(self):
+        """Execute the pre-activation unittest command against only its allowlist."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            reviewed_repo = base / "reviewed-repo"
+            exported = base / "isolated-export"
+            reviewed_repo.mkdir()
+            exported.mkdir()
+            required = powershell_required_sources()
+            for relative in required:
+                destination = reviewed_repo / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+
+            commands = (
+                ("git", "init", "--quiet", reviewed_repo),
+                ("git", "-C", reviewed_repo, "config", "user.name", "Receiver Gate"),
+                (
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "config",
+                    "user.email",
+                    "receiver-gate@example.invalid",
+                ),
+                ("git", "-C", reviewed_repo, "add", "--", *required),
+                ("git", "-C", reviewed_repo, "commit", "--quiet", "-m", "reviewed export"),
+            )
+            for command in commands:
+                result = subprocess.run(
+                    [str(item) for item in command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+            commit = subprocess.run(
+                ["git", "-C", reviewed_repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "ls-tree",
+                    "-r",
+                    "--full-tree",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            inventory = base / "TRACKED"
+            inventory.write_text(inventory_result.stdout, encoding="ascii", newline="\n")
+            archive_path = base / "receiver-tree.tar"
+            archived = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive_path}",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(archived.returncode, 0, archived.stderr[-1200:])
+            with tarfile.open(archive_path, "r:") as archive:
+                archive.extractall(exported, filter="data")
+
+            self.assertFalse((exported / ".git").exists())
+            outside_git = subprocess.run(
+                ["git", "-C", exported, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(outside_git.returncode, 0)
+            self.assertEqual(
+                set(required),
+                {
+                    path.relative_to(exported).as_posix()
+                    for path in exported.rglob("*")
+                    if path.is_file()
+                },
+            )
+
+            environment = {
+                "BUH_EXPORTED_GATE_CHILD": "1",
+                "BUH_LEGACY_RECEIVER_PATH": (
+                    receiver_upgrade.CANONICAL_LEGACY_RECEIVER_PATH
+                ),
+                "BUH_PINNED_CONFIG_SHA256": "1" * 64,
+                "BUH_PINNED_LEGACY_SHA256": "2" * 64,
+                "BUH_PINNED_REQUEST_SHA256": "3" * 64,
+                "BUH_RECEIVER_CONFIG_PATH": receiver_upgrade.CANONICAL_CONFIG_PATH,
+                "BUH_REVIEWED_COMMIT": commit,
+                "BUH_REVIEWED_INVENTORY": str(inventory),
+                "BUH_REVIEWED_INVENTORY_SHA256": hashlib.sha256(
+                    inventory.read_bytes()
+                ).hexdigest(),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "HOME": str(base / "root-home"),
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(exported),
+            }
+            (base / "root-home").mkdir()
+            gate = subprocess.run(
+                [
+                    "python3",
+                    "-P",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    exported / "tests/deploy",
+                    "-t",
+                    exported,
+                    "-p",
+                    "test_*.py",
+                ],
+                cwd=exported,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=180,
+            )
+            bounded = (gate.stdout[-1200:] + gate.stderr[-2400:]).strip()
+            self.assertEqual(gate.returncode, 0, bounded)
 
     def test_manual_recovery_imports_only_independently_verified_reviewed_source(self):
         helper = (ROOT / "setup/Upgrade-BUH-PlatformV2Receiver.ps1").read_text()

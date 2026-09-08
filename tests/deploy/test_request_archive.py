@@ -11,7 +11,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from ops.deploy import contracts
+from ops.deploy import request_archive
+from ops.release import buh_release
 from ops.release import recovery_policy
 
 
@@ -33,6 +37,158 @@ def run(*arguments: object, cwd: Path = ROOT) -> subprocess.CompletedProcess[str
 
 
 class RequestArchiveExecutionTests(unittest.TestCase):
+    def test_workflow_checkout_supplies_history_for_the_next_recovery_release(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/deploy-platform-v2.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        steps = workflow["jobs"]["deploy"]["steps"]
+        checkout_step = next(
+            step
+            for step in steps
+            if step.get("name") == "Check out the exact published release commit"
+        )
+        fetch_depth = checkout_step["with"]["fetch-depth"]
+        self.assertEqual(fetch_depth, 0)
+        self.assertIs(checkout_step["with"]["persist-credentials"], False)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            builder = base / "builder"
+            cloned = run(
+                "git",
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                "--no-hardlinks",
+                "--",
+                ROOT,
+                builder,
+            )
+            self.assertEqual(cloned.returncode, 0, cloned.stderr[-1200:])
+            for key, value in (
+                ("core.autocrlf", "false"),
+                ("user.name", "Recovery Archive Test"),
+                ("user.email", "recovery-archive@example.invalid"),
+            ):
+                configured = run("git", "config", key, value, cwd=builder)
+                self.assertEqual(configured.returncode, 0, configured.stderr[-1200:])
+            source_commit = run("git", "-C", ROOT, "rev-parse", "HEAD").stdout.strip()
+            checked_out = run(
+                "git", "checkout", "--quiet", "--detach", source_commit, cwd=builder
+            )
+            self.assertEqual(checked_out.returncode, 0, checked_out.stderr[-1200:])
+
+            plan = buh_release.create_plan(
+                repo_root=builder,
+                registry_path=builder / "ops/release/apps.toml",
+                compatibility_path=builder / "platform/compatibility.toml",
+                changes_dir=builder / "changes",
+                previous_manifest_path=(
+                    builder / "releases/platform/v0.6.1/RELEASE.json"
+                ),
+                source_commit=source_commit,
+                test_run="workflow-checkout-regression",
+            )
+            self.assertEqual(plan["platform_version"], "0.6.2")
+            release_dir = builder / "releases/platform/v0.6.2"
+            buh_release.assemble_release(
+                plan=plan,
+                wheel_dir=base / "unused-wheels",
+                previous_release_dir=builder / "releases/platform/v0.6.1",
+                output_dir=release_dir,
+                repo_root=builder,
+            )
+            added = run(
+                "git", "add", "--", "releases/platform/v0.6.2", cwd=builder
+            )
+            self.assertEqual(added.returncode, 0, added.stderr[-1200:])
+            committed = run(
+                "git", "commit", "--quiet", "-m", "synthetic release", cwd=builder
+            )
+            self.assertEqual(committed.returncode, 0, committed.stderr[-1200:])
+            release_commit = run("git", "rev-parse", "HEAD", cwd=builder).stdout.strip()
+            branched = run(
+                "git",
+                "branch",
+                "release/platform-v0.6.2",
+                release_commit,
+                cwd=builder,
+            )
+            self.assertEqual(branched.returncode, 0, branched.stderr[-1200:])
+
+            def checkout(name: str, depth: int) -> Path:
+                destination = base / name
+                arguments: list[object] = [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-checkout",
+                    "--branch",
+                    "release/platform-v0.6.2",
+                ]
+                if depth:
+                    arguments.extend(("--depth", depth))
+                arguments.extend(("--", builder.as_uri(), destination))
+                result = run(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+                configured = run(
+                    "git", "config", "core.autocrlf", "false", cwd=destination
+                )
+                self.assertEqual(configured.returncode, 0, configured.stderr[-1200:])
+                exact = run(
+                    "git", "checkout", "--quiet", "--detach", release_commit, cwd=destination
+                )
+                self.assertEqual(exact.returncode, 0, exact.stderr[-1200:])
+                return destination
+
+            shallow = checkout("depth-two", 2)
+            with self.assertRaisesRegex(
+                request_archive.RequestArchiveError,
+                "Git identity verification failed",
+            ):
+                request_archive.build_archive(
+                    root=shallow,
+                    release_dir=shallow / "releases/platform/v0.6.2",
+                    repository="Fifty5D/B-UH-AllianceAuth",
+                    release_commit=release_commit,
+                    mode="preflight",
+                    workflow_run_id="7000001",
+                    workflow_run_attempt=1,
+                    output=base / "shallow.tar.gz",
+                )
+
+            exact_checkout = checkout("workflow-checkout", fetch_depth)
+            output = base / "complete.tar.gz"
+            metadata = request_archive.build_archive(
+                root=exact_checkout,
+                release_dir=exact_checkout / "releases/platform/v0.6.2",
+                repository="Fifty5D/B-UH-AllianceAuth",
+                release_commit=release_commit,
+                mode="preflight",
+                workflow_run_id="7000002",
+                workflow_run_attempt=1,
+                output=output,
+            )
+            self.assertEqual(metadata["platform_version"], "0.6.2")
+            self.assertEqual(
+                [item["platform_version"] for item in metadata["release_refs"]],
+                ["0.5.6", "0.6.0", "0.6.1", "0.6.2"],
+            )
+            extracted = base / "complete-extracted"
+            contracts.extract_archive(output.read_bytes(), extracted)
+            bundle = contracts.load_validated_bundle(
+                extracted,
+                contracts.ReceiverConfig.load(
+                    exact_checkout / "ops/deploy/receiver-config.example.json"
+                ),
+            )
+            self.assertEqual(
+                bundle.request.recovery_transition["purpose"],
+                "production-recovery",
+            )
+
     def test_bootstrap_cli_is_deterministic_and_receiver_compatible(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

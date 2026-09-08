@@ -1323,6 +1323,15 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
         self.assertIs(checkout["with"]["persist-credentials"], False)
 
+        production = _load_workflow(WORKFLOWS / "deploy-platform-v2.yml")
+        release_checkout = next(
+            step
+            for step in production["jobs"]["deploy"]["steps"]
+            if step.get("name") == "Check out the exact published release commit"
+        )
+        self.assertEqual(release_checkout["with"]["fetch-depth"], 0)
+        self.assertIs(release_checkout["with"]["persist-credentials"], False)
+
     def test_release_automation_stops_at_the_chatgpt_approval_boundary(self):
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
         automatic_text = (WORKFLOWS / "auto-platform-release.yml").read_text(

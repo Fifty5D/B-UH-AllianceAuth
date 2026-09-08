@@ -517,7 +517,6 @@ class DeploymentEngine:
                         pass
             except BaseException as error:
                 signal_guard.protect_recovery()
-                verification = self.backend.stabilization_evidence()
                 try:
                     recovery = self.backend.rollback(bundle, self.journal.state)
                     rollback_passed = True
@@ -529,6 +528,10 @@ class DeploymentEngine:
                         f"({rollback_error.__class__.__name__}: {rollback_summary})."
                     )
                     rollback_passed = False
+                # Rollback can itself produce a narrowly verified transition
+                # warning.  Capture evidence after that attempt so the failure
+                # journal never silently discards it.
+                verification = self.backend.stabilization_evidence()
                 self.journal.fail(
                     error,
                     recovery,
