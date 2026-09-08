@@ -1,0 +1,32 @@
+# Sanitized retained excerpt from Prepare Release run 34084467513.
+# Request correlation values were replaced; the reviewed guild/owner IDs remain exact.
+[07/Sep/2026 04:50:00] DEBUG [allianceauth.services.modules.discord.discord_client.client:676] [Discord Service] sanitized-request-id: response:
+{"message": "Missing Permissions", "code": 50013}
+[2026-09-07 04:50:00,225: DEBUG/MainProcess] [Discord Service] sanitized-request-id: response:
+{"message": "Missing Permissions", "code": 50013}
+[07/Sep/2026 04:50:00] ERROR [allianceauth.services.modules.discord.discord_client.client:679] [Discord Service] sanitized-request-id: Discord API returned error code 403 for member ID 318985508913020930 with this response: {"message": "Missing Permissions", "code": 50013}.
+[2026-09-07 04:50:00,225: ERROR/MainProcess] [Discord Service] sanitized-request-id: Discord API returned error code 403 for member ID 318985508913020930 with this response: {"message": "Missing Permissions", "code": 50013}.
+[07/Sep/2026 04:50:00] DEBUG [allianceauth.services.modules.discord.discord_client.client:804] [Discord Service] sanitized-request-id: Rate limit reported from API: 10 requests per 10000.0 ms
+[2026-09-07 04:50:00,225: DEBUG/MainProcess] [Discord Service] sanitized-request-id: Rate limit reported from API: 10 requests per 10000.0 ms
+[07/Sep/2026 04:50:00] WARNING [allianceauth.services.modules.discord.tasks:100] [Discord Service] update_nickname failed for user Fifty5D, retrying in 60 secs
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/tasks.py", line 84, in _task_perform_user_action
+    success = getattr(user.discord, method)(**kwargs)
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/models.py", line 71, in update_nickname
+    success = default_bot_client.modify_guild_member(guild_id=DISCORD_GUILD_ID, user_id=self.uid, nick=nickname)
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/discord_client/client.py", line 499, in modify_guild_member
+    r.raise_for_status()
+  File "/usr/local/lib/python3.12/site-packages/requests/models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://discord.com/api/guilds/1521272563626672198/members/318985508913020930
+[2026-09-07 04:50:00,225: WARNING/MainProcess] [Discord Service] update_nickname failed for user Fifty5D, retrying in 60 secs
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/tasks.py", line 84, in _task_perform_user_action
+    success = getattr(user.discord, method)(**kwargs)
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/models.py", line 71, in update_nickname
+    success = default_bot_client.modify_guild_member(guild_id=DISCORD_GUILD_ID, user_id=self.uid, nick=nickname)
+  File "/usr/local/lib/python3.12/site-packages/allianceauth/services/modules/discord/discord_client/client.py", line 499, in modify_guild_member
+    r.raise_for_status()
+  File "/usr/local/lib/python3.12/site-packages/requests/models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://discord.com/api/guilds/1521272563626672198/members/318985508913020930

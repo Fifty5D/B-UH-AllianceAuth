@@ -1825,6 +1825,9 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
         self.assertIn("ls-tree -r --full-tree $ReviewedCommit -- $RequiredSources", helper)
         self.assertEqual(len(required), len(set(required)))
         self.assertIn("tests/deploy/test_upgrade_receiver.py", required)
+        self.assertIn(
+            "tests/deploy/fixtures/discord-owner-50013-mainprocess.log", required
+        )
         self.assertEqual(
             {
                 "releases/platform/v0.5.6/RELEASE.json",

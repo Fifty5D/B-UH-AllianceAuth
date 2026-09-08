@@ -1,5 +1,5 @@
 schema_version = 1
 app = "platform"
 kind = "fix"
-summary = "Restore the exact guarded release path with self-contained receiver tests, complete lineage checkout, and container-bound recovery diagnostics."
+summary = "Restore the guarded release path with self-contained receiver tests, complete lineage checkout, and exact MainProcess or Alliance Auth owner diagnostics."
 deployment_predecessor = "0.5.6"

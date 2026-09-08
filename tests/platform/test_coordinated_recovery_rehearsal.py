@@ -27,6 +27,7 @@ from ops.deploy.engine import (
 )
 from ops.release import buh_release, recovery_policy
 from tests.deploy.test_docker_host import (
+    RETAINED_DISCORD_OWNER_LOG,
     container_id,
     discord_nickname_record,
     make_config,
@@ -462,6 +463,8 @@ class SyntheticDockerBoundary:
                 and self.replaced_workers
                 and self.post_replace_log_round >= 2
                 and service == self.host.config.worker_service
+                and self.containers[self.services[service][0]]["image"]
+                != self.original_images[service]
             ):
                 return "ERROR synthetic stabilization boundary failure\n"
             return ""
@@ -525,12 +528,13 @@ class SyntheticDockerBoundary:
                 and state["image"] == self.original_images[service]
                 and container == self.services[service][0]
             ):
-                return discord_nickname_record(frames=39)
+                return RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
             if (
                 self.fail_during_stabilization
                 and self.replaced_workers
                 and self.post_replace_log_round >= 2
                 and service == self.host.config.worker_service
+                and state["image"] != self.original_images[service]
             ):
                 return (
                     "[2026-09-07 22:20:00,000: ERROR/ForkPoolWorker-2] "
@@ -1271,7 +1275,11 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             owner_container = container_id(20)
             with owner_log_environment(
                 health_host,
-                {owner_container: discord_nickname_record(frames=39)},
+                {
+                    owner_container: RETAINED_DISCORD_OWNER_LOG.read_text(
+                        encoding="utf-8"
+                    )
+                },
             ):
                 visible = health_host._scan_new_logs(
                     health_host.config.auth_services,

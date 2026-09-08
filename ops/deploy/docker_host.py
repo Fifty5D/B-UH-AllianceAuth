@@ -53,6 +53,25 @@ FATAL_LOG_RE = re.compile(
     r"(?:restart(?:ing|ed)?\s+(?:too\s+)?(?:often|repeatedly))",
     re.IGNORECASE,
 )
+CELERY_LOG_HEADER_RE = re.compile(
+    r"^\[(?P<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"(?:,[0-9]{1,6})?: (?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)/"
+    r"(?P<process>[A-Za-z0-9_.-]{1,64})\](?:[ \t]+|$)"
+)
+ALLIANCEAUTH_LOG_HEADER_RE = re.compile(
+    r"^\[(?P<day>[0-9]{2})/(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/"
+    r"(?P<year>[0-9]{4}) (?P<clock>[0-9]{2}:[0-9]{2}:[0-9]{2})\] "
+    r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) "
+    r"\[(?P<component>[A-Za-z0-9_.]{1,160}):(?P<source_line>[0-9]{1,6})\]"
+    r"(?:[ \t]+|$)"
+)
+ALLIANCEAUTH_LOG_MONTHS = {
+    month: f"{index:02d}"
+    for index, month in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
 SAFE_DATABASE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 SAFE_COMPOSE_PATH_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._/-]{0,254}$")
 SAFE_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -4247,6 +4266,7 @@ class DockerHost:
             )
         owner_service_findings: dict[str, set[int]] = {}
         owner_service_processes: dict[str, set[str]] = {}
+        owner_service_formats: dict[str, set[str]] = {}
         owner_invalid_indexes: dict[str, set[int]] = {}
         if owner_transition_phase is not None:
             owner = recovery_policy.load_policy()["host_baseline"]["discord_owner"]
@@ -4260,10 +4280,38 @@ class DockerHost:
                 r"Discord HTTP 403, code 50013: Missing Permissions)[.!]?\s*$",
                 re.IGNORECASE,
             )
-            record_header = re.compile(
-                r"^\[[^\]\r\n]{1,128}: "
-                r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)/"
-                r"(?P<process>[A-Za-z0-9_.-]{1,64})\]",
+            response_payload = re.compile(
+                r'^\{\s*"message"\s*:\s*"Missing Permissions"\s*,\s*'
+                r'"code"\s*:\s*50013\s*\}\s*$',
+                re.IGNORECASE,
+            )
+            api_denied = re.compile(
+                r"\[Discord Service\] [A-Za-z0-9_-]{1,64}: Discord API returned "
+                r"error code 403 for member ID "
+                + re.escape(owner["discord_user_id"])
+                + r" with this response: \{\s*\"message\"\s*:\s*"
+                r"\"Missing Permissions\"\s*,\s*\"code\"\s*:\s*50013\s*\}"
+                r"[.]?\s*$",
+                re.IGNORECASE,
+            )
+            response_header = re.compile(
+                r"\[Discord Service\] [A-Za-z0-9_-]{1,64}: response:\s*$",
+                re.IGNORECASE,
+            )
+            traceback_denied = re.compile(
+                r"requests[.]exceptions[.]HTTPError: 403 Client Error: Forbidden "
+                r"for url: https://discord[.]com/api/guilds/"
+                + re.escape(owner["guild_id"])
+                + r"/members/"
+                + re.escape(owner["discord_user_id"])
+                + r"/?\s*$",
+                re.IGNORECASE,
+            )
+            any_operation_failure = re.compile(
+                r"update_[A-Za-z0-9_]+ failed for user ", re.IGNORECASE
+            )
+            allowed_process = re.compile(
+                r"(?:MainProcess|ForkPoolWorker-[1-9][0-9]{0,4})"
             )
             for source, text in logs_by_source:
                 service = source.partition("/")[0]
@@ -4273,59 +4321,188 @@ class DockerHost:
                 indexes: set[int] = set()
                 invalid_indexes: set[int] = set()
                 processes: set[str] = set()
-                starts = [
-                    index
-                    for index, line in enumerate(lines)
-                    if record_header.match(line) is not None
-                ]
-                for position, start in enumerate(starts):
-                    end = starts[position + 1] if position + 1 < len(starts) else len(lines)
-                    record = lines[start:end]
-                    header = record_header.match(record[0])
-                    assert header is not None
-                    owner_retries = [line for line in record if retry.search(line)]
-                    denied_lines = [line for line in record if denied.search(line)]
-                    any_nickname_failure = any(
-                        re.search(r"update_nickname failed for user ", line, re.IGNORECASE)
-                        for line in record
-                    )
-                    if not owner_retries and not denied_lines and not any_nickname_failure:
-                        continue
-                    fatal_extras = [
-                        line
-                        for line in record
-                        if FATAL_LOG_RE.search(line)
-                        and "Traceback (most recent call last):" not in line
-                        and denied.search(line) is None
-                    ]
-                    process = header.group("process")
-                    valid = (
-                        header.group("level") == "WARNING"
-                        and re.fullmatch(r"ForkPoolWorker-[1-9][0-9]{0,4}", process)
-                        is not None
-                        and len(record) <= 128
-                        and len(owner_retries) == 1
-                        and len(denied_lines) == 1
-                        and not fatal_extras
-                        and sum(
-                            1
-                            for line in record
-                            if re.search(
-                                r"update_[A-Za-z0-9_]+ failed for user ",
-                                line,
-                                re.IGNORECASE,
+                formats: set[str] = set()
+                headers: list[tuple[int, dict[str, str]]] = []
+                for index, line in enumerate(lines):
+                    celery = CELERY_LOG_HEADER_RE.match(line)
+                    if celery is not None:
+                        headers.append(
+                            (
+                                index,
+                                {
+                                    "family": "celery",
+                                    "timestamp": celery.group("timestamp"),
+                                    "level": celery.group("level"),
+                                    "process": celery.group("process"),
+                                    "component": "",
+                                    "source_line": "",
+                                },
                             )
                         )
-                        == 1
+                        continue
+                    allianceauth = ALLIANCEAUTH_LOG_HEADER_RE.match(line)
+                    if allianceauth is not None:
+                        timestamp = (
+                            f"{allianceauth.group('year')}-"
+                            f"{ALLIANCEAUTH_LOG_MONTHS[allianceauth.group('month')]}-"
+                            f"{allianceauth.group('day')} "
+                            f"{allianceauth.group('clock')}"
+                        )
+                        headers.append(
+                            (
+                                index,
+                                {
+                                    "family": "allianceauth",
+                                    "timestamp": timestamp,
+                                    "level": allianceauth.group("level"),
+                                    "process": "",
+                                    "component": allianceauth.group("component"),
+                                    "source_line": allianceauth.group("source_line"),
+                                },
+                            )
+                        )
+                records: list[dict[str, Any]] = []
+                for position, (start, details) in enumerate(headers):
+                    end = (
+                        headers[position + 1][0]
+                        if position + 1 < len(headers)
+                        else len(lines)
                     )
+                    records.append(
+                        {
+                            **details,
+                            "start": start,
+                            "end": end,
+                            "lines": lines[start:end],
+                        }
+                    )
+                relevant_by_timestamp: dict[str, list[dict[str, Any]]] = {}
+                for record in records:
+                    record_lines = record["lines"]
+                    if not any(
+                        any_operation_failure.search(line)
+                        or "50013" in line
+                        or "Missing Permissions" in line
+                        for line in record_lines
+                    ):
+                        continue
+                    relevant_by_timestamp.setdefault(record["timestamp"], []).append(
+                        record
+                    )
+                for incident in relevant_by_timestamp.values():
+                    valid = True
+                    accepted_indexes: set[int] = set()
+                    retry_families: set[str] = set()
+                    denial_kinds: dict[str, set[str]] = {}
+                    incident_processes: set[str] = set()
+                    incident_formats: set[str] = set()
+                    for record in incident:
+                        record_lines = record["lines"]
+                        absolute_lines = tuple(
+                            enumerate(record_lines, start=record["start"])
+                        )
+                        operation_lines = [
+                            (index, line)
+                            for index, line in absolute_lines
+                            if any_operation_failure.search(line)
+                        ]
+                        owner_retries = [
+                            (index, line)
+                            for index, line in absolute_lines
+                            if retry.search(line)
+                        ]
+                        family = record["family"]
+                        process = record["process"]
+                        if family == "celery":
+                            if allowed_process.fullmatch(process) is None:
+                                valid = False
+                            incident_processes.add(process)
+                        if operation_lines:
+                            valid = valid and len(operation_lines) == 1
+                            valid = valid and len(owner_retries) == 1
+                            if family == "celery":
+                                valid = valid and record["level"] == "WARNING"
+                            else:
+                                valid = valid and (
+                                    record["level"] == "WARNING"
+                                    and record["component"]
+                                    == "allianceauth.services.modules.discord.tasks"
+                                    and record["source_line"] == "100"
+                                )
+                            if family in retry_families:
+                                valid = False
+                            retry_families.add(family)
+                            incident_formats.add(family)
+                            accepted_indexes.update(index for index, _line in owner_retries)
+                            traceback_headers = [
+                                index
+                                for index, line in absolute_lines
+                                if line.strip() == "Traceback (most recent call last):"
+                            ]
+                            traceback_terminals = [
+                                index
+                                for index, line in absolute_lines
+                                if traceback_denied.fullmatch(line.strip()) is not None
+                            ]
+                            compact_denials = [
+                                index
+                                for index, line in absolute_lines
+                                if denied.search(line) is not None
+                            ]
+                            valid = valid and len(record_lines) <= 128
+                            valid = valid and len(traceback_headers) == 1
+                            valid = valid and len(traceback_terminals) <= 1
+                            valid = valid and bool(
+                                traceback_terminals or compact_denials
+                            )
+                            accepted_indexes.update(traceback_headers)
+                            accepted_indexes.update(traceback_terminals)
+                        for index, line in absolute_lines:
+                            kind: str | None = None
+                            if denied.search(line) is not None:
+                                kind = "compact"
+                                valid = valid and bool(operation_lines)
+                            elif response_payload.fullmatch(line.strip()) is not None:
+                                kind = "response-json"
+                                valid = valid and record["level"] == "DEBUG"
+                                valid = valid and response_header.search(record_lines[0]) is not None
+                                if family == "allianceauth":
+                                    valid = valid and (
+                                        record["component"]
+                                        == "allianceauth.services.modules.discord.discord_client.client"
+                                        and record["source_line"] == "676"
+                                    )
+                            elif api_denied.search(line) is not None:
+                                kind = "api-error"
+                                valid = valid and record["level"] == "ERROR"
+                                if family == "allianceauth":
+                                    valid = valid and (
+                                        record["component"]
+                                        == "allianceauth.services.modules.discord.discord_client.client"
+                                        and record["source_line"] == "679"
+                                    )
+                            if kind is None:
+                                continue
+                            family_kinds = denial_kinds.setdefault(family, set())
+                            if kind in family_kinds:
+                                valid = False
+                            family_kinds.add(kind)
+                            accepted_indexes.add(index)
+                            incident_formats.add(family)
+                    valid = valid and 1 <= len(retry_families) <= 2
+                    valid = valid and retry_families == set(denial_kinds)
+                    valid = valid and all(denial_kinds.values())
+                    valid = valid and len(incident_processes) <= 1
                     if valid:
-                        indexes.update(range(start, end))
-                        processes.add(process)
-                    elif owner_retries or denied_lines or any_nickname_failure:
-                        invalid_indexes.add(start)
+                        indexes.update(accepted_indexes)
+                        processes.update(incident_processes)
+                        formats.update(incident_formats)
+                    else:
+                        invalid_indexes.add(min(record["start"] for record in incident))
                 if indexes:
                     owner_service_findings[source] = indexes
                     owner_service_processes[source] = processes
+                    owner_service_formats[source] = formats
                 if invalid_indexes:
                     owner_invalid_indexes[source] = invalid_indexes
         for source, text in logs_by_source:
@@ -4334,10 +4511,14 @@ class DockerHost:
             for index, raw_line in enumerate(text.splitlines()):
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
+                    if not processes:
+                        processes = "not-emitted"
+                    formats = ",".join(sorted(owner_service_formats[source]))
                     safe = (
                         f"expected Discord guild-owner nickname 50013 during "
                         f"{owner_transition_phase} on retained {source} "
-                        f"process {processes} guild {owner['guild_id']}"
+                        f"process {processes} formats {formats} "
+                        f"guild {owner['guild_id']}"
                     )
                     if safe not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
                         allowed.append(safe)

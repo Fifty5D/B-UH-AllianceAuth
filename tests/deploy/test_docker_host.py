@@ -37,6 +37,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_IMAGE = (
     "ghcr.io/allianceauth/allianceauth:v5.2.0@sha256:" + "1" * 64
 )
+RETAINED_DISCORD_OWNER_LOG = (
+    ROOT / "tests/deploy/fixtures/discord-owner-50013-mainprocess.log"
+)
 
 
 @contextmanager
@@ -3110,26 +3113,90 @@ class DockerHostContracts(unittest.TestCase):
                 }.issubset(scanned)
             )
 
-    def test_owner_nickname_record_is_bound_to_old_container_process_and_phase(self):
+    def test_owner_nickname_records_are_bound_to_old_container_process_and_phase(self):
         policy = recovery_policy.load_policy()
         guild = policy["host_baseline"]["discord_owner"]["guild_id"]
+        retained = RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
+        retained_retries = "".join(
+            retained.replace("04:50:00", timestamp)
+            for timestamp in ("04:50:00", "04:51:00", "04:52:00")
+        )
+        cases = (
+            ("fork-pool", discord_nickname_record(frames=40), "ForkPoolWorker-1", "celery"),
+            (
+                "main-process",
+                discord_nickname_record(process="MainProcess", frames=40),
+                "MainProcess",
+                "celery",
+            ),
+            ("retained-production", retained, "MainProcess", "allianceauth,celery"),
+            (
+                "retained-production-retries",
+                retained_retries,
+                "MainProcess",
+                "allianceauth,celery",
+            ),
+        )
         for phase in ("candidate-health", "worker-cutover", "rollback"):
-            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+            for name, record, process, formats in cases:
+                with (
+                    self.subTest(phase=phase, record=name),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    config = make_config(Path(temporary))
+                    host = DockerHost(config)
+                    container = container_id(20)
+                    with owner_log_environment(
+                        host,
+                        {container: record},
+                        rollback=phase == "rollback",
+                    ):
+                        findings = host._scan_new_logs(
+                            config.auth_services, owner_transition_phase=phase
+                        )
+                    self.assertEqual(len(findings), 1)
+                    self.assertIn(
+                        f"retained {config.worker_service}/{container[:12]}",
+                        findings[0],
+                    )
+                    self.assertIn(f"process {process}", findings[0])
+                    self.assertIn(f"formats {formats}", findings[0])
+                    self.assertIn(f"guild {guild}", findings[0])
+
+    def test_retained_owner_record_near_matches_remain_fatal(self):
+        retained = RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
+        cases = {
+            "another-member": retained.replace("user Fifty5D", "user OrdinaryMember"),
+            "role-operation": retained.replace(
+                "update_nickname failed", "update_groups failed"
+            ),
+            "unrelated-error": retained
+            + "[2026-09-07 04:50:00,226: ERROR/MainProcess] unrelated failure\n",
+            "wrong-member-id": retained.replace(
+                "318985508913020930", "318985508913020931"
+            ),
+            "wrong-guild-id": retained.replace(
+                "1521272563626672198", "1521272563626672199"
+            ),
+        }
+        for name, record in cases.items():
+            with (
+                self.subTest(case=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 config = make_config(Path(temporary))
                 host = DockerHost(config)
                 container = container_id(20)
                 with owner_log_environment(
                     host,
-                    {container: discord_nickname_record(frames=40)},
-                    rollback=phase == "rollback",
+                    {container: record},
+                ), self.assertRaisesRegex(
+                    DeploymentError, "fatal AllianceAuth log"
                 ):
-                    findings = host._scan_new_logs(
-                        config.auth_services, owner_transition_phase=phase
+                    host._scan_new_logs(
+                        config.auth_services,
+                        owner_transition_phase="candidate-health",
                     )
-                self.assertEqual(len(findings), 1)
-                self.assertIn(f"retained {config.worker_service}/{container[:12]}", findings[0])
-                self.assertIn("process ForkPoolWorker-1", findings[0])
-                self.assertIn(f"guild {guild}", findings[0])
 
     def test_owner_transition_rejects_ambiguous_member_role_repeated_and_transient_records(self):
         owner = discord_nickname_record(frames=4)
