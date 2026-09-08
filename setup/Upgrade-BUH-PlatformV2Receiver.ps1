@@ -44,7 +44,7 @@ $RemotePaths = if ($Operation -eq "recover") {
     @($RecoveryBackup)
 }
 else {
-    @($ConfigPath, $LegacyReceiver, $PreflightRequest)
+    @($ConfigPath, $LegacyReceiver)
 }
 foreach ($RemotePath in $RemotePaths) {
     if ($RemotePath -notmatch '^/[A-Za-z0-9._/-]+$' -or $RemotePath.Contains('/../')) {
@@ -56,6 +56,21 @@ if (
     $RecoveryBackup -cnotmatch '^/var/backups/buh-receiver-upgrade/buh-receiver-[0-9a-f]{12}-[0-9a-f]{16}$'
 ) {
     throw "RecoveryBackup must be one exact receiver backup path printed by the upgrade."
+}
+$ResolvedPreflightRequest = $null
+if ($Operation -eq "upgrade") {
+    $ResolvedPreflightRequest = [IO.Path]::GetFullPath($PreflightRequest)
+    if (-not (Test-Path -LiteralPath $ResolvedPreflightRequest -PathType Leaf)) {
+        throw "PreflightRequest must name the locally prepared request archive."
+    }
+    $RequestSource = Get-Item -LiteralPath $ResolvedPreflightRequest -Force
+    if (
+        ($RequestSource.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $RequestSource.Length -le 0 -or
+        $RequestSource.Length -gt 536870912
+    ) {
+        throw "The locally prepared preflight request is unsafe."
+    }
 }
 
 $TopLevel = (& git -C $RepoRoot rev-parse --show-toplevel 2>$null | Out-String).Trim()
@@ -95,6 +110,7 @@ $RequiredSources = @(
     "ops/deploy/buh-deploy-dispatch",
     "ops/deploy/buh-platform-v2-receiver",
     "ops/deploy/contracts.py",
+    "ops/deploy/coordinated-recovery.json",
     "ops/deploy/deployment-request.schema.json",
     "ops/deploy/docker_host.py",
     "ops/deploy/engine.py",
@@ -103,10 +119,12 @@ $RequiredSources = @(
     "ops/deploy/receiver-config.example.json",
     "ops/deploy/receiver-config.schema.json",
     "ops/deploy/receiver.py",
+    "ops/deploy/request_archive.py",
     "ops/deploy/upgrade-receiver.sh",
     "ops/deploy/receiver_upgrade.py",
     "ops/release/__init__.py",
     "ops/release/buh_release.py",
+    "ops/release/recovery_policy.py",
     "platform/baselines/legacy-baseline.schema.json",
     "setup/Upgrade-BUH-PlatformV2Receiver.ps1",
     "tests/__init__.py",
@@ -133,6 +151,7 @@ $LocalStage = Join-Path ([IO.Path]::GetTempPath()) "buh-receiver-upgrade-$Attemp
 $TreeArchive = Join-Path $LocalStage "receiver-tree.tar"
 $Inventory = Join-Path $LocalStage "TRACKED"
 $Checksums = Join-Path $LocalStage "SHA256SUMS"
+$RequestUpload = Join-Path $LocalStage "preflight-request.tar.gz"
 $RemoteStage = "/tmp/buh-receiver-upgrade-$AttemptId"
 
 New-Item -ItemType Directory -Path $LocalStage -ErrorAction Stop | Out-Null
@@ -161,16 +180,30 @@ try {
     $InventoryHash = (Get-FileHash -LiteralPath $Inventory -Algorithm SHA256).Hash.ToLowerInvariant()
     $ArchiveSize = (Get-Item -LiteralPath $TreeArchive).Length
     $InventorySize = (Get-Item -LiteralPath $Inventory).Length
+    $ChecksumText = "$ArchiveHash  receiver-tree.tar`n$InventoryHash  TRACKED`n"
+    $RequestHash = "0"
+    $RequestSize = 0
+    if ($Operation -eq "upgrade") {
+        Copy-Item -LiteralPath $ResolvedPreflightRequest -Destination $RequestUpload -ErrorAction Stop
+        $RequestHash = (Get-FileHash -LiteralPath $RequestUpload -Algorithm SHA256).Hash.ToLowerInvariant()
+        $RequestSize = (Get-Item -LiteralPath $RequestUpload).Length
+        if ($RequestSize -le 0 -or $RequestSize -gt 536870912) {
+            throw "The pinned preflight request has an unsafe size."
+        }
+        $ChecksumText += "$RequestHash  preflight-request.tar.gz`n"
+    }
     [IO.File]::WriteAllText(
         $Checksums,
-        "$ArchiveHash  receiver-tree.tar`n$InventoryHash  TRACKED`n",
+        $ChecksumText,
         [Text.ASCIIEncoding]::new()
     )
 
     Write-Host "Transferring the exact reviewed receiver package to $SshTarget..." -ForegroundColor Cyan
     & ssh -T $SshTarget "umask 077 && mkdir '$RemoteStage'"
     Assert-NativeSuccess "Remote staging creation"
-    & scp -- $TreeArchive $Inventory $Checksums "${SshTarget}:${RemoteStage}/"
+    $TransferFiles = @($TreeArchive, $Inventory, $Checksums)
+    if ($Operation -eq "upgrade") { $TransferFiles += $RequestUpload }
+    & scp -- @TransferFiles "${SshTarget}:${RemoteStage}/"
     Assert-NativeSuccess "Receiver package transfer"
 
     & ssh -T $SshTarget "cd '$RemoteStage' && test -f receiver-tree.tar && test ! -L receiver-tree.tar && test -f TRACKED && test ! -L TRACKED && sha256sum -c SHA256SUMS >/dev/null && test `"`$(git get-tar-commit-id < receiver-tree.tar)`" = '$ReviewedCommit'"
@@ -195,6 +228,8 @@ operation="$8"
 subject="$9"
 config="${10}"
 legacy="${11}"
+subject_size="${12}"
+subject_hash="${13}"
 canonical_config=/etc/buh-platform-v2/receiver.json
 canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote
 root_stage="$(mktemp -d /var/tmp/buh-reviewed-receiver.XXXXXXXX)"
@@ -354,6 +389,52 @@ request="$subject"
   exit 65
 }
 
+if ! /usr/bin/python3 -P - "$request" "$root_stage/request-upload.tar" \
+  "$subject_size" "$subject_hash" 536870912 2>/dev/null <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source, destination, expected_size, expected_hash, maximum = sys.argv[1:]
+size = int(expected_size)
+if size <= 0 or size > int(maximum):
+    raise SystemExit(1)
+flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+flags |= getattr(os, "O_NOFOLLOW", 0)
+source_fd = os.open(source, flags)
+try:
+    details = os.fstat(source_fd)
+    if not stat.S_ISREG(details.st_mode) or details.st_size != size:
+        raise SystemExit(1)
+    output_fd = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+        0o600,
+    )
+    digest = hashlib.sha256()
+    copied = 0
+    with os.fdopen(os.dup(source_fd), "rb", closefd=True) as incoming:
+        with os.fdopen(output_fd, "wb", closefd=True) as outgoing:
+            for block in iter(lambda: incoming.read(1024 * 1024), b""):
+                copied += len(block)
+                if copied > size:
+                    raise SystemExit(1)
+                digest.update(block)
+                outgoing.write(block)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+    if copied != size or digest.hexdigest() != expected_hash:
+        raise SystemExit(1)
+finally:
+    os.close(source_fd)
+PY
+then
+  printf '%s\n' 'Receiver preflight-request copy verification failed.' >&2
+  exit 65
+fi
+request="$root_stage/request-upload.tar"
+
 if ! /usr/bin/python3 -P - "$config" "$legacy" "$request" "$root_stage/inputs" \
   2>/dev/null <<'PY'
 import hashlib
@@ -457,13 +538,17 @@ export BUH_LEGACY_RECEIVER_PATH="$legacy"
         $OperationTarget = $RecoveryBackup
         $RootConfig = "/unused"
         $RootLegacy = "/unused"
+        $OperationTargetSize = 0
+        $OperationTargetHash = "0"
     }
     else {
-        $OperationTarget = $PreflightRequest
+        $OperationTarget = "$RemoteStage/preflight-request.tar.gz"
         $RootConfig = $ConfigPath
         $RootLegacy = $LegacyReceiver
+        $OperationTargetSize = $RequestSize
+        $OperationTargetHash = $RequestHash
     }
-    $RootCommand = "/usr/bin/sudo -- /usr/bin/env -i HOME=/root LANG=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -seu -- '$RemoteStage/receiver-tree.tar' '$ArchiveHash' '$ArchiveSize' '$RemoteStage/TRACKED' '$InventoryHash' '$InventorySize' '$ReviewedCommit' '$Operation' '$OperationTarget' '$RootConfig' '$RootLegacy'"
+    $RootCommand = "/usr/bin/sudo -- /usr/bin/env -i HOME=/root LANG=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -seu -- '$RemoteStage/receiver-tree.tar' '$ArchiveHash' '$ArchiveSize' '$RemoteStage/TRACKED' '$InventoryHash' '$InventorySize' '$ReviewedCommit' '$Operation' '$OperationTarget' '$RootConfig' '$RootLegacy' '$OperationTargetSize' '$OperationTargetHash'"
     $RootProcessInfo = [Diagnostics.ProcessStartInfo]::new()
     $RootProcessInfo.FileName = $SshExecutable
     if ($null -ne $RootProcessInfo.PSObject.Properties["ArgumentList"]) {

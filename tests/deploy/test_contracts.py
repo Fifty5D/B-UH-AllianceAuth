@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import gzip
 import io
 import json
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -10,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from ops.deploy import contracts
+from ops.release import recovery_policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +36,34 @@ def request_data(**overrides):
     }
     value.update(overrides)
     return value
+
+
+def recovery_request_data() -> dict:
+    policy = recovery_policy.load_policy()
+    target = policy["published_releases"][-1]
+    return request_data(
+        schema_version=2,
+        platform_version=target["platform_version"],
+        release_commit=target["release_commit"],
+        release_ref=target["release_ref"],
+        manifest_sha256=target["manifest_sha256"],
+        recovery_transition={
+            "policy_id": policy["policy_id"],
+            "policy_sha256": recovery_policy.policy_sha256(),
+            "purpose": "receiver-upgrade-preflight",
+            "releases": policy["published_releases"],
+        },
+    )
+
+
+def git_file(commit: str, path: str) -> bytes:
+    return subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
 
 
 def tar_bytes(entries, *, pax=False) -> bytes:
@@ -307,6 +338,47 @@ class RequestTests(unittest.TestCase):
             with self.assertRaisesRegex(contracts.DeploymentError, "unknown"):
                 contracts.DeploymentRequest.load(path)
 
+    def test_exact_bootstrap_recovery_request_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "REQUEST.json"
+            value = recovery_request_data()
+            write_canonical(path, value)
+            request = contracts.DeploymentRequest.load(path)
+            self.assertEqual(request.recovery_transition, value["recovery_transition"])
+            self.assertEqual(
+                request.recovery_sha256,
+                recovery_policy.recovery_digest(value["recovery_transition"]),
+            )
+
+    def test_recovery_request_rejects_missing_altered_reordered_and_stale_chains(self):
+        base = recovery_request_data()
+        cases = {}
+
+        missing = copy.deepcopy(base)
+        missing["recovery_transition"]["releases"].pop(1)
+        cases["missing"] = missing
+
+        altered = copy.deepcopy(base)
+        altered["recovery_transition"]["releases"][1]["manifest_sha256"] = "f" * 64
+        cases["altered"] = altered
+
+        reordered = copy.deepcopy(base)
+        reordered["recovery_transition"]["releases"][:2] = reversed(
+            reordered["recovery_transition"]["releases"][:2]
+        )
+        cases["reordered"] = reordered
+
+        stale = copy.deepcopy(base)
+        stale["recovery_transition"]["purpose"] = "production-recovery"
+        cases["stale"] = stale
+
+        for name, value in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "REQUEST.json"
+                write_canonical(path, value)
+                with self.assertRaises(contracts.DeploymentError):
+                    contracts.DeploymentRequest.load(path)
+
 
 class ArchiveTests(unittest.TestCase):
     def valid_entries(self):
@@ -424,6 +496,60 @@ class BundleTests(unittest.TestCase):
             request["repository"] = "SomeoneElse/WrongRepo"
             write_canonical(root / "REQUEST.json", request)
             with self.assertRaisesRegex(contracts.DeploymentError, "wrong repository"):
+                contracts.load_validated_bundle(root, config)
+
+    def test_bootstrap_bundle_verifies_every_exact_lineage_manifest(self):
+        policy = recovery_policy.load_policy()
+        target = policy["published_releases"][-1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            lineage_dir = root / "lineage"
+            release_dir.mkdir()
+            lineage_dir.mkdir()
+            target_path = (
+                f"releases/platform/v{target['platform_version']}/RELEASE.json"
+            )
+            target_bytes = git_file(target["release_commit"], target_path)
+            target_manifest = json.loads(target_bytes)
+            (release_dir / "RELEASE.json").write_bytes(target_bytes)
+            (release_dir / "INSTALL_PLAN.json").write_bytes(
+                git_file(
+                    target["release_commit"],
+                    f"releases/platform/v{target['platform_version']}/INSTALL_PLAN.json",
+                )
+            )
+            for identity in policy["published_releases"][:-1]:
+                version = identity["platform_version"]
+                (lineage_dir / f"v{version}.RELEASE.json").write_bytes(
+                    git_file(
+                        identity["release_commit"],
+                        f"releases/platform/v{version}/RELEASE.json",
+                    )
+                )
+            request = recovery_request_data()
+            write_canonical(root / "REQUEST.json", request)
+            config = contracts.ReceiverConfig.load(
+                ROOT / "ops/deploy/receiver-config.example.json"
+            )
+            with mock.patch(
+                "ops.release.buh_release.verify_release_dir",
+                return_value=target_manifest,
+            ):
+                bundle = contracts.load_validated_bundle(root, config)
+            self.assertEqual(
+                [item["platform_version"] for item in bundle.lineage_manifests],
+                ["0.5.6", "0.6.0"],
+            )
+
+            lineage = lineage_dir / "v0.6.0.RELEASE.json"
+            lineage.write_bytes(lineage.read_bytes() + b"\n")
+            with mock.patch(
+                "ops.release.buh_release.verify_release_dir",
+                return_value=target_manifest,
+            ), self.assertRaisesRegex(
+                contracts.DeploymentError, "canonical|altered|identity"
+            ):
                 contracts.load_validated_bundle(root, config)
 
 

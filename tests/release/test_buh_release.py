@@ -389,6 +389,31 @@ class PlanningTests(unittest.TestCase):
         )
         return output
 
+    def _recovery_policy(self, *release_dirs: Path) -> dict:
+        identities = []
+        for index, directory in enumerate(release_dirs, start=1):
+            manifest = json.loads(
+                (directory / "RELEASE.json").read_text(encoding="utf-8")
+            )
+            version = manifest["platform_version"]
+            identities.append(
+                {
+                    "manifest_sha256": release.sha256_file(
+                        directory / "RELEASE.json"
+                    ),
+                    "platform_version": version,
+                    "release_commit": str(index) * 40,
+                    "release_ref": f"release/platform-v{version}",
+                    "source_commit": manifest["source_commit"],
+                }
+            )
+        return {
+            "baseline": identities[0],
+            "policy_id": "synthetic-release-gap",
+            "published_releases": identities,
+            "repository": "Fifty5D/B-UH-AllianceAuth",
+        }
+
     def test_current_schema_router_matches_explicit_v1_planner(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             fixture = RepoFixture(Path(temp))
@@ -498,7 +523,7 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(plan["build_matrix"], [])
             self.assertEqual(plan["platform_version"], "1.2.4")
 
-    def test_equivalent_skipped_release_can_be_reconciled_once(self) -> None:
+    def test_reviewed_gap_keeps_immediate_predecessor_and_attests_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             fixture = RepoFixture(Path(temp))
             release_root = fixture.root / "releases/platform"
@@ -535,47 +560,119 @@ class PlanningTests(unittest.TestCase):
                 'deployment_predecessor = "1.2.3"\n',
                 encoding="utf-8",
             )
-            plan = fixture.plan(
-                previous=second / "RELEASE.json", commit="c" * 40
-            )
+            policy_path = fixture.root / "ops/deploy/coordinated-recovery.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text("{}\n", encoding="ascii")
+            policy = self._recovery_policy(first, second)
+            with mock.patch.object(
+                release, "load_recovery_policy", return_value=policy
+            ):
+                plan = fixture.plan(
+                    previous=second / "RELEASE.json", commit="c" * 40
+                )
             self.assertEqual(
-                plan["deployment_predecessor"]["platform_version"],
+                plan["deployment_predecessor"]["baseline"]["platform_version"],
                 "1.2.3",
             )
             third = release_root / "v1.2.5"
             wheels = fixture.root / "third-wheels"
             wheels.mkdir()
-            release.assemble_release(
-                plan=plan,
-                wheel_dir=wheels,
-                previous_release_dir=second,
-                output_dir=third,
-                repo_root=fixture.root,
-            )
+            with mock.patch.object(
+                release, "load_recovery_policy", return_value=policy
+            ):
+                release.assemble_release(
+                    plan=plan,
+                    wheel_dir=wheels,
+                    previous_release_dir=second,
+                    output_dir=third,
+                    repo_root=fixture.root,
+                )
             manifest = json.loads(
                 (third / "RELEASE.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
                 manifest["previous_release"],
                 {
-                    key: plan["deployment_predecessor"][key]
-                    for key in (
-                        "platform_version",
-                        "source_commit",
-                        "manifest_sha256",
-                    )
+                    "platform_version": "1.2.4",
+                    "source_commit": "b" * 40,
+                    "manifest_sha256": release.sha256_file(
+                        second / "RELEASE.json"
+                    ),
                 },
             )
             self.assertEqual(
-                release.deployment_payload_identity(first),
-                release.deployment_payload_identity(second),
-            )
-            self.assertEqual(
-                release.deployment_payload_identity(first),
-                release.deployment_payload_identity(third),
+                manifest["deployment_recovery"],
+                release.manifest_recovery(policy),
             )
 
-    def test_reconciliation_rejects_a_skipped_payload_change(self) -> None:
+            (fixture.changes / "reconcile.toml").unlink()
+            tool.write_text("TOOL = 4\n", encoding="utf-8")
+            fixture.fragment(
+                "after-recovery", "platform", "fix", "Continue the direct chain"
+            )
+            following = fixture.plan(
+                previous=third / "RELEASE.json", commit="d" * 40
+            )
+            self.assertIsNone(following["deployment_predecessor"])
+            self.assertEqual(following["previous_platform_version"], "1.2.5")
+
+    def test_only_exact_historical_sources_replay_legacy_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = RepoFixture(Path(temp))
+            release_root = fixture.root / "releases/platform"
+            release_root.mkdir(parents=True)
+            first = release_root / "v1.2.3"
+            self._bootstrap_release(fixture).rename(first)
+
+            tool = fixture.registry.parent / "buh_release.py"
+            tool.write_text("TOOL = 2\n", encoding="utf-8")
+            normal_fragment = fixture.fragment(
+                "platform-tooling", "platform", "fix"
+            )
+            second_plan = fixture.plan(
+                previous=first / "RELEASE.json", commit="b" * 40
+            )
+            second = release_root / "v1.2.4"
+            wheels = fixture.root / "second-wheels"
+            wheels.mkdir()
+            release.assemble_release(
+                plan=second_plan,
+                wheel_dir=wheels,
+                previous_release_dir=first,
+                output_dir=second,
+                repo_root=fixture.root,
+            )
+            normal_fragment.unlink()
+
+            tool.write_text("TOOL = 3\n", encoding="utf-8")
+            (fixture.changes / "reconcile.toml").write_text(
+                'schema_version = 1\n'
+                'app = "platform"\n'
+                'kind = "fix"\n'
+                'summary = "Replay the historical reconciliation"\n'
+                'deployment_predecessor = "1.2.3"\n',
+                encoding="utf-8",
+            )
+            historical = fixture.plan(
+                previous=second / "RELEASE.json",
+                commit="c282fa9ece625778b9100037636814909073607b",
+            )
+            self.assertEqual(
+                set(historical["deployment_predecessor"]),
+                {
+                    "manifest_sha256",
+                    "path",
+                    "payload_sha256",
+                    "platform_version",
+                    "source_commit",
+                },
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError, "recovery policy is unavailable"
+            ):
+                fixture.plan(previous=second / "RELEASE.json", commit="c" * 40)
+
+    def test_recovery_rejects_a_changed_compatibility_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             fixture = RepoFixture(Path(temp))
             release_root = fixture.root / "releases/platform"
@@ -618,12 +715,16 @@ class PlanningTests(unittest.TestCase):
                 'deployment_predecessor = "1.2.3"\n',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(
-                release.ReleaseError, "not deployment-equivalent"
+            policy_path = fixture.root / "ops/deploy/coordinated-recovery.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text("{}\n", encoding="ascii")
+            policy = self._recovery_policy(first, second)
+            with mock.patch.object(
+                release, "load_recovery_policy", return_value=policy
+            ), self.assertRaisesRegex(
+                release.ReleaseError, "compatibility boundary"
             ):
-                fixture.plan(
-                    previous=second / "RELEASE.json", commit="c" * 40
-                )
+                fixture.plan(previous=second / "RELEASE.json", commit="c" * 40)
 
     def test_declared_platform_input_requires_fragment_but_legacy_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -138,6 +138,7 @@ install_sources=(
   ops/buh-redact-diagnostics.py
   ops/deploy/__init__.py
   ops/deploy/contracts.py
+  ops/deploy/coordinated-recovery.json
   ops/deploy/docker_host.py
   ops/deploy/engine.py
   ops/deploy/receiver.py
@@ -145,6 +146,7 @@ install_sources=(
   ops/deploy/buh-platform-v2-receiver
   ops/release/__init__.py
   ops/release/buh_release.py
+  ops/release/recovery_policy.py
 )
 for relative in "${install_sources[@]}"; do
   tree_entry="$(reviewed_entry "${relative}")"
@@ -189,6 +191,7 @@ install -d -m 0755 "${library_dir}/ops/release"
 install -m 0644 "${repo_root}/ops/__init__.py" \
   "${library_dir}/ops/__init__.py"
 install -m 0644 "${repo_root}/ops/deploy/__init__.py" \
+  "${repo_root}/ops/deploy/coordinated-recovery.json" \
   "${repo_root}/ops/deploy/contracts.py" \
   "${repo_root}/ops/deploy/docker_host.py" \
   "${repo_root}/ops/deploy/engine.py" \
@@ -196,6 +199,7 @@ install -m 0644 "${repo_root}/ops/deploy/__init__.py" \
   "${library_dir}/ops/deploy/"
 install -m 0644 "${repo_root}/ops/release/__init__.py" \
   "${repo_root}/ops/release/buh_release.py" \
+  "${repo_root}/ops/release/recovery_policy.py" \
   "${library_dir}/ops/release/"
 
 install -d -m 0700 "${config_dir}"

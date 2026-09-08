@@ -1307,10 +1307,21 @@ class PlatformConfigurationContracts(TestCase):
             "ops/buh-redact-diagnostics.py --validate",
             "ops/readiness.py published",
             "cmp --silent",
+            "ops/deploy/request_archive.py",
+            "artifacts/deployment-request.json",
+            ".release_refs[]",
+            ".parents[0].sha",
         ):
             self.assertIn(required, text)
         self.assertNotIn("continue-on-error", text)
         self.assertNotIn("StrictHostKeyChecking=no", text)
+
+    def test_fast_recovery_rehearsal_checkout_includes_immutable_history(self):
+        workflow = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
+        checkout = workflow["jobs"]["fast"]["steps"][0]
+        self.assertEqual(checkout["name"], "Check out source")
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+        self.assertIs(checkout["with"]["persist-credentials"], False)
 
     def test_release_automation_stops_at_the_chatgpt_approval_boundary(self):
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")

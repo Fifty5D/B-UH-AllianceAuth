@@ -369,9 +369,7 @@ jobs:
 
       - name: Build a deterministic bounded deployment archive
         env:
-          MANIFEST_SHA256: ${{ steps.release.outputs.manifest_sha256 }}
           MODE: ${{ inputs.mode }}
-          PLATFORM_VERSION: ${{ inputs.platform_version }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           RELEASE_DIR: ${{ steps.release.outputs.release_dir }}
           REPOSITORY: ${{ github.repository }}
@@ -379,72 +377,51 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
-          import gzip
-          import io
-          import json
-          import os
-          import stat
-          import tarfile
-          from pathlib import Path
+          mkdir -p artifacts
+          python3 ops/deploy/request_archive.py \
+            --root . \
+            --release-dir "${RELEASE_DIR}" \
+            --repository "${REPOSITORY}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --mode "${MODE}" \
+            --workflow-run-id "${RUN_ID}" \
+            --workflow-run-attempt "${RUN_ATTEMPT}" \
+            --output platform-v2-deployment.tar.gz \
+            --metadata-output artifacts/deployment-request.json >/dev/null
 
-          release = Path(os.environ["RELEASE_DIR"])
-          request = {
-              "manifest_sha256": os.environ["MANIFEST_SHA256"],
-              "mode": os.environ["MODE"],
-              "platform_version": os.environ["PLATFORM_VERSION"],
-              "release_commit": os.environ["RELEASE_COMMIT"],
-              "release_ref": f"release/platform-v{os.environ['PLATFORM_VERSION']}",
-              "repository": os.environ["REPOSITORY"],
-              "schema_version": 1,
-              "workflow_run_attempt": int(os.environ["RUN_ATTEMPT"]),
-              "workflow_run_id": os.environ["RUN_ID"],
-          }
-          request_bytes = (
-              json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-              + "\n"
-          ).encode("ascii")
-          if len(request_bytes) > 16 * 1024:
-              raise SystemExit("Deployment request is unexpectedly large")
-
-          entries = sorted(release.iterdir(), key=lambda item: item.name)
-          if not entries or len(entries) > 128:
-              raise SystemExit("Release bundle has an unsafe entry count")
-          for path in entries:
-              details = path.lstat()
-              if not stat.S_ISREG(details.st_mode) or path.is_symlink():
-                  raise SystemExit(f"Release entry is not a regular file: {path}")
-              if details.st_size <= 0 or details.st_size > 64 * 1024 * 1024:
-                  raise SystemExit(f"Release entry has an unsafe size: {path}")
-
-          archive_path = Path("platform-v2-deployment.tar.gz")
-          with archive_path.open("xb") as raw:
-              with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-                  with tarfile.open(
-                      fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT
-                  ) as archive:
-                      def add_bytes(name, data, mode=0o644):
-                          info = tarfile.TarInfo(name)
-                          info.size = len(data)
-                          info.mode = mode
-                          info.uid = info.gid = 0
-                          info.uname = info.gname = ""
-                          info.mtime = 0
-                          archive.addfile(info, io.BytesIO(data))
-
-                      add_bytes("REQUEST.json", request_bytes, 0o600)
-                      directory = tarfile.TarInfo("release")
-                      directory.type = tarfile.DIRTYPE
-                      directory.mode = 0o755
-                      directory.uid = directory.gid = 0
-                      directory.uname = directory.gname = ""
-                      directory.mtime = 0
-                      archive.addfile(directory)
-                      for path in entries:
-                          add_bytes(f"release/{path.name}", path.read_bytes())
-          if archive_path.stat().st_size > 256 * 1024 * 1024:
-              raise SystemExit("Deployment archive exceeds the receiver maximum")
-          PY
+      - name: Verify every recovery release ref and source parent
+        env:
+          API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          jq -c '.release_refs[]' artifacts/deployment-request.json |
+          while IFS= read -r identity; do
+            version="$(jq -er '.platform_version' <<<"${identity}")"
+            expected_release="$(jq -er '.release_commit' <<<"${identity}")"
+            expected_source="$(jq -er '.source_commit' <<<"${identity}")"
+            ref_response="${RUNNER_TEMP}/release-ref-${version}.json"
+            commit_response="${RUNNER_TEMP}/release-commit-${version}.json"
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${API_URL}/repos/${REPOSITORY}/git/ref/heads/release/platform-v${version}" \
+              >"${ref_response}"
+            [[ "$(jq -er '.object.type' "${ref_response}")" == "commit" ]]
+            [[ "$(jq -er '.object.sha' "${ref_response}")" == "${expected_release}" ]]
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${API_URL}/repos/${REPOSITORY}/git/commits/${expected_release}" \
+              >"${commit_response}"
+            [[ "$(jq -er '.parents | length' "${commit_response}")" == "1" ]]
+            [[ "$(jq -er '.parents[0].sha' "${commit_response}")" == "${expected_source}" ]]
+          done
 
       - name: Reauthorize the queued production operation
         if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}

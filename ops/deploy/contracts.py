@@ -13,13 +13,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import urlsplit
 
+from ops.release import recovery_policy
+
 
 CONTRACT_SCHEMA_VERSION = 1
+RECOVERY_REQUEST_SCHEMA_VERSION = 2
 RECEIVER_CONFIG_SCHEMA_VERSION = 2
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
-MAX_ARCHIVE_MEMBERS = 132
+MAX_ARCHIVE_MEMBERS = 144
 MAX_FILE_BYTES = 64 * 1024 * 1024
 
 REQUIRED_SMOKE_CHECK_STATUSES = {
@@ -689,6 +692,7 @@ class DeploymentRequest:
     manifest_sha256: str
     workflow_run_id: str
     workflow_run_attempt: int
+    recovery_transition: Mapping[str, Any] | None = None
 
     @property
     def attempt_id(self) -> str:
@@ -708,8 +712,14 @@ class DeploymentRequest:
             "workflow_run_id",
             "workflow_run_attempt",
         }
+        schema_version = data.get("schema_version")
+        if schema_version == RECOVERY_REQUEST_SCHEMA_VERSION:
+            fields.add("recovery_transition")
         _strict_keys(data, allowed=fields, required=fields, context="deployment request")
-        if data["schema_version"] != CONTRACT_SCHEMA_VERSION:
+        if schema_version not in {
+            CONTRACT_SCHEMA_VERSION,
+            RECOVERY_REQUEST_SCHEMA_VERSION,
+        }:
             raise DeploymentError("Unsupported deployment request schema")
         if data["mode"] not in {"preflight", "deploy"}:
             raise DeploymentError("Unsupported deployment mode")
@@ -736,6 +746,9 @@ class DeploymentRequest:
         attempt = data["workflow_run_attempt"]
         if type(attempt) is not int or not 1 <= attempt <= 1000:
             raise DeploymentError("Invalid workflow run attempt")
+        recovery: Mapping[str, Any] | None = None
+        if schema_version == RECOVERY_REQUEST_SCHEMA_VERSION:
+            recovery = cls._load_recovery(data["recovery_transition"], data)
         return cls(
             mode=data["mode"],
             repository=data["repository"],
@@ -745,7 +758,84 @@ class DeploymentRequest:
             manifest_sha256=data["manifest_sha256"],
             workflow_run_id=run_id,
             workflow_run_attempt=attempt,
+            recovery_transition=recovery,
         )
+
+    @staticmethod
+    def _load_recovery(value: Any, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        fields = {
+            "policy_id",
+            "policy_sha256",
+            "purpose",
+            "releases",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise DeploymentError("Recovery transition has invalid fields")
+        try:
+            policy = recovery_policy.load_policy()
+            digest = recovery_policy.policy_sha256()
+        except recovery_policy.RecoveryPolicyError as exc:
+            raise DeploymentError(str(exc)) from exc
+        if (
+            value.get("policy_id") != policy["policy_id"]
+            or value.get("policy_sha256") != digest
+        ):
+            raise DeploymentError("Recovery transition policy identity changed")
+        releases = value.get("releases")
+        if not isinstance(releases, list) or not 3 <= len(releases) <= 9:
+            raise DeploymentError("Recovery transition has an invalid chain length")
+        try:
+            normalized = [
+                recovery_policy.validate_release_identity(
+                    item, context=f"Recovery transition release {index}"
+                )
+                for index, item in enumerate(releases)
+            ]
+        except recovery_policy.RecoveryPolicyError as exc:
+            raise DeploymentError(str(exc)) from exc
+        target = normalized[-1]
+        request_target = {
+            "manifest_sha256": request.get("manifest_sha256"),
+            "platform_version": request.get("platform_version"),
+            "release_commit": request.get("release_commit"),
+            "release_ref": request.get("release_ref"),
+            "source_commit": None,
+        }
+        # The target source is authenticated by its verified manifest after extraction.
+        if any(
+            target[key] != request_target[key]
+            for key in request_target
+            if key != "source_commit"
+        ):
+            raise DeploymentError("Recovery transition target differs from the request")
+        fixed = policy["published_releases"]
+        purpose = value.get("purpose")
+        if target == fixed[-1]:
+            if (
+                purpose != "receiver-upgrade-preflight"
+                or request.get("mode") != "preflight"
+                or normalized != fixed
+            ):
+                raise DeploymentError("Receiver-upgrade recovery request is not exact")
+        elif (
+            purpose != "production-recovery"
+            or normalized[:-1] != fixed
+            or recovery_policy.version_tuple(target["platform_version"])
+            <= recovery_policy.version_tuple(fixed[-1]["platform_version"])
+        ):
+            raise DeploymentError("Production recovery request is not the reviewed chain")
+        return {
+            "policy_id": value["policy_id"],
+            "policy_sha256": value["policy_sha256"],
+            "purpose": purpose,
+            "releases": normalized,
+        }
+
+    @property
+    def recovery_sha256(self) -> str | None:
+        if self.recovery_transition is None:
+            return None
+        return recovery_policy.recovery_digest(self.recovery_transition)
 
 
 @dataclass(frozen=True)
@@ -755,6 +845,7 @@ class ValidatedBundle:
     request: DeploymentRequest
     manifest: Mapping[str, Any]
     install_plan: Mapping[str, Any]
+    lineage_manifests: tuple[Mapping[str, Any], ...] = ()
 
 
 def read_bounded_stream(stream: BinaryIO, maximum: int) -> bytes:
@@ -798,15 +889,24 @@ def extract_archive(data: bytes, destination: Path) -> None:
             ):
                 raise DeploymentError(f"Unsafe archive member: {name!r}")
             seen.add(folded)
-            if pure.parts[0] not in {"REQUEST.json", "release"}:
+            if pure.parts[0] not in {"REQUEST.json", "lineage", "release"}:
                 raise DeploymentError(f"Undeclared archive root: {name!r}")
             if pure.parts[0] == "REQUEST.json" and len(pure.parts) != 1:
                 raise DeploymentError("REQUEST.json must be at the archive root")
             if pure.parts[0] == "release" and len(pure.parts) > 2:
                 raise DeploymentError("Nested release paths are not allowed")
+            if pure.parts[0] == "lineage" and (
+                len(pure.parts) > 2
+                or (len(pure.parts) == 2 and re.fullmatch(
+                    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+                    r"(?:0|[1-9][0-9]*)\.RELEASE\.json",
+                    pure.parts[1],
+                ) is None)
+            ):
+                raise DeploymentError("Lineage paths are not canonical")
             if member.isdir():
-                if pure.parts != ("release",):
-                    raise DeploymentError("Only the release directory may be a directory")
+                if pure.parts not in {("release",), ("lineage",)}:
+                    raise DeploymentError("Archive contains an undeclared directory")
                 continue
             if not member.isreg() or member.issym() or member.islnk():
                 raise DeploymentError(f"Archive member is not a regular file: {name}")
@@ -864,10 +964,142 @@ def load_validated_bundle(root: Path, config: ReceiverConfig) -> ValidatedBundle
         install_plan = json.loads((release_dir / "INSTALL_PLAN.json").read_text("ascii"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise DeploymentError("Could not load the verified install plan") from exc
+    lineage_manifests: tuple[Mapping[str, Any], ...] = ()
+    if request.recovery_transition is not None:
+        lineage_manifests = _load_recovery_lineage(
+            root, request, manifest, buh_release
+        )
+    elif (root / "lineage").exists():
+        raise DeploymentError("A direct deployment archive contains undeclared lineage")
     return ValidatedBundle(
         root=root,
         release_dir=release_dir,
         request=request,
         manifest=manifest,
         install_plan=install_plan,
+        lineage_manifests=lineage_manifests,
     )
+
+
+def _load_recovery_lineage(
+    root: Path,
+    request: DeploymentRequest,
+    target_manifest: Mapping[str, Any],
+    release_validator: Any,
+) -> tuple[Mapping[str, Any], ...]:
+    transition = request.recovery_transition
+    assert transition is not None
+    releases = transition["releases"]
+    target = releases[-1]
+    if target_manifest.get("source_commit") != target["source_commit"]:
+        raise DeploymentError("Recovery target source differs from its manifest")
+    try:
+        policy = recovery_policy.load_policy()
+        expected_recovery = recovery_policy.manifest_recovery(policy)
+    except recovery_policy.RecoveryPolicyError as exc:
+        raise DeploymentError(str(exc)) from exc
+    if transition["purpose"] == "production-recovery":
+        if target_manifest.get("deployment_recovery") != expected_recovery:
+            raise DeploymentError(
+                "Recovery target manifest does not contain the reviewed opt-in"
+            )
+    elif "deployment_recovery" in target_manifest:
+        raise DeploymentError(
+            "Receiver-upgrade preflight target unexpectedly carries recovery metadata"
+        )
+
+    lineage = root / "lineage"
+    if not lineage.is_dir() or lineage.is_symlink():
+        raise DeploymentError("Recovery deployment archive lacks safe lineage evidence")
+    expected_names = {
+        f"v{identity['platform_version']}.RELEASE.json"
+        for identity in releases[:-1]
+    }
+    actual_names = set()
+    for path in lineage.iterdir():
+        if not path.is_file() or path.is_symlink():
+            raise DeploymentError("Recovery lineage contains an unsafe entry")
+        actual_names.add(path.name)
+    if actual_names != expected_names:
+        raise DeploymentError("Recovery lineage files are incomplete or unrelated")
+
+    manifests: list[Mapping[str, Any]] = []
+    previous: dict[str, str] | None = None
+    compatibility_sha256: str | None = None
+    runtime_image: str | None = None
+    for index, identity in enumerate(releases[:-1]):
+        path = lineage / f"v{identity['platform_version']}.RELEASE.json"
+        value = _load_json(
+            path,
+            max_bytes=MAX_FILE_BYTES,
+            context=f"recovery lineage release {index}",
+        )
+        if canonical_json_bytes(value) != path.read_bytes():
+            raise DeploymentError("Recovery lineage manifest is not canonical")
+        try:
+            release_validator.validate_manifest_data(value)
+        except Exception as exc:
+            raise DeploymentError(
+                f"Recovery lineage manifest {index} is invalid"
+            ) from exc
+        if (
+            value.get("platform_version") != identity["platform_version"]
+            or value.get("source_commit") != identity["source_commit"]
+            or sha256_file(path) != identity["manifest_sha256"]
+            or (previous is not None and value.get("previous_release") != previous)
+        ):
+            raise DeploymentError("Recovery lineage identity is missing, altered, or reordered")
+        compatibility = value.get("compatibility")
+        values = compatibility.get("values") if isinstance(compatibility, dict) else None
+        policy_values = values.get("policy") if isinstance(values, dict) else None
+        runtime = values.get("production_runtime") if isinstance(values, dict) else None
+        if (
+            not isinstance(compatibility, dict)
+            or not isinstance(policy_values, dict)
+            or policy_values.get("database_migrations_must_be_rollback_compatible")
+            is not True
+            or not isinstance(runtime, dict)
+            or not isinstance(runtime.get("base_image"), str)
+            or IMAGE_DIGEST_RE.fullmatch(runtime["base_image"]) is None
+        ):
+            raise DeploymentError("Recovery lineage compatibility boundary is unsafe")
+        if compatibility_sha256 is None:
+            compatibility_sha256 = compatibility.get("sha256")
+            runtime_image = runtime["base_image"]
+        elif (
+            compatibility.get("sha256") != compatibility_sha256
+            or runtime["base_image"] != runtime_image
+        ):
+            raise DeploymentError("Recovery lineage crosses an unreviewed compatibility boundary")
+        previous = {
+            "manifest_sha256": identity["manifest_sha256"],
+            "platform_version": identity["platform_version"],
+            "source_commit": identity["source_commit"],
+        }
+        manifests.append(value)
+
+    target_compatibility = target_manifest.get("compatibility")
+    target_values = (
+        target_compatibility.get("values")
+        if isinstance(target_compatibility, dict)
+        else None
+    )
+    target_policy = (
+        target_values.get("policy") if isinstance(target_values, dict) else None
+    )
+    target_runtime = (
+        target_values.get("production_runtime")
+        if isinstance(target_values, dict)
+        else None
+    )
+    if (
+        target_manifest.get("previous_release") != previous
+        or not isinstance(target_policy, dict)
+        or target_policy.get("database_migrations_must_be_rollback_compatible")
+        is not True
+        or not isinstance(target_runtime, dict)
+        or target_runtime.get("base_image") != runtime_image
+        or target_compatibility.get("sha256") != compatibility_sha256
+    ):
+        raise DeploymentError("Recovery target compatibility or predecessor changed")
+    return tuple(manifests)

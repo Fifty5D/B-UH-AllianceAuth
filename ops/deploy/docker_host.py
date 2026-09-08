@@ -24,6 +24,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
 
+from ops.release import recovery_policy
+
 from .contracts import (
     FATAL_LOG_ALLOWLIST_RE,
     IMAGE_DIGEST_RE,
@@ -379,6 +381,7 @@ class DockerHost:
         self.log_since = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._last_stabilization_evidence: Mapping[str, Any] | None = None
         self.recovery_plan_armed = False
+        self.recovery_baseline_verified = False
 
     def _recovery_plan_value(self, attempt_id: str, phase: str) -> dict[str, Any]:
         if (
@@ -1457,8 +1460,159 @@ class DockerHost:
             "source_commit": current["source_commit"],
             "manifest_sha256": current["manifest_sha256"],
         }
-        if previous != expected_previous:
+        if previous == expected_previous:
+            if bundle.request.recovery_transition is not None:
+                raise DeploymentError(
+                    "A direct release must not carry stale recovery authorization"
+                )
+            return
+        transition = bundle.request.recovery_transition
+        if transition is None:
             raise DeploymentError("Release predecessor does not match the verified live state")
+        baseline = transition["releases"][0]
+        expected_baseline = {
+            "platform_version": current["platform_version"],
+            "release_commit": current["release_commit"],
+            "source_commit": current["source_commit"],
+            "manifest_sha256": current["manifest_sha256"],
+        }
+        if any(baseline[key] != value for key, value in expected_baseline.items()):
+            raise DeploymentError(
+                "Recovery baseline does not match the verified live state"
+            )
+
+    def _validate_recovery_host_baseline(self, bundle: ValidatedBundle) -> None:
+        transition = bundle.request.recovery_transition
+        if transition is None:
+            return
+        try:
+            policy = recovery_policy.load_policy()
+        except recovery_policy.RecoveryPolicyError as exc:
+            raise DeploymentError(str(exc)) from exc
+        expected = policy["host_baseline"]
+        compose_files = [path.as_posix() for path in self._compose_files()]
+        compose_key = (
+            "compose_files_before_activation"
+            if transition["purpose"] == "receiver-upgrade-preflight"
+            else "compose_files_after_activation"
+        )
+        if compose_files != expected[compose_key]:
+            raise DeploymentError(
+                "Recovery Compose file set changed from the confirmed transition phase"
+            )
+        expected_services = expected["auth_services"]
+        if set(expected_services) != set(self.config.auth_services):
+            raise DeploymentError("Recovery Auth service set changed")
+        for service, identity in expected_services.items():
+            captured = self.previous_images.get(service)
+            if (
+                captured is None
+                or captured[0] != identity["image_id"]
+                or self.auth_replica_counts.get(service) != identity["replicas"]
+            ):
+                raise DeploymentError(
+                    f"Recovery live image or replica baseline changed for {service}"
+                )
+            for container in self._running_service_containers(
+                service, context=f"Recovery provenance discovery for {service}"
+            ):
+                raw = self._run(
+                    ["docker", "inspect", "--format", "{{json .Config.Labels}}", container],
+                    context=f"Recovery provenance verification for {service}",
+                ).strip()
+                try:
+                    labels = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise DeploymentError("Recovery live provenance is malformed") from exc
+                baseline = transition["releases"][0]
+                if (
+                    not isinstance(labels, dict)
+                    or labels.get(IMAGE_PROVENANCE_LABELS["platform_version"])
+                    != baseline["platform_version"]
+                    or labels.get(IMAGE_PROVENANCE_LABELS["source_commit"])
+                    != baseline["source_commit"]
+                ):
+                    raise DeploymentError(
+                        f"Recovery live provenance changed for {service}"
+                    )
+        local = self.config.app_dir / self.config.local_settings
+        details = local.stat()
+        local_expected = expected["local_settings"]
+        if (
+            self.config.local_settings.as_posix() != local_expected["path"]
+            or details.st_uid != local_expected["uid"]
+            or details.st_gid != local_expected["gid"]
+            or f"{stat.S_IMODE(details.st_mode):04o}" != local_expected["mode"]
+        ):
+            raise DeploymentError("Recovery local-settings identity changed")
+        marker_path = self._platform_current_path()
+        try:
+            marker = json.loads(marker_path.read_text(encoding="ascii"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DeploymentError("Recovery application marker is unreadable") from exc
+        baseline = transition["releases"][0]
+        if marker != {
+            "manifest_sha256": baseline["manifest_sha256"],
+            "platform_version": baseline["platform_version"],
+            "release_commit": baseline["release_commit"],
+            "schema_version": 1,
+        }:
+            raise DeploymentError("Recovery application marker changed")
+        for key in ("nginx", "front_proxy"):
+            service = expected[key]["service"]
+            containers = self._running_service_containers(
+                service, context=f"Recovery {key} discovery"
+            )
+            if len(containers) != 1:
+                raise DeploymentError(f"Recovery {key} topology changed")
+            state = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.Name}}|{{.Image}}|{{.State.Status}}|{{.RestartCount}}",
+                    containers[0],
+                ],
+                context=f"Recovery {key} identity verification",
+            ).strip().split("|")
+            if state != [
+                f"/{expected[key]['container']}",
+                expected[key]["image_id"],
+                "running",
+                "0",
+            ]:
+                raise DeploymentError(f"Recovery {key} identity changed")
+        owner = expected["discord_owner"]
+        probe = (
+            "import json;from django.conf import settings;"
+            "from allianceauth.services.modules.discord.models import DiscordUser;"
+            f"item=DiscordUser.objects.get(uid='{owner['discord_user_id']}');"
+            "print(json.dumps({'configured':str(getattr(settings,"
+            "'BUH_DISCORD_GUILD_OWNER_ID','')),'uid':str(item.uid),"
+            "'username':item.user.username},sort_keys=True,separators=(',',':')))"
+        )
+        output = self._manage_image(
+            "shell",
+            "-c",
+            probe,
+            context="Recovery Discord owner association verification",
+        )
+        expected_owner = {
+            "configured": owner["discord_user_id"],
+            "uid": owner["discord_user_id"],
+            "username": owner["auth_username"],
+        }
+        parsed: Any = None
+        for line in reversed(output.splitlines()):
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                break
+        if parsed != expected_owner:
+            raise DeploymentError("Recovery Discord owner association changed")
+        self.recovery_baseline_verified = True
 
     def _validate_runtime_image(self, bundle: ValidatedBundle) -> None:
         values = bundle.manifest["compatibility"]["values"]
@@ -2130,6 +2284,7 @@ class DockerHost:
         self._capture_deployment_current()
 
         self._capture_live_images()
+        self._validate_recovery_host_baseline(bundle)
         self._capture_infrastructure_restart_baselines()
         self._capture_static_manifest()
         self.previous_image_pins = {
@@ -3492,7 +3647,10 @@ class DockerHost:
                 *self.config.auth_services,
                 *self.candidate_web_slots,
                 *self.previous_web_slots,
-            )
+            ),
+            owner_transition_phase=(
+                "candidate-health" if self.recovery_baseline_verified else None
+            ),
         )
 
     def switch_traffic(self, bundle: ValidatedBundle) -> None:
@@ -3600,6 +3758,13 @@ class DockerHost:
             for service in self.config.auth_services
             if service not in {self.config.gunicorn_service, beat}
         )
+        if self.recovery_baseline_verified:
+            cutoff = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._scan_new_logs(
+                (*self.config.auth_services, *self.candidate_web_slots),
+                owner_transition_phase="worker-cutover",
+            )
+            self.log_since = cutoff
         self.workers_replacement_started = True
         self._update_recovery_plan("worker-replacement-started")
         if workers:
@@ -3639,6 +3804,7 @@ class DockerHost:
         for service in replaced:
             self._version_probe(service, bundle, live=True)
         self._celery_health()
+        self._scan_new_logs((*replaced, *self.candidate_web_slots))
 
     def _redis_health(self) -> None:
         output = self._compose(
@@ -3913,7 +4079,12 @@ class DockerHost:
                     "An HTTPS smoke route returned an unsafe redirect Location"
                 )
 
-    def _scan_new_logs(self, services_and_slots: Sequence[str]) -> tuple[str, ...]:
+    def _scan_new_logs(
+        self,
+        services_and_slots: Sequence[str],
+        *,
+        owner_transition_phase: str | None = None,
+    ) -> tuple[str, ...]:
         infrastructure = (
             self.config.proxy_service,
             self.config.database_service,
@@ -3926,29 +4097,39 @@ class DockerHost:
             for service in compose_services
             if service in requested or service in infrastructure
         )
-        logs = ""
-        if service_set:
-            logs += self._compose(
-                "logs",
-                f"--since={self.log_since}",
-                "--no-color",
-                "--no-log-prefix",
-                *service_set,
-                bounded_output=True,
-                context="New deployment service log scan",
+        logs_by_source: list[tuple[str, str]] = []
+        for service in service_set:
+            logs_by_source.append(
+                (
+                    service,
+                    self._compose(
+                        "logs",
+                        f"--since={self.log_since}",
+                        "--no-color",
+                        "--no-log-prefix",
+                        service,
+                        bounded_output=True,
+                        context=f"New deployment log scan for {service}",
+                    ),
+                )
             )
         for slot in services_and_slots:
             if slot in compose_services:
                 continue
-            logs += self._run(
-                [
-                    "docker",
-                    "logs",
-                    f"--since={self.log_since}",
+            logs_by_source.append(
+                (
                     slot,
-                ],
-                bounded_output=True,
-                context=f"New web-slot log scan for {slot}",
+                    self._run(
+                        [
+                            "docker",
+                            "logs",
+                            f"--since={self.log_since}",
+                            slot,
+                        ],
+                        bounded_output=True,
+                        context=f"New web-slot log scan for {slot}",
+                    ),
+                )
             )
         allowed: list[str] = []
         rejected: list[str] = []
@@ -3969,15 +4150,70 @@ class DockerHost:
                     re.IGNORECASE,
                 )
             )
-        for raw_line in logs.splitlines():
-            if not FATAL_LOG_RE.search(raw_line):
-                continue
-            safe = _safe_report_text(raw_line, MAX_RETAINED_LOG_FINDING_CHARS)
-            if any(pattern.fullmatch(raw_line) for pattern in allowlist):
-                if safe not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
-                    allowed.append(safe)
-            elif len(rejected) < MAX_RETAINED_LOG_FINDINGS:
-                rejected.append(safe)
+        owner_service_findings: dict[str, set[int]] = {}
+        if owner_transition_phase is not None:
+            if (
+                owner_transition_phase
+                not in {"candidate-health", "worker-cutover", "rollback"}
+                or not self.recovery_baseline_verified
+            ):
+                raise DeploymentError("Discord owner transition phase is invalid")
+            owner = recovery_policy.load_policy()["host_baseline"]["discord_owner"]
+            retry = re.compile(
+                rf".*update_nickname failed for user {re.escape(owner['auth_username'])}, "
+                r"retrying in 60 secs[.!]?$",
+                re.IGNORECASE,
+            )
+            denied = re.compile(
+                r".*(?:403 Forbidden \(error code: 50013\): Missing Permissions|"
+                r"Discord HTTP 403, code 50013: Missing Permissions)[.!]?$",
+                re.IGNORECASE,
+            )
+            worker_services = {
+                service
+                for service in self.config.auth_services
+                if service not in {
+                    self.config.gunicorn_service,
+                    self.config.beat_service,
+                }
+            }
+            for source, text in logs_by_source:
+                if source not in worker_services:
+                    continue
+                lines = text.splitlines()
+                indexes: set[int] = set()
+                for index, line in enumerate(lines):
+                    if denied.fullmatch(line) is None:
+                        continue
+                    start = max(0, index - 6)
+                    matches = [
+                        candidate
+                        for candidate in range(start, index)
+                        if retry.fullmatch(lines[candidate]) is not None
+                    ]
+                    if len(matches) == 1:
+                        indexes.update((matches[0], index))
+                if indexes:
+                    owner_service_findings[source] = indexes
+        for source, text in logs_by_source:
+            owner_indexes = owner_service_findings.get(source, set())
+            for index, raw_line in enumerate(text.splitlines()):
+                if index in owner_indexes:
+                    safe = (
+                        f"expected Discord guild-owner nickname 50013 during "
+                        f"{owner_transition_phase} on retained {source}"
+                    )
+                    if safe not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
+                        allowed.append(safe)
+                    continue
+                if not FATAL_LOG_RE.search(raw_line):
+                    continue
+                safe = _safe_report_text(raw_line, MAX_RETAINED_LOG_FINDING_CHARS)
+                if any(pattern.fullmatch(raw_line) for pattern in allowlist):
+                    if safe not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
+                        allowed.append(safe)
+                elif len(rejected) < MAX_RETAINED_LOG_FINDINGS:
+                    rejected.append(safe)
         if rejected:
             raise DeploymentError(
                 "New fatal AllianceAuth log pattern was detected: "
@@ -4289,7 +4525,12 @@ class DockerHost:
                 context=f"Restored read-only application health command {command}",
             )
         self._public_smoke_checks()
-        self._scan_new_logs(self.config.auth_services)
+        self._scan_new_logs(
+            self.config.auth_services,
+            owner_transition_phase=(
+                "rollback" if self.recovery_baseline_verified else None
+            ),
+        )
 
     def rollback(self, bundle: ValidatedBundle, last_state: str | None) -> str:
         del last_state

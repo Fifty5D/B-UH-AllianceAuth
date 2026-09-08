@@ -208,20 +208,28 @@ def receive(
             if forced_mode == "preflight":
                 journal = PreflightJournal(config.state_dir, bundle)
                 PreflightEngine(host, journal).run(bundle)
-                return {
+                result = {
                     "schema_version": 1,
                     "result": "preflight-passed",
                     "platform_version": bundle.request.platform_version,
                     "manifest_sha256": bundle.request.manifest_sha256,
                 }
+                if bundle.request.recovery_sha256 is not None:
+                    result["recovery_transition_sha256"] = (
+                        bundle.request.recovery_sha256
+                    )
+                return result
             journal = DeploymentJournal(config.state_dir, bundle)
             DeploymentEngine(host, journal).run(bundle)
-            return {
+            result = {
                 "schema_version": 1,
                 "result": "verified",
                 "platform_version": bundle.request.platform_version,
                 "manifest_sha256": bundle.request.manifest_sha256,
             }
+            if bundle.request.recovery_sha256 is not None:
+                result["recovery_transition_sha256"] = bundle.request.recovery_sha256
+            return result
     finally:
         os.close(lock)
 

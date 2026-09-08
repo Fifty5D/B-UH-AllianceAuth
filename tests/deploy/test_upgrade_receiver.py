@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ops.deploy import receiver_upgrade
+from ops.release import recovery_policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +127,73 @@ def independent_fingerprint(root: Path):
             )
         result[logical] = entries
     return result
+
+
+class ConfirmedReceiverBaselineTests(unittest.TestCase):
+    def _exercise(self, *, changed_path: str | None = None):
+        policy = recovery_policy.load_policy()
+        expected = policy["host_baseline"]["installed_receiver"]
+        identities = {
+            expected["config"]["path"]: expected["config"],
+            expected["install_record"]["path"]: expected["install_record"],
+            **expected["files"],
+        }
+        record_files = {
+            "ops/deploy/contracts.py": expected["files"][
+                "/usr/local/lib/buh-platform-v2/ops/deploy/contracts.py"
+            ]["sha256"],
+            "ops/deploy/docker_host.py": expected["files"][
+                "/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py"
+            ]["sha256"],
+            "ops/deploy/buh-deploy-dispatch": expected["files"][
+                "/usr/local/sbin/buh-deploy-dispatch"
+            ]["sha256"],
+            "ops/deploy/buh-platform-v2-receiver": expected["files"][
+                "/usr/local/sbin/buh-platform-v2-receiver"
+            ]["sha256"],
+        }
+
+        def details_for(path):
+            logical = "/" + Path(path).as_posix().lstrip("/")
+            identity = identities[logical]
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | int(identity["mode"], 8),
+                st_uid=identity["uid"],
+                st_gid=identity["gid"],
+            )
+
+        def digest_for(path, _context):
+            logical = "/" + Path(path).as_posix().lstrip("/")
+            if logical == changed_path:
+                return "0" * 64
+            return identities[logical]["sha256"]
+
+        record = {
+            "config_sha256": expected["config"]["sha256"],
+            "files": record_files,
+            "schema_version": 1,
+            "source_commit": expected["install_record"]["source_commit"],
+        }
+        with mock.patch.object(Path, "lstat", details_for), mock.patch.object(
+            receiver_upgrade, "_checked_sha256", side_effect=digest_for
+        ), mock.patch.object(
+            receiver_upgrade.ReceiverConfig,
+            "load",
+            return_value=SimpleNamespace(schema_version=1),
+        ), mock.patch.object(
+            receiver_upgrade, "_load_json_object", return_value=record
+        ):
+            receiver_upgrade._verify_confirmed_installed_receiver()
+
+    def test_accepts_the_exact_confirmed_installed_receiver(self):
+        self._exercise()
+
+    def test_rejects_any_changed_confirmed_receiver_file(self):
+        with self.assertRaisesRegex(
+            receiver_upgrade.UpgradeError,
+            "Confirmed installed receiver baseline changed",
+        ):
+            self._exercise(changed_path="/usr/local/sbin/buh-platform-v2-receiver")
 
 
 class ReceiverUpgradeBehaviorTests(unittest.TestCase):
@@ -1320,6 +1388,7 @@ class ReceiverInstallerBehaviorTests(unittest.TestCase):
                 "ops/buh-redact-diagnostics.py",
                 "ops/deploy/__init__.py",
                 "ops/deploy/contracts.py",
+                "ops/deploy/coordinated-recovery.json",
                 "ops/deploy/docker_host.py",
                 "ops/deploy/engine.py",
                 "ops/deploy/receiver.py",
@@ -1328,6 +1397,7 @@ class ReceiverInstallerBehaviorTests(unittest.TestCase):
                 "ops/deploy/install-receiver.sh",
                 "ops/release/__init__.py",
                 "ops/release/buh_release.py",
+                "ops/release/recovery_policy.py",
             )
             for relative in install_sources:
                 destination = repo / relative
@@ -1571,6 +1641,8 @@ class ReceiverPowerShellPreRootTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repo = Path(self.temporary.name) / "repo"
         self.repo.mkdir()
+        self.preflight = Path(self.temporary.name) / "prepared-preflight.tar.gz"
+        self.preflight.write_bytes(b"synthetic prepared preflight\n")
         for relative in powershell_required_sources():
             destination = self.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1619,7 +1691,7 @@ class ReceiverPowerShellPreRootTests(unittest.TestCase):
                 "-ReviewedCommit",
                 self.commit,
                 "-PreflightRequest",
-                "/root/preflight-request.json",
+                self.preflight,
                 *extra_arguments,
             ],
             cwd=self.repo,
@@ -1916,6 +1988,9 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 executable.chmod(0o755)
 
             secret = f"local-{secrets.token_hex(24)}"
+            preflight_secret = f"preflight-{secrets.token_hex(24)}"
+            preflight = base / "prepared-preflight.tar.gz"
+            preflight.write_text(preflight_secret + "\n", encoding="ascii")
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
             environment["BUH_FAKE_CAPTURE"] = str(capture)
@@ -1931,7 +2006,7 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                     "-ReviewedCommit",
                     commit,
                     "-PreflightRequest",
-                    "/root/preflight-request.json",
+                    preflight,
                 ],
                 cwd=repo,
                 env=environment,
@@ -1940,7 +2015,7 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 check=False,
                 timeout=120,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr[-1000:])
 
             archive = capture / "receiver-tree.tar"
             inventory = capture / "TRACKED"
@@ -1952,7 +2027,10 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             expected_hashes = dict(
                 zip(checksum_parts[1::2], checksum_parts[0::2], strict=True)
             )
-            self.assertEqual(set(expected_hashes), {"receiver-tree.tar", "TRACKED"})
+            self.assertEqual(
+                set(expected_hashes),
+                {"receiver-tree.tar", "TRACKED", "preflight-request.tar.gz"},
+            )
             self.assertEqual(
                 hashlib.sha256(archive.read_bytes()).hexdigest(),
                 expected_hashes["receiver-tree.tar"],
@@ -1960,6 +2038,12 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             self.assertEqual(
                 hashlib.sha256(inventory.read_bytes()).hexdigest(),
                 expected_hashes["TRACKED"],
+            )
+            transferred_request = capture / "preflight-request.tar.gz"
+            self.assertEqual(transferred_request.read_text(encoding="ascii"), preflight_secret + "\n")
+            self.assertEqual(
+                hashlib.sha256(transferred_request.read_bytes()).hexdigest(),
+                expected_hashes["preflight-request.tar.gz"],
             )
             archived_commit = subprocess.run(
                 ["git", "get-tar-commit-id"],
@@ -2019,7 +2103,13 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 if value != "--" and not value.startswith("b-uh:")
             }
             self.assertEqual(
-                transferred, {"receiver-tree.tar", "TRACKED", "SHA256SUMS"}
+                transferred,
+                {
+                    "receiver-tree.tar",
+                    "TRACKED",
+                    "SHA256SUMS",
+                    "preflight-request.tar.gz",
+                },
             )
             self.assertFalse(any("bundle" in value for value in transferred))
             root_call = next(
@@ -2030,8 +2120,10 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             self.assertEqual(root_call["argv"][:2], ["-T", "b-uh"])
             root_command = root_call["argv"][2]
             self.assertIn(commit, root_command)
-            self.assertIn("/root/preflight-request.json", root_command)
+            self.assertIn("/tmp/buh-receiver-upgrade-", root_command)
+            self.assertIn("preflight-request.tar.gz", root_command)
             self.assertNotIn(secret, root_command)
+            self.assertNotIn(preflight_secret, root_command)
 
 
 class ReceiverExecutableContractTests(unittest.TestCase):

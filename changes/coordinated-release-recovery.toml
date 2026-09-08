@@ -1,0 +1,5 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Restore the exact guarded release path from the verified production baseline."
+deployment_predecessor = "0.5.6"

@@ -67,6 +67,15 @@ On the first source-first release, app fragments are also applied to the
 current legacy versions before wheels are rebuilt; bootstrap does not reuse a
 published distribution/version identity for different source bytes.
 
+The one reviewed release-gap recovery uses a single platform `fix` fragment
+with `deployment_predecessor = "0.5.6"`. This does not change the immutable
+ledger predecessor: the next manifest still points directly to v0.6.1. It adds
+an exact policy-bound recovery attestation for the verified production v0.5.6 →
+v0.6.0 → v0.6.1 chain. Any other baseline, changed policy, missing/reordered
+release, compatibility change, application change, or second declaration fails
+closed. After that fragment is consumed, later release planning is direct from
+the newly published immediate predecessor.
+
 ## Commands
 
 ```bash

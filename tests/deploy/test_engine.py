@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import signal
 import tempfile
@@ -19,6 +20,7 @@ from ops.deploy.engine import (
     PreflightEngine,
     PreflightJournal,
 )
+from ops.release import recovery_policy
 
 
 def make_bundle(root: Path, *, attempt: int = 1) -> ValidatedBundle:
@@ -133,6 +135,39 @@ class HealthFailureBackend(FakeBackend):
 
 
 class DeploymentEngineTests(unittest.TestCase):
+    def test_attempt_record_retains_exact_recovery_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = make_bundle(root)
+            policy = recovery_policy.load_policy()
+            transition = {
+                "policy_id": policy["policy_id"],
+                "policy_sha256": recovery_policy.policy_sha256(),
+                "purpose": "receiver-upgrade-preflight",
+                "releases": policy["published_releases"],
+            }
+            bundle = ValidatedBundle(
+                root=bundle.root,
+                release_dir=bundle.release_dir,
+                request=dataclasses.replace(
+                    bundle.request, recovery_transition=transition
+                ),
+                manifest=bundle.manifest,
+                install_plan=bundle.install_plan,
+            )
+            journal = PreflightJournal(root / "state", bundle)
+            record = json.loads(journal.path.read_text())
+            self.assertEqual(
+                record["release_recovery"],
+                {
+                    "baseline_platform_version": "0.5.6",
+                    "policy_id": policy["policy_id"],
+                    "purpose": "receiver-upgrade-preflight",
+                    "release_count": 3,
+                    "sha256": recovery_policy.recovery_digest(transition),
+                },
+            )
+
     def test_catchable_termination_signals_trigger_guarded_rollback(self):
         signal_values = tuple(
             value

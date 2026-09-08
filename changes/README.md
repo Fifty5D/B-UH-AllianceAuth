@@ -26,11 +26,14 @@ Run the release planner against the latest synchronized release manifest before
 merging so missing or stale application and platform fragments are caught early.
 
 An exceptional, platform-only recovery may declare
-`deployment_predecessor = "X.Y.Z"` on a single `kind = "fix"` fragment.
-The builder accepts it only when the named immutable release, every skipped
-release, and the candidate have identical receiver-visible artifacts,
-compatibility, and install plans. The consumed fragment makes the bridge
-one-time; the following release returns to the immediate ledger predecessor.
+`deployment_predecessor = "X.Y.Z"` on a single `kind = "fix"` fragment. The
+builder accepts it only when that version is the baseline in the exact reviewed
+recovery policy and every intervening immutable release verifies in order
+without crossing the current compatibility boundary. The candidate still names
+the latest ledger release as its immediate `previous_release`; separate recovery
+metadata authorizes only the verified live-host transition. The consumed
+fragment makes the authorization one-time, and the following release returns to
+an ordinary direct deployment transition.
 
 Source recovery that exactly reproduces an existing wheel does not change the
 application version and is recorded in the repository migration history instead.

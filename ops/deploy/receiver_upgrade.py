@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import DeploymentError, ReceiverConfig
+from ops.release import recovery_policy
 
 
 SCHEMA_VERSION = 1
@@ -46,6 +47,9 @@ RECOVERY_SOURCES = (
     "ops/deploy/__init__.py",
     "ops/deploy/contracts.py",
     "ops/deploy/receiver_upgrade.py",
+    "ops/release/__init__.py",
+    "ops/release/recovery_policy.py",
+    "ops/deploy/coordinated-recovery.json",
 )
 INSTALL_SOURCES = (
     "ops/__init__.py",
@@ -54,6 +58,7 @@ INSTALL_SOURCES = (
     "ops/buh-redact-diagnostics.py",
     "ops/deploy/__init__.py",
     "ops/deploy/contracts.py",
+    "ops/deploy/coordinated-recovery.json",
     "ops/deploy/docker_host.py",
     "ops/deploy/engine.py",
     "ops/deploy/receiver.py",
@@ -61,6 +66,7 @@ INSTALL_SOURCES = (
     "ops/deploy/buh-platform-v2-receiver",
     "ops/release/__init__.py",
     "ops/release/buh_release.py",
+    "ops/release/recovery_policy.py",
 )
 NESTED_PREFLIGHT_TIMEOUT_SECONDS = 3600
 NESTED_ROLLBACK_GRACE_SECONDS = 300
@@ -280,6 +286,79 @@ def _verify_live_production_inputs(config: Path, legacy_receiver: Path) -> None:
         or _sha256(legacy_receiver) != expected[1][1]
     ):
         raise UpgradeError("Pinned receiver input differs from its canonical path.")
+
+
+def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
+    """Fail closed unless the one-time upgrade starts from reviewed host evidence."""
+
+    try:
+        expected = recovery_policy.load_policy()["host_baseline"][
+            "installed_receiver"
+        ]
+    except recovery_policy.RecoveryPolicyError as exc:
+        raise UpgradeError(str(exc)) from exc
+
+    identities = {
+        expected["config"]["path"]: expected["config"],
+        expected["install_record"]["path"]: expected["install_record"],
+        **expected["files"],
+    }
+    for logical, identity in identities.items():
+        path = _actual(system_root, logical)
+        try:
+            details = path.lstat()
+        except OSError as exc:
+            raise UpgradeError(
+                "Confirmed installed receiver baseline is unavailable."
+            ) from exc
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or stat.S_ISLNK(details.st_mode)
+            or details.st_uid != identity["uid"]
+            or details.st_gid != identity["gid"]
+            or f"{stat.S_IMODE(details.st_mode):04o}" != identity["mode"]
+            or _checked_sha256(path, "Installed receiver baseline")
+            != identity["sha256"]
+        ):
+            raise UpgradeError("Confirmed installed receiver baseline changed.")
+
+    config_path = _actual(system_root, expected["config"]["path"])
+    try:
+        loaded_config = ReceiverConfig.load(config_path)
+    except DeploymentError as exc:
+        raise UpgradeError("Confirmed installed receiver configuration is invalid.") from exc
+    if loaded_config.schema_version != expected["config"]["schema_version"]:
+        raise UpgradeError("Confirmed installed receiver schema changed.")
+
+    record = _load_json_object(
+        _actual(system_root, expected["install_record"]["path"]),
+        "Installed receiver record",
+    )
+    if (
+        set(record) != {"config_sha256", "files", "schema_version", "source_commit"}
+        or record.get("config_sha256") != expected["config"]["sha256"]
+        or record.get("schema_version") != 1
+        or record.get("source_commit") != expected["install_record"]["source_commit"]
+        or not isinstance(record.get("files"), dict)
+    ):
+        raise UpgradeError("Confirmed installed receiver record changed.")
+    installed_to_source = {
+        "/usr/local/lib/buh-platform-v2/ops/deploy/contracts.py": (
+            "ops/deploy/contracts.py"
+        ),
+        "/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py": (
+            "ops/deploy/docker_host.py"
+        ),
+        "/usr/local/sbin/buh-deploy-dispatch": "ops/deploy/buh-deploy-dispatch",
+        "/usr/local/sbin/buh-platform-v2-receiver": (
+            "ops/deploy/buh-platform-v2-receiver"
+        ),
+    }
+    if any(
+        record["files"].get(source) != expected["files"][installed]["sha256"]
+        for installed, source in installed_to_source.items()
+    ):
+        raise UpgradeError("Confirmed installed receiver source identity changed.")
 
 
 def _open_production_lock(config: ReceiverConfig) -> int:
@@ -1228,6 +1307,7 @@ def execute_upgrade(
         raise UpgradeError("The production deployment lock is not held.")
     if install_callback is None and system_root == Path("/"):
         _verify_live_production_inputs(config, legacy_receiver)
+        _verify_confirmed_installed_receiver(system_root)
 
     private_owner = _private_directory_owner(system_root)
     try:

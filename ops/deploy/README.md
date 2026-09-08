@@ -49,10 +49,11 @@ receiver. A failed production attempt is not automatically retried.
   preflight, deployment, health, and rollback command. The configured base file
   must remain present, so application overlays and their bind mounts cannot be
   silently dropped during container replacement.
-- A legacy host may start from a newer published Platform v2 release only when
-  the release explicitly opts into skipping uninstalled v2 predecessors and
-  still names the exact reviewed legacy baseline. Once Platform v2 is live,
-  every release must name the verified live release as its direct predecessor.
+- Every immutable release continues to name the immediately preceding ledger
+  release. An established v2 host may cross the single reviewed v0.5.6 release
+  gap only when the target, request archive, receiver, host baseline, retained
+  evidence, and approval all carry the exact coordinated-recovery identity.
+  Every ordinary deployment remains a strict direct transition.
 - Existing and third-party wheels are force-reinstalled from verified bytes in
   stable Docker layers before changed owned wheels. Unchanged layers remain
   cached, while same-version corrections cannot silently retain old bytes.
@@ -158,6 +159,62 @@ receiver. A failed production attempt is not automatically retried.
   and enter the same guarded rollback path. Later signals are deferred while
   recovery runs. `SIGKILL` cannot be caught, so the atomic journal and manual
   recovery procedure remain authoritative after a forced host termination.
+
+## Bounded coordinated recovery identity
+
+`ops/deploy/coordinated-recovery.json` is the only authorization for the
+installed-versus-published gap. It binds the read-only host report captured at
+`2026-09-07T22:17:17.791522+00:00` (SHA-256
+`df9865e121e068cc65c3e6b05cb287f1b87f05772e54ecd4c7d07fa61137fc38`),
+the exact production v0.5.6 markers and running provenance, the installed
+receiver source/configuration, service images and replicas, Discord owner
+association, Nginx/front-proxy identities, and both sides of the one-time Nginx
+mount activation. It authorizes no other host or later retry after live state
+changes.
+
+| Version | Release commit | Source commit | Manifest SHA-256 |
+|---|---|---|---|
+| 0.5.6 | `ce6bcf0aaa21338623aaf6d89d6bfc4d12ac51ba` | `72e900c85791869e456931c9350bef794f8f9b9b` | `db22873f967c039d12ccf82e7330767d8c6b82f91b5654ca3f95854a8520821a` |
+| 0.6.0 | `ba99d9d82aff319ba073256b4841732aaf3998d2` | `2ed0188255833c99e8acf9aa72f4d584533909ac` | `26f30066f2dd50a7bf4b650c48a6e2218e3f23f9cccf05fb018cf7ae083dee1d` |
+| 0.6.1 | `43234a8c0b6371fdfc62b59fa75a7980924ac3a5` | `b97955bf8998b690e8ce4fc34086f5458487ab60` | `80623060f7eb70144f89ef2b0edddc7bcdfa40ae59144f2de9178c72ea51bb33` |
+
+The temporary receiver-upgrade request is an exact v0.6.1 **preflight** with
+purpose `receiver-upgrade-preflight`. It accepts only the confirmed pre-mount
+Compose order (`docker-compose.yml`, then
+`docker-compose.buh-vps-health.yml`) and can use the archived schema-v1 receiver
+configuration. Its result is receiver-upgrade evidence only: it cannot deploy,
+publish a production-readiness marker, or change either current-release marker.
+
+The eventual next immutable release remains a normal ledger child of v0.6.1,
+but its single-use `deployment_recovery` attestation allows production to move
+from verified v0.5.6 through the exact immutable chain. Its schema-v2 preflight
+and deployment require the activated ordered Compose set with
+`docker-compose.buh-platform-v2.yml` last. All release refs, release-parent
+commits, manifest bytes, compatibility hashes, live images/replicas, and
+evidence digests are reverified. A later release is direct from that installed
+release and carries no recovery authorization.
+
+The receiver upgrade itself additionally requires the exact installed source
+`afd2d37e09856c34be1d18f76383898d87a384a7`, schema 1 configuration SHA-256
+`b57e6db83bccbedcf944985469f4f621e0b34b4eb34274b68c2dff210444bb04`,
+and reviewed installed-file hashes from the host report. Any drift stops before
+the verified backup or live-path activation.
+
+The owner setting staged in `conf/local.py` must be exactly:
+
+```python
+BUH_DISCORD_GUILD_OWNER_ID = 318985508913020930
+```
+
+Before staging, confirm that Alliance Auth username `Fifty5D` is still linked to
+Discord ID `318985508913020930` in guild `1521272563626672198`. Preserve the
+file's existing uid 0, gid 61000, mode `0640`, all unrelated settings, Discord
+role synchronization, and the five-minute nickname schedule. During only
+candidate health, worker cutover, and rollback for this verified recovery, the
+health scanner records rather than rejects an exact paired owner nickname retry
+and Discord 403/code 50013 from a retained old worker. Candidate output, role
+operations, other members, unpaired messages, and every post-replacement scan
+remain fatal. The exception ends with this recovery transition.
 
 ## Schema-v2 managed web-switch prerequisite
 
@@ -306,58 +363,82 @@ schema in MariaDB, seeds synthetic accounting evidence, dumps it, upgrades it,
 restores the dump into a second database, upgrades that copy, and verifies the
 evidence again.
 
-## Production bootstrap (one time, not automatic)
+## Ordered coordinated-recovery runbook
 
-Do this only after the pull request and hosted checks pass. It changes the SSH
-forced-command boundary and therefore requires a separately reviewed maintenance
-window.
+This is a reviewed sequence, not authority to merge, change the host, or deploy.
+Each host-maintenance or production action requires its stated approval. Stop on
+the first mismatch; never rewrite a release ref, current marker, retained backup,
+or approval record to advance the sequence.
 
-1. Update the existing observer bridge from the exact reviewed `main` checkout,
-   then comment `/fingerprint platform-v2` in diagnostics issue #1. The guarded
-   command reports only the Compose service names, current `AA_DOCKER_TAG`, its
-   resolved repository digest, and Docker versions. It never emits other
-   environment values. Confirm the Compose filename, service names, existing
-   legacy receiver path, and runtime result without copying environment contents
-   or credentials into GitHub, chat, or diagnostics.
-2. Resolve the current production image to its immutable repository digest.
-   Add that exact `name:tag@sha256:...` as
-   `production_runtime.base_image` in `platform/compatibility.toml`, run all
-   source checks, and publish a new immutable Platform release. A tag-only image
-   is rejected.
-3. Complete the schema-v2 managed web-switch prerequisite above while its
-   initial upstream still selects the current live Gunicorn service. Copy
-   `receiver-config.example.json` to a root-only configuration, adjust only the
-   verified path/service values, serialize it as canonical JSON, and validate it
-   with `ReceiverConfig.load` from the exact reviewed checkout.
-4. Run the reviewed Windows PowerShell receiver-upgrade helper documented below.
-   It transfers only the exact commit, runs the receiver/deployment tests before
-   activation, takes a root-only backup, installs atomically, runs the supplied
-   no-change preflight, and restores the prior receiver if installation or
-   preflight fails. It preserves the legacy receiver and does not alter either
-   identity's public-key material.
-5. Review the existing deploy user's forced-command entry locally. Retain its
-   existing public-key material and restrictions, changing only its fixed command
-   to invoke:
-
-   ```text
-   /usr/local/sbin/buh-deploy-dispatch /usr/local/sbin/buh-moon-tax-platform-remote
-   ```
-
-   The dispatcher routes the old `deploy moon-tax` command unchanged and adds
-   only the two Platform v2 commands. Never send the key material anywhere.
-6. Confirm the helper's exact-release no-change preflight and sanitized observer
-   diagnostics passed. Then run **Deploy Platform v2** in `preflight` mode for
-   the exact release intended for production with confirmation
-   `PREFLIGHT PLATFORM V2`. This validates the upgraded receiver; it does not
-   authorize or perform a deployment.
-7. Stop the infrastructure window without deploying. Routine application
-   releases proceed through **Prepare Release**, its exact feature/readiness and
-   no-change preflight evidence, Anthony's single ChatGPT approval on the release
-   synchronization PR, and **Deploy Production**. Direct `deploy` mode in
-   **Deploy Platform v2** is emergency-only: Anthony must first record an explicit
-   emergency approval for the exact immutable release and its already-passing
-   validation/preflight evidence. It must never be used to bypass a failed,
-   missing, stale, or expired normal-flow gate.
+1. **Qualify the repair without merging it.** Review the coordinated repair PR,
+   its final-head Validate PR/Preview UI/readiness evidence, the complete
+   synthetic rehearsal, and the host-report identity above. Confirm PR #50 still
+   has exact head `43234a8c0b6371fdfc62b59fa75a7980924ac3a5` and is only the
+   already-published v0.6.1 history synchronization. Do not merge either PR yet.
+2. **Prepare every host input offline.** From a clean Windows checkout of the
+   repair's exact reviewed commit, generate the v0.6.1 bootstrap archive with the
+   preparation command below. Separately stage backups of `conf/local.py`,
+   `conf/nginx.conf`, `.env`, the receiver config, and every reconciled Compose
+   file. Stage the exact owner ID, `bootstrap/upstream.conf`,
+   `bootstrap/docker-compose.buh-platform-v2.yml`, the real Auth server's
+   `auth.b-uh.com` name, include, and sole catch-all managed `proxy_pass`.
+   Reconcile the actual service/manual `-f` invocation with `.env`; the confirmed
+   two-file creation label is not proof that no later overlay exists.
+3. **Validate the Nginx proposal without touching the running service.** Render
+   the full ordered Compose set plus a temporary staged-config overlay. Require
+   the Nginx service to resolve to local image
+   `sha256:46ccc48fbb1f5a43167f2ee2c279c122b96eec5d976e7f4e1e0780f59a51b4d6`.
+   With no published ports or dependency starts, run the equivalent of
+   `docker compose <verified files> run --rm --no-deps --no-build --pull never nginx nginx -t`
+   and the reviewed `nginx -T` assertions. Compare the full resolved mount set,
+   proxy headers, default-server behavior, front-proxy service, Auth replicas,
+   and singleton beat to the backups. Record exact restoration commands using
+   the original full file set before requesting live approval.
+4. **With separate receiver-maintenance approval, install and prove the reviewed
+   receiver.** Keep the canonical schema-v1 config in place and the initial
+   upstream on the live Gunicorn service. Stage the owner setting without
+   restarting the old workers. Run the upgrade command below with the locally
+   prepared archive. The helper rechecks the exact installed receiver baseline,
+   transfers only the reviewed tree and archive, runs deployment tests, retains
+   a verified root-only backup, installs atomically, and runs that exact
+   no-change bootstrap preflight. Failure restores the prior receiver and ends
+   the attempt. Success leaves v0.5.6 current markers unchanged and is not
+   production readiness. Preserve both SSH keys and the legacy receiver; in the
+   same separately reviewed window, change only the deploy key's forced command
+   to `/usr/local/sbin/buh-deploy-dispatch /usr/local/sbin/buh-moon-tax-platform-remote`.
+5. **With separate Nginx-only approval, activate the mount and schema v2.** Follow
+   “Activate the mount once” above using the exact reconciled file list,
+   `--no-deps --no-build --pull never --force-recreate nginx`, and no other
+   service. Verify the exact image, old and new mounts, visible upstream hash,
+   actual `auth.b-uh.com` server/location, `nginx -t`, and all five routes. On any
+   failure, restore the saved Nginx/Compose/settings bytes and recreate only
+   Nginx from the original full file set. After success, atomically install the
+   validated canonical schema-v2 receiver config as root mode `0600`. A normal
+   deployment from this point reloads Nginx; it never recreates it.
+6. **Synchronize history before the repair merge.** With the exact separately
+   reviewed history-only authorization, merge PR #50 directly onto its tested
+   source. It must have no production approval marker; verify authorization is
+   rejected and no deployment starts. Rebase or update the coordinated repair
+   PR on that main tip, then rerun its exact-head validation, preview, rehearsal,
+   and readiness publication before Work merges it. This preserves v0.6.1's
+   exact commit, immutable files, ancestry, and consumed fragments.
+7. **Use one fresh automatic release lifecycle.** The repair merge should plan
+   the next patch release (v0.6.2 while the reviewed fragment remains the only
+   change), with immediate ledger predecessor v0.6.1 and the bounded recovery
+   attestation. Do not retry run 34084467513 or substitute a standalone
+   preflight. Follow the new automatic run through immutable publication, main
+   and sync validation, an exact schema-v2 no-change preflight, artifact
+   retention, and approval-readiness publication. Keep the release sync PR on
+   its tested source and do not merge another feature while approval is pending.
+8. **Ask once, then monitor or stop.** Work presents the exact release/source
+   commits, manifest, recovery identity, CI, preview, receiver, host-bootstrap,
+   and preflight evidence to Anthony for one production approval. Only the
+   existing approved merge path may record it. The deployment must retain the
+   verified database backup, switch traffic before worker replacement, keep one
+   beat, stabilize for at least five minutes, and publish current markers last.
+   Any failure switches traffic back first, restores exact images/replicas and
+   static mapping, verifies the restored site, retains the database backup, does
+   not reverse migrations, and ends without an automatic retry.
 
 Legacy v1 remains available until a complete Platform v2 production cycle and a
 separately approved rollback drill have succeeded.
@@ -375,28 +456,47 @@ embedded commit, and verifies every extracted file's mode and Git blob ID before
 running code. The root upgrade refuses every invocation outside that private
 bootstrap.
 
-The configuration and preflight archive must be root-owned mode `0600` beneath
+The canonical VPS configuration must be root-owned mode `0600` beneath
 root-owned directories with no group/world write access. The legacy receiver and
 all its parent directories must be root-owned and not group/world writable; the
-receiver itself must remain executable. Root pins configuration, request, and
-legacy bytes before running tests and verifies their SHA-256 identities again
-before staging and preflight. The transaction takes and verifies a root-only
-backup of every managed receiver target, retains exact recovery code and config,
-installs through verified sibling paths, and restores the backup after any
-catchable installation or preflight failure.
+receiver itself must remain executable. The preparation helper creates the
+request locally outside the clean checkout and proves two builds are byte-for-byte
+identical. The upgrade helper uploads that exact local file into its private,
+attempt-scoped transfer directory. Root copies it through a bounded no-follow
+descriptor into mode `0600` storage, then pins configuration, request, and legacy
+bytes before tests and verifies their SHA-256 identities again before staging and
+preflight. The transaction takes and verifies a root-only backup of every managed
+receiver target, retains exact recovery code and config, installs through
+verified sibling paths, and restores the backup after any catchable installation
+or preflight failure.
 
-From a clean Windows checkout at the exact reviewed commit, the one-time command
-is below. Replace the SHA and root-readable VPS request path only after review;
-the request path is not request content, and PowerShell history must not contain
-a token or key. The helper uses the existing `b-uh` SSH host alias:
+From a clean Windows checkout at the exact reviewed commit, use the commands
+below. Replace only the reviewed SHA after final review; the output must not
+already exist. Neither command accepts a token or key, and the upgrade helper
+uses the existing `b-uh` SSH host alias:
 
 ```powershell
+$ReviewedCommit = '<REVIEWED_40_HEX_SHA>'
+$BootstrapArchive = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  "buh-platform-v061-bootstrap-$($ReviewedCommit.Substring(0, 12)).tar.gz"
+
+.\setup\Prepare-BUH-PlatformV2Preflight.ps1 `
+  -ReviewedCommit $ReviewedCommit `
+  -OutputPath $BootstrapArchive
+
 .\setup\Upgrade-BUH-PlatformV2Receiver.ps1 `
-  -ReviewedCommit '<REVIEWED_40_HEX_SHA>' `
+  -ReviewedCommit $ReviewedCommit `
   -ConfigPath '/etc/buh-platform-v2/receiver.json' `
   -LegacyReceiver '/usr/local/sbin/buh-moon-tax-platform-remote' `
-  -PreflightRequest '/root/platform-v2-preflight.tar.gz'
+  -PreflightRequest $BootstrapArchive
 ```
+
+Retain the printed archive SHA-256, adjacent `.metadata.json`, receiver backup
+path, and sanitized preflight result for review. The metadata must identify
+v0.6.1 and the exact three-release recovery chain. The upgrade helper transfers
+the archive itself; no pre-existing `/root/platform-v2-preflight.tar.gz` or other
+VPS request path is assumed.
 
 The helper must never be run by CI and must never print `.env`, request payloads,
 credentials, database data, or raw logs. This operation upgrades receiver
