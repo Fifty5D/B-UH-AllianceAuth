@@ -1,0 +1,262 @@
+name: Validate Published Release Recovery
+run-name: "Validate published v0.6.2 / ${{ github.sha }} / ${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type VALIDATE PUBLISHED V0.6.2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buh-published-platform-v0.6.2-recovery
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  qualify:
+    name: Qualify the reviewed one-release recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      activation_commit: ${{ steps.contract.outputs.activation_commit }}
+      feature_head: ${{ steps.contract.outputs.feature_head }}
+      release_commit: ${{ steps.contract.outputs.release_commit }}
+      source_commit: ${{ steps.contract.outputs.source_commit }}
+    steps:
+      - name: Check out the exact activation merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate actor, activation, release refs, and synchronization PR
+        id: contract
+        env:
+          ACTOR: ${{ github.actor }}
+          API_URL: ${{ github.api_url }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SELECTED_REF: ${{ github.ref }}
+          SELECTED_SHA: ${{ github.sha }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${CONFIRMATION}" == "VALIDATE PUBLISHED V0.6.2" ]]
+          [[ "${RUN_ATTEMPT}" == "1" ]]
+          [[ "${SELECTED_REF}" == "refs/heads/main" ]]
+          [[ "${SELECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SELECTED_SHA}" ]]
+          [[ "${ACTOR}" == "${TRIGGERING_ACTOR}" ]]
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          fi
+          [[ "${ACTOR}" == "${{ github.repository_owner }}" || \
+             (-n "${WORK_ACTOR}" && "${ACTOR}" == "${WORK_ACTOR}") ]]
+          mkdir -p build
+          python3 ops/release/validation_recovery.py \
+            --contract ops/release/published-release-recovery-v0.6.2.json \
+            activation \
+            --root . \
+            --source-commit "${SELECTED_SHA}" \
+            --event-name workflow_dispatch \
+            --output build/recovery-activation.json >/dev/null
+
+          for branch in release/platform-v0.6.2 sync/platform-v0.6.2; do
+            encoded="${branch//\//%2F}"
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${API_URL}/repos/${REPOSITORY}/git/ref/heads/${encoded}" \
+              >"build/${branch%%/*}-ref.json"
+            [[ "$(jq -er '.object.type' "build/${branch%%/*}-ref.json")" == \
+               "commit" ]]
+            [[ "$(jq -er '.object.sha' "build/${branch%%/*}-ref.json")" == \
+               "6074b965cbd2e6ab2630cd539ee455b8d419aef6" ]]
+          done
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${API_URL}/repos/${REPOSITORY}/pulls/52" >build/sync-pr.json
+          jq -e \
+            --arg repository "${REPOSITORY}" '
+              .number == 52 and
+              .state == "open" and
+              .draft == false and
+              .title == "Sync platform release v0.6.2" and
+              .head.ref == "sync/platform-v0.6.2" and
+              .head.sha == "6074b965cbd2e6ab2630cd539ee455b8d419aef6" and
+              .head.repo.full_name == $repository and
+              .base.ref == "main" and
+              .base.repo.full_name == $repository
+            ' build/sync-pr.json >/dev/null
+
+  source_tests:
+    name: Validate unchanged v0.6.2 with the reviewed harness
+    needs: qualify
+    uses: ./.github/workflows/reusable-source-tests.yml
+    with:
+      cache_scope: published-v0.6.2-recovery
+      source_sha: ${{ needs.qualify.outputs.release_commit }}
+      recovery_harness_sha: ${{ needs.qualify.outputs.activation_commit }}
+    permissions:
+      contents: read
+
+  attest:
+    name: Attest separate release and harness identities
+    needs: [qualify, source_tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+    steps:
+      - name: Check out the exact activation merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.qualify.outputs.activation_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the successful exact-release validation
+        id: identity
+        env:
+          ACTIVATION_COMMIT: ${{ needs.qualify.outputs.activation_commit }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          VALIDATION_ACTOR: ${{ github.actor }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${RUN_ATTEMPT}" == "1" ]]
+          mkdir -p build
+          python3 ops/release/validation_recovery.py \
+            --contract ops/release/published-release-recovery-v0.6.2.json \
+            attest \
+            --root . \
+            --activation-commit "${ACTIVATION_COMMIT}" \
+            --repository "${REPOSITORY}" \
+            --run-id "${RUN_ID}" \
+            --run-attempt "${RUN_ATTEMPT}" \
+            --actor "${VALIDATION_ACTOR}" \
+            --output build/platform-validation-recovery.json >/dev/null
+          artifact="platform-validation-recovery-v0.6.2-6074b965cbd2-${RUN_ID}-${RUN_ATTEMPT}"
+          echo "artifact_name=${artifact}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload canonical recovery validation evidence
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: build/platform-validation-recovery.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  ready:
+    name: Publish the recovered one-approval boundary
+    needs: [qualify, source_tests, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out the exact activation merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.qualify.outputs.activation_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the exact recovery validation artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.attest.outputs.artifact_id }}
+          path: build/recovery-validation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Reverify readiness and publish the recovery marker last
+        env:
+          ACTIVATION_COMMIT: ${{ needs.qualify.outputs.activation_commit }}
+          ACTIVATION_FEATURE_HEAD: ${{ needs.qualify.outputs.feature_head }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          VALIDATION_ARTIFACT_DIGEST: ${{ needs.attest.outputs.artifact_digest }}
+          VALIDATION_ARTIFACT_ID: ${{ needs.attest.outputs.artifact_id }}
+          VALIDATION_ARTIFACT_NAME: ${{ needs.attest.outputs.artifact_name }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
+        run: |
+          set -Eeuo pipefail
+          python3 ops/release/validation_recovery.py \
+            --contract ops/release/published-release-recovery-v0.6.2.json \
+            verify-attestation \
+            --attestation build/recovery-validation/platform-validation-recovery.json \
+            --run-id "${RUN_ID}" \
+            --run-attempt "${RUN_ATTEMPT}" \
+            --activation-commit "${ACTIVATION_COMMIT}" >/dev/null
+          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
+          if [[ -n "${WORK_ACTOR}" ]]; then
+            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
+          fi
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request 53 \
+            --feature-head "${ACTIVATION_FEATURE_HEAD}" \
+            --merge-source-commit "${ACTIVATION_COMMIT}" \
+            "${allowed_mergers[@]}" \
+            --output build/activation-feature-readiness.json >/dev/null
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request 51 \
+            --feature-head 7e945de03a75e8d7ec75930f7e60fe402abfcf48 \
+            --merge-source-commit 4f98e7cb559ee1a9b269ea1f94938678d2dac4df \
+            "${allowed_mergers[@]}" \
+            --output build/original-feature-readiness.json >/dev/null
+          python3 ops/release/platform_approval.py recover-ready \
+            --owner "${REPOSITORY_OWNER}" \
+            --repository "${REPOSITORY}" \
+            --recovery-contract ops/release/published-release-recovery-v0.6.2.json \
+            --feature-readiness build/original-feature-readiness.json \
+            --validation-attestation build/recovery-validation/platform-validation-recovery.json \
+            --validation-artifact-id "${VALIDATION_ARTIFACT_ID}" \
+            --validation-artifact-name "${VALIDATION_ARTIFACT_NAME}" \
+            --validation-artifact-digest "${VALIDATION_ARTIFACT_DIGEST}" \
+            --work-actor "${WORK_ACTOR}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/platform-approval-recovery.json >/dev/null

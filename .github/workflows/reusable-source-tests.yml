@@ -12,6 +12,11 @@ on:
         description: Exact source commit tested by every lane
         required: true
         type: string
+      recovery_harness_sha:
+        description: Optional reviewed activation merge supplying only the v0.6.2 fixture harness
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -127,26 +132,75 @@ jobs:
       - name: Require synchronized immutable release history
         id: ledger
         env:
+          EVENT_NAME: ${{ github.event_name }}
           GITHUB_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          set +e
           python3 ops/release/ledger.py verify \
+              --root . \
+              --source-commit "${SOURCE_SHA}" \
+              --remote origin \
+              --release-root releases/platform \
+              --output "${RUNNER_TEMP}/source-release-state.json" >/dev/null
+          ledger_status=$?
+          set -e
+          if [[ "${ledger_status}" -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ ! -f ops/release/published-release-recovery-v0.6.2.json ]]; then
+            echo "Ordinary immutable release-ledger verification failed." >&2
+            exit "${ledger_status}"
+          fi
+          recovery_args=()
+          if [[ -n "${PULL_REQUEST}" ]]; then
+            recovery_args+=(--pull-request "${PULL_REQUEST}")
+          fi
+          python3 ops/release/validation_recovery.py \
+            --contract ops/release/published-release-recovery-v0.6.2.json \
+            ledger \
             --root . \
             --source-commit "${SOURCE_SHA}" \
-            --remote origin \
-            --release-root releases/platform \
-            --output "${RUNNER_TEMP}/source-release-state.json" >/dev/null
+            --event-name "${EVENT_NAME}" \
+            "${recovery_args[@]}" \
+            --output "${RUNNER_TEMP}/source-release-recovery.json" >/dev/null
 
       - name: Validate the release plan and change fragments
         env:
           BOOTSTRAP: ${{ steps.ledger.outputs.bootstrap }}
           PREVIOUS_RELEASE_PATH: ${{ steps.ledger.outputs.latest_release_path }}
+          RECOVERY_PLAN: ${{ steps.ledger.outputs.recovery_plan }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           TEST_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
+          if [[ -n "${RECOVERY_PLAN}" ]]; then
+            python3 - "${RECOVERY_PLAN}" "${SOURCE_SHA}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
+          if (
+              report.get("schema_version") != 1
+              or report.get("recovery_id")
+              != "published-platform-v0.6.2-validation-20260909"
+              or report.get("source_commit") != sys.argv[2]
+              or report.get("latest_release", {}).get("platform_version") != "0.6.2"
+              or report.get("next_release", {}).get("platform_version") != "0.6.3"
+              or report.get("next_release", {}).get("previous_platform_version")
+              != "0.6.2"
+              or report.get("next_release", {}).get("release_required") is not True
+              or report.get("next_release", {}).get("deployment_predecessor")
+              is not None
+          ):
+              raise SystemExit("Published-release recovery plan is invalid")
+          PY
+            exit 0
+          fi
           command=(
             python3 ops/release/buh_release.py plan
             --root .
@@ -290,6 +344,29 @@ jobs:
           set -Eeuo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+
+      - name: Apply the bounded published-release test harness
+        if: ${{ inputs.recovery_harness_sha != '' }}
+        env:
+          HARNESS_SHA: ${{ inputs.recovery_harness_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SOURCE_SHA}" == "6074b965cbd2e6ab2630cd539ee455b8d419aef6" ]]
+          [[ "${HARNESS_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          git fetch --no-tags origin "${HARNESS_SHA}"
+          tool="${RUNNER_TEMP}/validation-recovery.py"
+          contract="${RUNNER_TEMP}/published-release-recovery-v0.6.2.json"
+          git show "${HARNESS_SHA}:ops/release/validation_recovery.py" >"${tool}"
+          git show \
+            "${HARNESS_SHA}:ops/release/published-release-recovery-v0.6.2.json" \
+            >"${contract}"
+          PYTHONPATH="${PWD}/ops/release" python3 "${tool}" \
+            --contract "${contract}" apply-harness \
+            --root . \
+            --harness-commit "${HARNESS_SHA}" \
+            --output "${RUNNER_TEMP}/applied-recovery-harness.json" >/dev/null
 
       - name: Prepare failure report
         run: |

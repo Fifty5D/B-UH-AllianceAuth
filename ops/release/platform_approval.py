@@ -24,13 +24,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, TextIO
 
 from open_sync_pr import GitHubClient, SyncConfig, SyncPrError
+import validation_recovery
 
 
 SCHEMA_VERSION = 2
+RECOVERY_SCHEMA_VERSION = 3
 FEATURE_READINESS_SCHEMA_VERSION = 1
 PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 1
 READY_PREFIX = "<!-- buh-platform-ready:v2 "
 APPROVAL_PREFIX = "<!-- buh-chatgpt-approved:v2 "
+RECOVERY_READY_PREFIX = "<!-- buh-platform-ready-recovery:v1 "
+RECOVERY_APPROVAL_PREFIX = "<!-- buh-chatgpt-approved-recovery:v1 "
 MARKER_SUFFIX = " -->"
 BOT_LOGIN = "github-actions[bot]"
 MAX_PAGES = 100
@@ -335,15 +339,327 @@ def _verify_main_run(
         raise ApprovalError("Recorded main Validate PR evidence is invalid")
 
 
+def _allowed_operator(login: str | None, config: SyncConfig, work_actor: str) -> bool:
+    if work_actor and LOGIN_RE.fullmatch(work_actor) is None:
+        raise ApprovalError("Configured ChatGPT Work actor is invalid")
+    return login == config.owner or bool(work_actor and login == work_actor)
+
+
+def _commit_tree(commit: Mapping[str, Any], *, context: str) -> str:
+    data = commit.get("commit")
+    tree = data.get("tree") if isinstance(data, dict) else None
+    value = tree.get("sha") if isinstance(tree, dict) else None
+    if not isinstance(value, str) or COMMIT_RE.fullmatch(value) is None:
+        raise ApprovalError(f"{context} tree identity is invalid")
+    return value
+
+
+def _main_ci_run(
+    client: GitHubClient,
+    config: SyncConfig,
+    commit: str,
+) -> dict[str, Any]:
+    payload = client.get(
+        _path(config.repository, "actions/workflows/source-ci.yml/runs"),
+        {"event": "push", "head_sha": commit, "per_page": "100"},
+    )
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    if not isinstance(runs, list) or type(total) is not int or total != len(runs):
+        raise ApprovalError("Activation Validate PR run list is malformed")
+    exact = [
+        run
+        for run in runs
+        if isinstance(run, dict)
+        and run.get("event") == "push"
+        and run.get("head_sha") == commit
+        and run.get("head_branch") == "main"
+        and _workflow_path(run) == ".github/workflows/source-ci.yml"
+        and _repo_name(run.get("head_repository")) == config.repository
+        and _repo_name(run.get("repository")) == config.repository
+        and type(run.get("id")) is int
+    ]
+    if not exact:
+        raise ApprovalError("Exact activation Validate PR run is unavailable")
+    selected = max(
+        exact,
+        key=lambda run: (
+            int(run.get("run_number", 0)),
+            int(run.get("run_attempt", 0)),
+            run["id"],
+        ),
+    )
+    if selected.get("status") != "completed" or selected.get("conclusion") != "success":
+        raise ApprovalError("Newest exact activation Validate PR run did not pass")
+    _safe_int(
+        "Activation Validate PR run attempt",
+        selected.get("run_attempt"),
+        maximum=10**6,
+    )
+    return selected
+
+
+def _verify_main_run_for_commit(
+    client: GitHubClient,
+    config: SyncConfig,
+    commit: str,
+    run_id: int,
+    attempt: int,
+) -> None:
+    run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("run_attempt") != attempt
+        or run.get("status") != "completed"
+        or run.get("conclusion") != "success"
+        or run.get("event") != "push"
+        or run.get("head_sha") != commit
+        or run.get("head_branch") != "main"
+        or _workflow_path(run) != ".github/workflows/source-ci.yml"
+        or _repo_name(run.get("repository")) != config.repository
+        or _repo_name(run.get("head_repository")) != config.repository
+    ):
+        raise ApprovalError("Recorded activation Validate PR evidence is invalid")
+
+
+def _verify_activation_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    attestation: Mapping[str, Any],
+    *,
+    state: str,
+    work_actor: str,
+) -> dict[str, Any]:
+    activation = attestation["activation"]
+    activation_commit = activation["activation_commit"]
+    feature_head = activation["feature_head"]
+    commit = _read_commit(client, config, activation_commit)
+    parents = commit.get("parents")
+    if (
+        not isinstance(parents, list)
+        or len(parents) != 2
+        or not all(isinstance(parent, dict) for parent in parents)
+        or parents[0].get("sha") != config.source_sha
+        or parents[1].get("sha") != feature_head
+        or _commit_tree(commit, context="Recovery activation")
+        != activation["activation_tree"]
+    ):
+        raise ApprovalError("Recovery activation merge identity is invalid")
+    feature = _read_commit(client, config, feature_head)
+    if _commit_tree(feature, context="Recovery activation feature") != activation[
+        "activation_tree"
+    ]:
+        raise ApprovalError("Recovery activation tree differs from its feature head")
+    pulls = _pages(
+        client,
+        _path(config.repository, f"commits/{activation_commit}/pulls"),
+    )
+    matches = [
+        pull
+        for pull in pulls
+        if isinstance(pull, dict)
+        and pull.get("number") == activation["pull_request"]
+    ]
+    if len(matches) != 1:
+        raise ApprovalError("Recovery activation lacks one exact pull request")
+    pull = matches[0]
+    head = pull.get("head")
+    base = pull.get("base")
+    if (
+        pull.get("state") != state
+        or pull.get("draft") is not False
+        or pull.get("merge_commit_sha") != activation_commit
+        or pull.get("merged_at") is None
+        or not _allowed_operator(_login(pull.get("merged_by")), config, work_actor)
+        or not _allowed_operator(_login(pull.get("user")), config, work_actor)
+        or not isinstance(head, dict)
+        or head.get("sha") != feature_head
+        or _repo_name(head.get("repo")) != config.repository
+        or not isinstance(base, dict)
+        or base.get("ref") != "main"
+        or _repo_name(base.get("repo")) != config.repository
+    ):
+        raise ApprovalError("Recovery activation pull-request identity is invalid")
+    _timestamp("Recovery activation merge timestamp", pull.get("merged_at"))
+    return pull
+
+
+def _recovery_workflow_run(
+    client: GitHubClient,
+    config: SyncConfig,
+    run_id: int,
+    run_attempt: int,
+    activation_commit: str,
+    *,
+    completed: bool,
+    work_actor: str,
+) -> dict[str, Any]:
+    run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("run_attempt") != run_attempt
+        or run_attempt != 1
+        or run.get("event") != "workflow_dispatch"
+        or run.get("head_sha") != activation_commit
+        or run.get("head_branch") != "main"
+        or _workflow_path(run) != validation_recovery.WORKFLOW_PATH
+        or _repo_name(run.get("repository")) != config.repository
+        or _repo_name(run.get("head_repository")) != config.repository
+        or not _allowed_operator(_login(run.get("actor")), config, work_actor)
+        or not _allowed_operator(
+            _login(run.get("triggering_actor")), config, work_actor
+        )
+    ):
+        raise ApprovalError("Published-release recovery workflow identity is invalid")
+    if completed:
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            raise ApprovalError(
+                "Published-release recovery workflow did not complete successfully"
+            )
+    elif run.get("status") not in {"in_progress", "queued"}:
+        raise ApprovalError("Published-release recovery workflow is not active")
+    return run
+
+
+def _verify_newest_recovery_run(
+    client: GitHubClient,
+    config: SyncConfig,
+    activation_commit: str,
+    run_id: int,
+    run_attempt: int,
+    *,
+    completed: bool,
+    work_actor: str,
+) -> None:
+    payload = client.get(
+        _path(config.repository, f"actions/workflows/{validation_recovery.WORKFLOW_PATH.rsplit('/', 1)[-1]}/runs"),
+        {
+            "event": "workflow_dispatch",
+            "head_sha": activation_commit,
+            "per_page": "100",
+        },
+    )
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    if not isinstance(runs, list) or type(total) is not int or total != len(runs):
+        raise ApprovalError("Published-release recovery run list is malformed")
+    exact = []
+    for run in runs:
+        if not isinstance(run, dict):
+            raise ApprovalError("Published-release recovery run list is malformed")
+        if (
+            run.get("event") != "workflow_dispatch"
+            or run.get("head_sha") != activation_commit
+            or run.get("head_branch") != "main"
+            or _workflow_path(run) != validation_recovery.WORKFLOW_PATH
+            or _repo_name(run.get("repository")) != config.repository
+            or _repo_name(run.get("head_repository")) != config.repository
+            or type(run.get("id")) is not int
+            or not _allowed_operator(_login(run.get("actor")), config, work_actor)
+            or not _allowed_operator(
+                _login(run.get("triggering_actor")), config, work_actor
+            )
+        ):
+            raise ApprovalError("Published-release recovery run provenance is invalid")
+        _safe_int(
+            "Published-release recovery run attempt",
+            run.get("run_attempt"),
+            maximum=10**6,
+        )
+        exact.append(run)
+    if not exact:
+        raise ApprovalError("Published-release recovery run is unavailable")
+    selected = max(
+        exact,
+        key=lambda run: (
+            int(run.get("run_number", 0)),
+            int(run.get("run_attempt", 0)),
+            run["id"],
+        ),
+    )
+    if selected.get("id") != run_id or selected.get("run_attempt") != run_attempt:
+        raise ApprovalError("Recorded published-release recovery run is not newest")
+    expected_status = "completed" if completed else None
+    if completed and (
+        selected.get("status") != expected_status
+        or selected.get("conclusion") != "success"
+    ):
+        raise ApprovalError("Newest published-release recovery run did not pass")
+    if not completed and selected.get("status") not in {"in_progress", "queued"}:
+        raise ApprovalError("Newest published-release recovery run is not active")
+
+
+def _verify_recovery_preflight(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    *,
+    work_actor: str,
+) -> None:
+    expected = contract["preflight"]
+    run_id = expected["run_id"]
+    run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("run_attempt") != expected["run_attempt"]
+        or run.get("status") != "completed"
+        or run.get("conclusion") != "failure"
+        or run.get("event") != "workflow_run"
+        or run.get("head_sha") != config.source_sha
+        or run.get("head_branch") != "main"
+        or _workflow_path(run) != ".github/workflows/auto-platform-release.yml"
+        or _repo_name(run.get("repository")) != config.repository
+        or _repo_name(run.get("head_repository")) != config.repository
+        or not _allowed_operator(_login(run.get("actor")), config, work_actor)
+        or not _allowed_operator(
+            _login(run.get("triggering_actor")), config, work_actor
+        )
+    ):
+        raise ApprovalError("Retained recovery preflight workflow identity is invalid")
+    payload = client.get(
+        _path(config.repository, f"actions/runs/{run_id}/jobs"),
+        {"per_page": "100"},
+    )
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    if not isinstance(jobs, list) or type(total) is not int or total != len(jobs):
+        raise ApprovalError("Retained recovery release jobs are malformed")
+    normalized = []
+    for job in jobs:
+        if (
+            not isinstance(job, dict)
+            or job.get("status") != "completed"
+            or job.get("run_id") != run_id
+            or job.get("run_attempt") != expected["run_attempt"]
+            or job.get("head_sha") != config.source_sha
+            or job.get("workflow_name") != "Prepare Release"
+        ):
+            raise ApprovalError("Retained recovery release job identity is invalid")
+        normalized.append(
+            {
+                "conclusion": job.get("conclusion"),
+                "id": job.get("id"),
+                "name": job.get("name"),
+            }
+        )
+    if normalized != expected["jobs"]:
+        raise ApprovalError("Retained recovery release job results changed")
+
+
 def _artifact(
     client: GitHubClient,
     config: SyncConfig,
     run_id: int,
     name: str,
     *,
+    head_sha: str | None = None,
     expected_id: int | None = None,
     expected_digest: str | None = None,
 ) -> dict[str, Any]:
+    expected_head = config.source_sha if head_sha is None else head_sha
     payload = client.get(
         _path(config.repository, f"actions/runs/{run_id}/artifacts"),
         {"name": name, "per_page": "100"},
@@ -373,7 +689,7 @@ def _artifact(
         or DIGEST_RE.fullmatch(digest) is None
         or not isinstance(workflow_run, dict)
         or workflow_run.get("id") != run_id
-        or workflow_run.get("head_sha") != config.source_sha
+        or workflow_run.get("head_sha") != expected_head
         or workflow_run.get("head_branch") != "main"
     ):
         raise ApprovalError("Exact retained preflight artifact is unavailable")
@@ -566,7 +882,7 @@ def approval_payload(ready: Mapping[str, Any]) -> dict[str, Any]:
         "approval_nonce": ready["approval_nonce"],
         "platform_version": ready["platform_version"],
         "release_commit": ready["release_commit"],
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": ready["schema_version"],
     }
 
 
@@ -607,13 +923,24 @@ def _post_ready_comment(
     config: SyncConfig,
     number: int,
     ready: Mapping[str, Any],
+    *,
+    recovery: bool = False,
 ) -> dict[str, Any]:
-    approval = marker(APPROVAL_PREFIX, approval_payload(ready))
+    ready_prefix = RECOVERY_READY_PREFIX if recovery else READY_PREFIX
+    approval_prefix = RECOVERY_APPROVAL_PREFIX if recovery else APPROVAL_PREFIX
+    approval = marker(approval_prefix, approval_payload(ready))
+    explanation = (
+        "The reviewed published-release recovery validation and retained "
+        "no-change production preflight passed for this exact immutable "
+        "release. Production has not been changed.\n\n"
+        if recovery
+        else "Source CI and the no-change production preflight passed for this "
+        "exact immutable release. Production has not been changed.\n\n"
+    )
     body = (
-        f"{marker(READY_PREFIX, ready)}\n\n"
+        f"{marker(ready_prefix, ready)}\n\n"
         "### Ready for the one production approval in ChatGPT\n\n"
-        "Source CI and the no-change production preflight passed for this exact "
-        "immutable release. Production has not been changed.\n\n"
+        f"{explanation}"
         "After the repository owner explicitly approves this release in ChatGPT, "
         "ChatGPT must place this exact record in the merge commit message and "
         "perform one merge-commit action:\n\n"
@@ -760,6 +1087,226 @@ def ready(
     }
 
 
+def ready_recovery(
+    contract: Mapping[str, Any],
+    token: str,
+    *,
+    owner: str,
+    repository: str,
+    api_url: str,
+    server_url: str,
+    output: Path,
+    feature_readiness: Mapping[str, Any],
+    validation_attestation: Mapping[str, Any],
+    validation_artifact_id: int,
+    validation_artifact_name: str,
+    validation_artifact_digest: str,
+    work_actor: str = "",
+    transport=None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Publish readiness for the one exact, already-published v0.6.2."""
+
+    release = contract["release"]
+    sync = contract["sync"]
+    preflight = contract["preflight"]
+    config = _config(
+        owner=owner,
+        repository=repository,
+        version=contract["platform_version"],
+        source_commit=release["source_commit"],
+        release_commit=release["commit"],
+        api_url=api_url,
+        server_url=server_url,
+        output=output,
+    )
+    if repository != contract["repository"]:
+        raise ApprovalError("Recovery repository does not match its contract")
+    published = _feature_readiness(feature_readiness, config)
+    attestation = validation_recovery.validate_attestation_data(
+        validation_attestation,
+        contract=contract,
+    )
+    validation = attestation["validation"]
+    validation_run_id = _safe_int(
+        "Recovery validation run ID", validation.get("run_id")
+    )
+    validation_attempt = _safe_int(
+        "Recovery validation run attempt",
+        validation.get("run_attempt"),
+        maximum=10**6,
+    )
+    activation_commit = attestation["activation"]["activation_commit"]
+    expected_validation_artifact = (
+        f"platform-validation-recovery-v{contract['platform_version']}-"
+        f"{release['commit'][:12]}-{validation_run_id}-{validation_attempt}"
+    )
+    artifact_id = _safe_int(
+        "Recovery validation artifact ID", validation_artifact_id
+    )
+    if validation_artifact_name != expected_validation_artifact:
+        raise ApprovalError("Recovery validation artifact name is invalid")
+    if DIGEST_RE.fullmatch(validation_artifact_digest) is None:
+        raise ApprovalError("Recovery validation artifact digest is invalid")
+
+    client = GitHubClient(
+        config.api_url, token, transport=transport, sleeper=sleeper
+    )
+    _get_pr(client, config, sync["pull_request"], "open")
+    if _read_ref(client, config, "main") != activation_commit:
+        raise ApprovalError("Recovery activation is not the current main tip")
+    _verify_release(client, config, sync=True)
+    _verify_activation_remote(
+        client,
+        config,
+        attestation,
+        state="closed",
+        work_actor=work_actor,
+    )
+    activation_run = _main_ci_run(client, config, activation_commit)
+    _verify_main_run(
+        client,
+        config,
+        contract["main_validation"]["run_id"],
+        contract["main_validation"]["run_attempt"],
+    )
+    _verify_recovery_preflight(
+        client, config, contract, work_actor=work_actor
+    )
+    preflight_artifact = _artifact(
+        client,
+        config,
+        preflight["run_id"],
+        preflight["artifact_name"],
+        expected_id=preflight["artifact_id"],
+        expected_digest=preflight["artifact_digest"],
+    )
+    _recovery_workflow_run(
+        client,
+        config,
+        validation_run_id,
+        validation_attempt,
+        activation_commit,
+        completed=False,
+        work_actor=work_actor,
+    )
+    _verify_newest_recovery_run(
+        client,
+        config,
+        activation_commit,
+        validation_run_id,
+        validation_attempt,
+        completed=False,
+        work_actor=work_actor,
+    )
+    validation_artifact = _artifact(
+        client,
+        config,
+        validation_run_id,
+        validation_artifact_name,
+        head_sha=activation_commit,
+        expected_id=artifact_id,
+        expected_digest=validation_artifact_digest,
+    )
+
+    # Repeat every mutable boundary immediately before posting the one approval
+    # request. The original failed run is accepted only through its exact job set.
+    if _read_ref(client, config, "main") != activation_commit:
+        raise ApprovalError("Recovery activation moved before readiness publication")
+    _verify_release(client, config, sync=True)
+    _verify_main_run_for_commit(
+        client,
+        config,
+        activation_commit,
+        activation_run["id"],
+        activation_run["run_attempt"],
+    )
+    _verify_recovery_preflight(
+        client, config, contract, work_actor=work_actor
+    )
+    preflight_artifact = _artifact(
+        client,
+        config,
+        preflight["run_id"],
+        preflight["artifact_name"],
+        expected_id=preflight_artifact["id"],
+        expected_digest=preflight_artifact["digest"],
+    )
+    _recovery_workflow_run(
+        client,
+        config,
+        validation_run_id,
+        validation_attempt,
+        activation_commit,
+        completed=False,
+        work_actor=work_actor,
+    )
+    validation_artifact = _artifact(
+        client,
+        config,
+        validation_run_id,
+        validation_artifact_name,
+        head_sha=activation_commit,
+        expected_id=validation_artifact["id"],
+        expected_digest=validation_artifact["digest"],
+    )
+    existing = []
+    for item in _comments(client, config, sync["pull_request"]):
+        normal = _marker_payload(item.get("body"), READY_PREFIX)
+        recovered = _marker_payload(item.get("body"), RECOVERY_READY_PREFIX)
+        if normal is not None or recovered is not None:
+            existing.append(item)
+    if existing:
+        raise ApprovalError("A readiness marker already exists for this pull request")
+
+    fields: dict[str, Any] = {
+        "feature_readiness": published,
+        "main_validation_run_attempt": contract["main_validation"]["run_attempt"],
+        "main_validation_run_id": contract["main_validation"]["run_id"],
+        "manifest_sha256": release["manifest_sha256"],
+        "platform_version": contract["platform_version"],
+        "preflight_artifact": preflight["artifact_name"],
+        "preflight_artifact_digest": preflight_artifact["digest"],
+        "preflight_artifact_id": preflight_artifact["id"],
+        "preflight_run_attempt": preflight["run_attempt"],
+        "preflight_run_id": preflight["run_id"],
+        "pull_request": sync["pull_request"],
+        "recovery_validation": {
+            "activation_validation_run_attempt": activation_run["run_attempt"],
+            "activation_validation_run_id": activation_run["id"],
+            "artifact_digest": validation_artifact["digest"],
+            "artifact_id": validation_artifact["id"],
+            "artifact_name": validation_artifact_name,
+            "attestation": attestation,
+            "mode": "published-release-recovery",
+        },
+        "release_commit": release["commit"],
+        "repository": contract["repository"],
+        "schema_version": RECOVERY_SCHEMA_VERSION,
+        "source_commit": release["source_commit"],
+        # Compatibility aliases keep the existing guarded deploy input surface;
+        # recovery_validation records their distinct, truthful meaning.
+        "sync_validation_run_attempt": validation_attempt,
+        "sync_validation_run_id": validation_run_id,
+    }
+    fields["approval_nonce"] = _nonce(fields)
+    comment = _post_ready_comment(
+        client,
+        config,
+        sync["pull_request"],
+        fields,
+        recovery=True,
+    )
+    return {
+        "approval_marker": marker(
+            RECOVERY_APPROVAL_PREFIX, approval_payload(fields)
+        ),
+        "comment_id": comment["id"],
+        "ready": fields,
+        "schema_version": RECOVERY_SCHEMA_VERSION,
+    }
+
+
 READY_KEYS = {
     "approval_nonce",
     "feature_readiness",
@@ -780,9 +1327,12 @@ READY_KEYS = {
     "sync_validation_run_attempt",
     "sync_validation_run_id",
 }
+RECOVERY_READY_KEYS = READY_KEYS | {"recovery_validation"}
 
 
 def _validate_ready_payload(payload: Mapping[str, Any], config: SyncConfig, number: int):
+    if payload.get("schema_version") == RECOVERY_SCHEMA_VERSION:
+        return _validate_recovery_ready_payload(payload, config, number)
     if set(payload) != READY_KEYS or payload.get("schema_version") != SCHEMA_VERSION:
         raise ApprovalError("Readiness marker schema is invalid")
     if (
@@ -834,12 +1384,143 @@ def _validate_ready_payload(payload: Mapping[str, Any], config: SyncConfig, numb
         "feature_readiness": feature_readiness,
         "main_run_id": main_run_id,
         "main_attempt": main_attempt,
+        "mode": "source-ci",
         "preflight_run_id": run_id,
         "preflight_attempt": run_attempt,
         "preflight_artifact_id": artifact_id,
         "preflight_artifact_digest": artifact_digest,
         "sync_run_id": sync_run_id,
         "sync_attempt": sync_attempt,
+    }
+
+
+def _validate_recovery_ready_payload(
+    payload: Mapping[str, Any], config: SyncConfig, number: int
+) -> dict[str, Any]:
+    if set(payload) != RECOVERY_READY_KEYS:
+        raise ApprovalError("Recovery readiness marker schema is invalid")
+    if (
+        payload.get("repository") != config.repository
+        or payload.get("pull_request") != number
+        or payload.get("platform_version") != config.version
+        or payload.get("source_commit") != config.source_sha
+        or payload.get("release_commit") != config.release_commit
+        or payload.get("manifest_sha256")
+        != validation_recovery.load_contract()["release"]["manifest_sha256"]
+        or not isinstance(payload.get("approval_nonce"), str)
+        or NONCE_RE.fullmatch(payload["approval_nonce"]) is None
+    ):
+        raise ApprovalError("Recovery readiness marker does not match the release")
+    contract = validation_recovery.load_contract()
+    if number != contract["sync"]["pull_request"]:
+        raise ApprovalError("Recovery readiness targets the wrong synchronization PR")
+    feature_readiness = _feature_readiness(payload.get("feature_readiness"), config)
+    main_run_id = _safe_int(
+        "Main Validate PR run ID", payload.get("main_validation_run_id")
+    )
+    main_attempt = _safe_int(
+        "Main Validate PR run attempt",
+        payload.get("main_validation_run_attempt"),
+        maximum=10**6,
+    )
+    if (
+        main_run_id != contract["main_validation"]["run_id"]
+        or main_attempt != contract["main_validation"]["run_attempt"]
+    ):
+        raise ApprovalError("Recovery main validation evidence changed")
+    preflight_id = _safe_int(
+        "Preflight run ID", payload.get("preflight_run_id")
+    )
+    preflight_attempt = _safe_int(
+        "Preflight run attempt",
+        payload.get("preflight_run_attempt"),
+        maximum=10**6,
+    )
+    preflight_artifact_id = _safe_int(
+        "Preflight artifact ID", payload.get("preflight_artifact_id")
+    )
+    if (
+        preflight_id != contract["preflight"]["run_id"]
+        or preflight_attempt != contract["preflight"]["run_attempt"]
+        or payload.get("preflight_artifact")
+        != contract["preflight"]["artifact_name"]
+        or preflight_artifact_id != contract["preflight"]["artifact_id"]
+        or payload.get("preflight_artifact_digest")
+        != contract["preflight"]["artifact_digest"]
+    ):
+        raise ApprovalError("Recovery preflight evidence changed")
+    recovery = payload.get("recovery_validation")
+    if not isinstance(recovery, dict) or set(recovery) != {
+        "activation_validation_run_attempt",
+        "activation_validation_run_id",
+        "artifact_digest",
+        "artifact_id",
+        "artifact_name",
+        "attestation",
+        "mode",
+    }:
+        raise ApprovalError("Recovery validation evidence schema is invalid")
+    if recovery.get("mode") != "published-release-recovery":
+        raise ApprovalError("Recovery validation mode is invalid")
+    attestation = validation_recovery.validate_attestation_data(
+        recovery.get("attestation"), contract=contract
+    )
+    validation_run_id = _safe_int(
+        "Recovery validation run ID", payload.get("sync_validation_run_id")
+    )
+    validation_attempt = _safe_int(
+        "Recovery validation run attempt",
+        payload.get("sync_validation_run_attempt"),
+        maximum=10**6,
+    )
+    if (
+        attestation["validation"]["run_id"] != validation_run_id
+        or attestation["validation"]["run_attempt"] != validation_attempt
+    ):
+        raise ApprovalError("Recovery workflow identity aliases changed")
+    artifact_id = _safe_int(
+        "Recovery validation artifact ID", recovery.get("artifact_id")
+    )
+    artifact_digest = recovery.get("artifact_digest")
+    if not isinstance(artifact_digest, str) or DIGEST_RE.fullmatch(
+        artifact_digest
+    ) is None:
+        raise ApprovalError("Recovery validation artifact digest is invalid")
+    expected_name = (
+        f"platform-validation-recovery-v{config.version}-"
+        f"{config.release_commit[:12]}-{validation_run_id}-{validation_attempt}"
+    )
+    if recovery.get("artifact_name") != expected_name:
+        raise ApprovalError("Recovery validation artifact name is invalid")
+    activation_run_id = _safe_int(
+        "Activation Validate PR run ID",
+        recovery.get("activation_validation_run_id"),
+    )
+    activation_attempt = _safe_int(
+        "Activation Validate PR run attempt",
+        recovery.get("activation_validation_run_attempt"),
+        maximum=10**6,
+    )
+    if payload["approval_nonce"] != _nonce(payload):
+        raise ApprovalError("Recovery readiness marker nonce is invalid")
+    return {
+        "activation_attempt": activation_attempt,
+        "activation_commit": attestation["activation"]["activation_commit"],
+        "activation_run_id": activation_run_id,
+        "artifact_digest": artifact_digest,
+        "artifact_id": artifact_id,
+        "artifact_name": expected_name,
+        "attestation": attestation,
+        "feature_readiness": feature_readiness,
+        "main_attempt": main_attempt,
+        "main_run_id": main_run_id,
+        "mode": "published-release-recovery",
+        "preflight_artifact_digest": contract["preflight"]["artifact_digest"],
+        "preflight_artifact_id": preflight_artifact_id,
+        "preflight_attempt": preflight_attempt,
+        "preflight_run_id": preflight_id,
+        "sync_attempt": validation_attempt,
+        "sync_run_id": validation_run_id,
     }
 
 
@@ -962,14 +1643,17 @@ def _verify_merge_commit(
     client: GitHubClient,
     config: SyncConfig,
     merge_commit: str,
+    *,
+    first_parent: str | None = None,
 ) -> dict[str, Any]:
+    expected_first_parent = config.source_sha if first_parent is None else first_parent
     merge = _read_commit(client, config, merge_commit)
     parents = merge.get("parents")
     if (
         not isinstance(parents, list)
         or len(parents) != 2
         or not all(isinstance(item, dict) for item in parents)
-        or parents[0].get("sha") != config.source_sha
+        or parents[0].get("sha") != expected_first_parent
         or parents[1].get("sha") != config.release_commit
     ):
         raise ApprovalError(
@@ -993,6 +1677,7 @@ def authorize(
     server_url: str,
     output: Path,
     token: str,
+    work_actor: str = "",
     transport=None,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
@@ -1067,19 +1752,23 @@ def authorize(
     merge_commit = pr.get("merge_commit_sha")
     if not isinstance(merge_commit, str) or COMMIT_RE.fullmatch(merge_commit) is None:
         raise ApprovalError("Synchronization merge commit is invalid")
-    merge = _verify_merge_commit(client, config, merge_commit)
 
     comments = _comments(client, config, number)
     ready_comments = []
     for comment in comments:
-        ready_payload = _marker_payload(comment.get("body"), READY_PREFIX)
-        if ready_payload is not None:
-            ready_comments.append((comment, ready_payload))
+        normal = _marker_payload(comment.get("body"), READY_PREFIX)
+        recovered = _marker_payload(comment.get("body"), RECOVERY_READY_PREFIX)
+        if normal is not None and recovered is not None:
+            raise ApprovalError("One comment contains conflicting readiness markers")
+        if normal is not None:
+            ready_comments.append((comment, normal, False))
+        if recovered is not None:
+            ready_comments.append((comment, recovered, True))
     if len(ready_comments) != 1:
         raise ApprovalError(
             "Exactly one GitHub Actions readiness marker is required"
         )
-    ready_comment, ready_payload = ready_comments[0]
+    ready_comment, ready_payload, recovered = ready_comments[0]
     ready_comment_id = _safe_int(
         "Readiness comment ID", ready_comment.get("id")
     )
@@ -1089,11 +1778,23 @@ def authorize(
     if ready_at > merged_at:
         raise ApprovalError("Synchronization PR was merged before readiness")
     evidence = _validate_ready_payload(ready_payload, config, number)
+    if recovered != (evidence["mode"] == "published-release-recovery"):
+        raise ApprovalError("Readiness marker prefix and evidence mode disagree")
+    first_parent = (
+        evidence["activation_commit"] if recovered else config.source_sha
+    )
+    merge = _verify_merge_commit(
+        client,
+        config,
+        merge_commit,
+        first_parent=first_parent,
+    )
     commit_data = merge.get("commit")
     commit_message = (
         commit_data.get("message") if isinstance(commit_data, dict) else None
     )
-    approved = _marker_payload(commit_message, APPROVAL_PREFIX)
+    approval_prefix = RECOVERY_APPROVAL_PREFIX if recovered else APPROVAL_PREFIX
+    approved = _marker_payload(commit_message, approval_prefix)
     if approved is None:
         raise ApprovalError("Merge commit lacks the ChatGPT approval marker")
     if set(approved) != {
@@ -1103,33 +1804,88 @@ def authorize(
         "schema_version",
     } or approved != approval_payload(ready_payload):
         raise ApprovalError("ChatGPT approval marker does not match readiness evidence")
-    _workflow_run(
-        client,
-        config,
-        evidence["preflight_run_id"],
-        evidence["preflight_attempt"],
-        completed=True,
-    )
     _verify_main_run(
         client,
         config,
         evidence["main_run_id"],
         evidence["main_attempt"],
     )
-    _verify_source_run(
-        client,
-        config,
-        number,
-        evidence["sync_run_id"],
-        evidence["sync_attempt"],
-    )
-    _verify_newest_source_run(
-        client,
-        config,
-        number,
-        evidence["sync_run_id"],
-        evidence["sync_attempt"],
-    )
+    recovery_artifact = None
+    if recovered:
+        contract = validation_recovery.load_contract()
+        activation_pull = _verify_activation_remote(
+            client,
+            config,
+            evidence["attestation"],
+            state="closed",
+            work_actor=work_actor,
+        )
+        activation_merged_at = _timestamp(
+            "Recovery activation merge timestamp", activation_pull.get("merged_at")
+        )
+        if activation_merged_at >= merged_at:
+            raise ApprovalError(
+                "Synchronization PR did not merge after recovery activation"
+            )
+        _verify_main_run_for_commit(
+            client,
+            config,
+            evidence["activation_commit"],
+            evidence["activation_run_id"],
+            evidence["activation_attempt"],
+        )
+        _verify_recovery_preflight(
+            client, config, contract, work_actor=work_actor
+        )
+        _recovery_workflow_run(
+            client,
+            config,
+            evidence["sync_run_id"],
+            evidence["sync_attempt"],
+            evidence["activation_commit"],
+            completed=True,
+            work_actor=work_actor,
+        )
+        _verify_newest_recovery_run(
+            client,
+            config,
+            evidence["activation_commit"],
+            evidence["sync_run_id"],
+            evidence["sync_attempt"],
+            completed=True,
+            work_actor=work_actor,
+        )
+        recovery_artifact = _artifact(
+            client,
+            config,
+            evidence["sync_run_id"],
+            evidence["artifact_name"],
+            head_sha=evidence["activation_commit"],
+            expected_id=evidence["artifact_id"],
+            expected_digest=evidence["artifact_digest"],
+        )
+    else:
+        _workflow_run(
+            client,
+            config,
+            evidence["preflight_run_id"],
+            evidence["preflight_attempt"],
+            completed=True,
+        )
+        _verify_source_run(
+            client,
+            config,
+            number,
+            evidence["sync_run_id"],
+            evidence["sync_attempt"],
+        )
+        _verify_newest_source_run(
+            client,
+            config,
+            number,
+            evidence["sync_run_id"],
+            evidence["sync_attempt"],
+        )
     artifact = _artifact(
         client,
         config,
@@ -1147,19 +1903,25 @@ def authorize(
         raise ApprovalError("Synchronization merge is no longer the current main tip")
     final_ready_comments = []
     for comment in _comments(client, config, number):
-        payload = _marker_payload(comment.get("body"), READY_PREFIX)
-        if payload is not None:
-            final_ready_comments.append((comment, payload))
+        normal = _marker_payload(comment.get("body"), READY_PREFIX)
+        recovery = _marker_payload(comment.get("body"), RECOVERY_READY_PREFIX)
+        if normal is not None and recovery is not None:
+            raise ApprovalError("One live comment contains conflicting readiness markers")
+        if normal is not None:
+            final_ready_comments.append((comment, normal, False))
+        if recovery is not None:
+            final_ready_comments.append((comment, recovery, True))
     if len(final_ready_comments) != 1:
         raise ApprovalError(
             "Exactly one live GitHub Actions readiness marker is required"
         )
-    final_ready_comment, final_ready_payload = final_ready_comments[0]
+    final_ready_comment, final_ready_payload, final_recovered = final_ready_comments[0]
     if (
         _safe_int("Readiness comment ID", final_ready_comment.get("id"))
         != ready_comment_id
         or _login(final_ready_comment.get("user")) != BOT_LOGIN
         or final_ready_payload != ready_payload
+        or final_recovered != recovered
         or _timestamp(
             "Readiness comment timestamp", final_ready_comment.get("created_at")
         )
@@ -1174,7 +1936,37 @@ def authorize(
         expected_id=artifact["id"],
         expected_digest=artifact["digest"],
     )
-    return {
+    if recovered:
+        contract = validation_recovery.load_contract()
+        _verify_recovery_preflight(
+            client, config, contract, work_actor=work_actor
+        )
+        _verify_main_run_for_commit(
+            client,
+            config,
+            evidence["activation_commit"],
+            evidence["activation_run_id"],
+            evidence["activation_attempt"],
+        )
+        _recovery_workflow_run(
+            client,
+            config,
+            evidence["sync_run_id"],
+            evidence["sync_attempt"],
+            evidence["activation_commit"],
+            completed=True,
+            work_actor=work_actor,
+        )
+        recovery_artifact = _artifact(
+            client,
+            config,
+            evidence["sync_run_id"],
+            evidence["artifact_name"],
+            head_sha=evidence["activation_commit"],
+            expected_id=recovery_artifact["id"],
+            expected_digest=recovery_artifact["digest"],
+        )
+    report = {
         "approval_record": "merge-commit",
         "approval_nonce": ready_payload["approval_nonce"],
         "feature_readiness": evidence["feature_readiness"],
@@ -1198,6 +1990,10 @@ def authorize(
         "sync_validation_run_attempt": evidence["sync_attempt"],
         "sync_validation_run_id": evidence["sync_run_id"],
     }
+    if recovered:
+        report["validation_mode"] = "published-release-recovery"
+        report["recovery_validation"] = ready_payload["recovery_validation"]
+    return report
 
 
 def verify_artifact(report: Mapping[str, Any], root: Path) -> None:
@@ -1342,9 +2138,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     ready_parser = subparsers.add_parser("ready")
+    recovery_parser = subparsers.add_parser("recover-ready")
     authorize_parser = subparsers.add_parser("authorize")
     verify_parser = subparsers.add_parser("verify-artifact")
-    for subparser in (ready_parser, authorize_parser):
+    for subparser in (ready_parser, recovery_parser, authorize_parser):
         subparser.add_argument("--owner", required=True)
         subparser.add_argument("--repository", required=True)
         subparser.add_argument("--api-url", required=True)
@@ -1363,10 +2160,20 @@ def _parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--preflight-run-id", type=int, required=True)
     ready_parser.add_argument("--preflight-run-attempt", type=int, required=True)
     ready_parser.add_argument("--preflight-artifact", required=True)
+    recovery_parser.add_argument("--recovery-contract", type=Path, required=True)
+    recovery_parser.add_argument("--feature-readiness", type=Path, required=True)
+    recovery_parser.add_argument(
+        "--validation-attestation", type=Path, required=True
+    )
+    recovery_parser.add_argument("--validation-artifact-id", type=int, required=True)
+    recovery_parser.add_argument("--validation-artifact-name", required=True)
+    recovery_parser.add_argument("--validation-artifact-digest", required=True)
+    recovery_parser.add_argument("--work-actor", default="")
     authorize_parser.add_argument("--actor", required=True)
     authorize_parser.add_argument("--triggering-actor", required=True)
     authorize_parser.add_argument("--run-attempt", type=int, required=True)
     authorize_parser.add_argument("--event", type=Path, required=True)
+    authorize_parser.add_argument("--work-actor", default="")
     verify_parser.add_argument("--report", type=Path, required=True)
     verify_parser.add_argument("--artifact-dir", type=Path, required=True)
     return parser
@@ -1415,6 +2222,32 @@ def main(
                 preflight_artifact=args.preflight_artifact,
             )
             output_values = report["ready"]
+        elif args.command == "recover-ready":
+            contract = validation_recovery.load_contract(args.recovery_contract)
+            feature_readiness_raw = args.feature_readiness.read_text(encoding="ascii")
+            feature_readiness = json.loads(feature_readiness_raw)
+            if feature_readiness_raw != _canonical(feature_readiness) + "\n":
+                raise ApprovalError("Feature-readiness evidence is not canonical")
+            attestation_raw = args.validation_attestation.read_text(encoding="ascii")
+            validation_attestation = json.loads(attestation_raw)
+            if attestation_raw != _canonical(validation_attestation) + "\n":
+                raise ApprovalError("Recovery validation evidence is not canonical")
+            report = ready_recovery(
+                contract,
+                token,
+                owner=args.owner,
+                repository=args.repository,
+                api_url=args.api_url,
+                server_url=args.server_url,
+                output=args.output,
+                feature_readiness=feature_readiness,
+                validation_attestation=validation_attestation,
+                validation_artifact_id=args.validation_artifact_id,
+                validation_artifact_name=args.validation_artifact_name,
+                validation_artifact_digest=args.validation_artifact_digest,
+                work_actor=args.work_actor,
+            )
+            output_values = report["ready"]
         else:
             event = json.loads(args.event.read_text(encoding="utf-8"))
             report = authorize(
@@ -1428,13 +2261,20 @@ def main(
                 server_url=args.server_url,
                 output=args.output,
                 token=token,
+                work_actor=args.work_actor,
             )
             output_values = report
         _write_json(args.output, report)
         _append_outputs(environment.get("GITHUB_OUTPUT"), output_values)
         stdout.write(_canonical(report) + "\n")
         return 0
-    except (SyncPrError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (
+        SyncPrError,
+        validation_recovery.ValidationRecoveryError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
         stderr.write(f"platform approval error: {str(exc).splitlines()[0][:500]}\n")
         return 2
     except Exception:

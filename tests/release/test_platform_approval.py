@@ -41,6 +41,16 @@ ARTIFACT_DIGEST = "sha256:" + "7" * 64
 REVIEW_DIGEST = "sha256:" + "8" * 64
 READINESS_DIGEST = "sha256:" + "9" * 64
 TOKEN = "test-token-that-must-not-be-rendered"
+ACTIVATION = "a" * 40
+ACTIVATION_HEAD = "b" * 40
+ACTIVATION_TREE = "c" * 40
+RECOVERY_RUN = 666
+ACTIVATION_RUN = 667
+RECOVERY_ARTIFACT_ID = 991
+RECOVERY_ARTIFACT_DIGEST = "sha256:" + "d" * 64
+RECOVERY_ARTIFACT = (
+    f"platform-validation-recovery-v{VERSION}-{RELEASE[:12]}-{RECOVERY_RUN}-1"
+)
 
 
 def _response(value: Any) -> sync.HttpResponse:
@@ -148,6 +158,130 @@ def _ready_payload() -> dict[str, Any]:
     return payload
 
 
+def _recovery_contract() -> dict[str, Any]:
+    jobs = [
+        {"conclusion": "success", "id": 801, "name": "Build release"},
+        {"conclusion": "success", "id": 802, "name": "Preflight"},
+        {"conclusion": "failure", "id": 803, "name": "Publish approval"},
+    ]
+    return {
+        "activation": {
+            "allowed_paths": list(approval.validation_recovery.ACTIVATION_PATHS),
+            "base_commit": SOURCE,
+            "harness_paths": list(approval.validation_recovery.HARNESS_PATHS),
+            "pull_request": 53,
+        },
+        "feature": {"head_commit": FEATURE_HEAD, "pull_request": FEATURE_PR},
+        "main_validation": {"run_attempt": 1, "run_id": MAIN_RUN},
+        "platform_version": VERSION,
+        "preflight": {
+            "artifact_digest": ARTIFACT_DIGEST,
+            "artifact_id": ARTIFACT_ID,
+            "artifact_name": ARTIFACT,
+            "failed_job": {"id": 803, "name": "Publish approval"},
+            "jobs": jobs,
+            "passed_job": {"id": 802, "name": "Preflight"},
+            "run_attempt": 1,
+            "run_id": PREFLIGHT_RUN,
+        },
+        "recovery_id": approval.validation_recovery.RECOVERY_ID,
+        "release": {
+            "commit": RELEASE,
+            "manifest_sha256": MANIFEST,
+            "ref": f"release/platform-v{VERSION}",
+            "source_commit": SOURCE,
+            "source_tree": "d" * 40,
+            "tree": "e" * 40,
+        },
+        "repository": REPOSITORY,
+        "schema_version": 1,
+        "sync": {"branch": f"sync/platform-v{VERSION}", "pull_request": PR_NUMBER},
+    }
+
+
+def _recovery_attestation() -> dict[str, Any]:
+    paths = [
+        {
+            "git_blob_sha": f"{index + 1:040x}",
+            "path": path,
+            "sha256": f"{index + 1:064x}",
+        }
+        for index, path in enumerate(approval.validation_recovery.ACTIVATION_PATHS)
+    ]
+    by_path = {item["path"]: item for item in paths}
+    return {
+        "activation": {
+            "activation_commit": ACTIVATION,
+            "activation_tree": ACTIVATION_TREE,
+            "base_commit": SOURCE,
+            "feature_head": ACTIVATION_HEAD,
+            "paths": paths,
+            "pull_request": 53,
+        },
+        "harness": {
+            "commit": ACTIVATION,
+            "files": [
+                copy.deepcopy(by_path[path])
+                for path in approval.validation_recovery.HARNESS_PATHS
+            ],
+            "tree": ACTIVATION_TREE,
+        },
+        "recovery_id": approval.validation_recovery.RECOVERY_ID,
+        "release": _recovery_contract()["release"],
+        "repository": REPOSITORY,
+        "schema_version": 1,
+        "validation": {
+            "actor": OWNER,
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "head_sha": ACTIVATION,
+            "result": "success",
+            "run_attempt": 1,
+            "run_id": RECOVERY_RUN,
+            "workflow_path": approval.validation_recovery.WORKFLOW_PATH,
+        },
+    }
+
+
+def _recovery_ready_payload() -> dict[str, Any]:
+    contract = _recovery_contract()
+    value = {
+        "feature_readiness": _published_readiness(),
+        "main_validation_run_attempt": 1,
+        "main_validation_run_id": MAIN_RUN,
+        "manifest_sha256": MANIFEST,
+        "platform_version": VERSION,
+        "preflight_artifact": ARTIFACT,
+        "preflight_artifact_digest": ARTIFACT_DIGEST,
+        "preflight_artifact_id": ARTIFACT_ID,
+        "preflight_run_attempt": 1,
+        "preflight_run_id": PREFLIGHT_RUN,
+        "pull_request": PR_NUMBER,
+        "recovery_validation": {
+            "activation_validation_run_attempt": 1,
+            "activation_validation_run_id": ACTIVATION_RUN,
+            "artifact_digest": RECOVERY_ARTIFACT_DIGEST,
+            "artifact_id": RECOVERY_ARTIFACT_ID,
+            "artifact_name": RECOVERY_ARTIFACT,
+            "attestation": _recovery_attestation(),
+            "mode": "published-release-recovery",
+        },
+        "release_commit": RELEASE,
+        "repository": REPOSITORY,
+        "schema_version": approval.RECOVERY_SCHEMA_VERSION,
+        "source_commit": SOURCE,
+        "sync_validation_run_attempt": 1,
+        "sync_validation_run_id": RECOVERY_RUN,
+    }
+    self_check = approval.validation_recovery.validate_attestation_data(
+        value["recovery_validation"]["attestation"], contract=contract
+    )
+    if self_check != value["recovery_validation"]["attestation"]:
+        raise AssertionError("recovery fixture normalization changed")
+    value["approval_nonce"] = approval._nonce(value)
+    return value
+
+
 def _ready_main_arguments(root: Path) -> list[str]:
     feature_readiness = root / "feature-readiness.json"
     feature_readiness.write_text(
@@ -216,6 +350,12 @@ def _event() -> dict[str, Any]:
             "user": {"login": OWNER},
         },
     }
+
+
+def _recovery_event() -> dict[str, Any]:
+    event = _event()
+    event["pull_request"]["merged_at"] = "2026-09-09T13:00:00Z"
+    return event
 
 
 class ApprovalTransport:
@@ -419,6 +559,248 @@ class DeniedReadyTransport(ReadyTransport):
             self.calls.append((method, parsed.path))
             return sync.HttpResponse(403, b'{"message":"private response body"}\n')
         return super().request(method, url, headers, body, timeout)
+
+
+class RecoveryTransport(ApprovalTransport):
+    def __init__(
+        self,
+        *,
+        ready: bool,
+        payload: dict[str, Any] | None = None,
+        include_merge_marker: bool = True,
+    ) -> None:
+        super().__init__(include_merge_marker=include_merge_marker)
+        self.ready_mode = ready
+        self.recovery_payload = payload or _recovery_ready_payload()
+        self.main_tip = ACTIVATION if ready else MERGE
+        self.recovery_run_path = approval.validation_recovery.WORKFLOW_PATH
+        self.recovery_run_status = "in_progress" if ready else "completed"
+        self.recovery_run_conclusion = None if ready else "success"
+        self.activation_run = {
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": ACTIVATION,
+            "id": ACTIVATION_RUN,
+            "path": ".github/workflows/source-ci.yml@refs/heads/main",
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 80,
+            "status": "completed",
+        }
+
+    def _recovery_run(self) -> dict[str, Any]:
+        return {
+            "actor": {"login": OWNER},
+            "conclusion": self.recovery_run_conclusion,
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": ACTIVATION,
+            "id": RECOVERY_RUN,
+            "path": f"{self.recovery_run_path}@refs/heads/main",
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 81,
+            "status": self.recovery_run_status,
+            "triggering_actor": {"login": OWNER},
+        }
+
+    @staticmethod
+    def _activation_pr() -> dict[str, Any]:
+        return {
+            "base": {"ref": "main", "repo": {"full_name": REPOSITORY}},
+            "draft": False,
+            "head": {
+                "ref": "codex/recovery",
+                "repo": {"full_name": REPOSITORY},
+                "sha": ACTIVATION_HEAD,
+            },
+            "merge_commit_sha": ACTIVATION,
+            "merged_at": "2026-09-09T12:00:00Z",
+            "merged_by": {"login": OWNER},
+            "number": 53,
+            "state": "closed",
+            "user": {"login": OWNER},
+        }
+
+    def request(self, method, url, headers, body, timeout):
+        del headers, timeout
+        parsed = urllib.parse.urlsplit(url)
+        suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        self.calls.append((method, parsed.path))
+        if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
+            pr = copy.deepcopy(_event()["pull_request"])
+            pr["state"] = "open" if self.ready_mode else "closed"
+            return _response(pr)
+        if suffix == f"git/ref/heads/sync/platform-v{VERSION}":
+            return _response(
+                {
+                    "ref": f"refs/heads/sync/platform-v{VERSION}",
+                    "object": {"sha": RELEASE, "type": "commit"},
+                }
+            )
+        if suffix == f"git/ref/heads/release/platform-v{VERSION}":
+            return _response(
+                {
+                    "ref": f"refs/heads/release/platform-v{VERSION}",
+                    "object": {"sha": RELEASE, "type": "commit"},
+                }
+            )
+        if suffix == "git/ref/heads/main":
+            return _response(
+                {
+                    "ref": "refs/heads/main",
+                    "object": {"sha": self.main_tip, "type": "commit"},
+                }
+            )
+        if suffix == f"commits/{RELEASE}":
+            return _response({"sha": RELEASE, "parents": [{"sha": SOURCE}]})
+        if suffix == f"commits/{ACTIVATION}":
+            return _response(
+                {
+                    "commit": {"tree": {"sha": ACTIVATION_TREE}},
+                    "parents": [{"sha": SOURCE}, {"sha": ACTIVATION_HEAD}],
+                    "sha": ACTIVATION,
+                }
+            )
+        if suffix == f"commits/{ACTIVATION_HEAD}":
+            return _response(
+                {
+                    "commit": {"tree": {"sha": ACTIVATION_TREE}},
+                    "parents": [{"sha": SOURCE}],
+                    "sha": ACTIVATION_HEAD,
+                }
+            )
+        if suffix == f"commits/{ACTIVATION}/pulls":
+            return _response([self._activation_pr()])
+        if suffix == f"commits/{MERGE}":
+            message = f"Sync platform release v{VERSION}"
+            if self.include_merge_marker:
+                message += "\n\n" + approval.marker(
+                    approval.RECOVERY_APPROVAL_PREFIX,
+                    approval.approval_payload(self.recovery_payload),
+                )
+            return _response(
+                {
+                    "commit": {"message": message},
+                    "parents": [{"sha": ACTIVATION}, {"sha": RELEASE}],
+                    "sha": MERGE,
+                }
+            )
+        if suffix == f"actions/runs/{MAIN_RUN}":
+            return _response(_run(kind="main"))
+        if suffix == f"actions/runs/{ACTIVATION_RUN}":
+            return _response(self.activation_run)
+        if suffix == f"actions/runs/{PREFLIGHT_RUN}":
+            run = _run(kind="preflight")
+            run.update(
+                {
+                    "actor": {"login": OWNER},
+                    "conclusion": "failure",
+                    "status": "completed",
+                    "triggering_actor": {"login": OWNER},
+                }
+            )
+            return _response(run)
+        if suffix == f"actions/runs/{PREFLIGHT_RUN}/jobs":
+            jobs = [
+                {
+                    **item,
+                    "head_sha": SOURCE,
+                    "run_attempt": 1,
+                    "run_id": PREFLIGHT_RUN,
+                    "status": "completed",
+                    "workflow_name": "Prepare Release",
+                }
+                for item in _recovery_contract()["preflight"]["jobs"]
+            ]
+            return _response({"jobs": jobs, "total_count": len(jobs)})
+        if suffix == f"actions/runs/{RECOVERY_RUN}":
+            return _response(self._recovery_run())
+        if suffix == "actions/workflows/source-ci.yml/runs":
+            return _response(
+                {"total_count": 1, "workflow_runs": [self.activation_run]}
+            )
+        if suffix == "actions/workflows/source-published-release-recovery.yml/runs":
+            return _response(
+                {"total_count": 1, "workflow_runs": [self._recovery_run()]}
+            )
+        if suffix == f"actions/runs/{PREFLIGHT_RUN}/artifacts":
+            return _response(
+                {
+                    "artifacts": [
+                        {
+                            "digest": ARTIFACT_DIGEST,
+                            "expired": False,
+                            "id": ARTIFACT_ID,
+                            "name": ARTIFACT,
+                            "size_in_bytes": 4096,
+                            "workflow_run": {
+                                "head_branch": "main",
+                                "head_sha": SOURCE,
+                                "id": PREFLIGHT_RUN,
+                            },
+                        }
+                    ],
+                    "total_count": 1,
+                }
+            )
+        if suffix == f"actions/runs/{RECOVERY_RUN}/artifacts":
+            return _response(
+                {
+                    "artifacts": [
+                        {
+                            "digest": RECOVERY_ARTIFACT_DIGEST,
+                            "expired": False,
+                            "id": RECOVERY_ARTIFACT_ID,
+                            "name": RECOVERY_ARTIFACT,
+                            "size_in_bytes": 8192,
+                            "workflow_run": {
+                                "head_branch": "main",
+                                "head_sha": ACTIVATION,
+                                "id": RECOVERY_RUN,
+                            },
+                        }
+                    ],
+                    "total_count": 1,
+                }
+            )
+        if suffix == f"issues/{PR_NUMBER}/comments":
+            if method == "GET":
+                if self.ready_mode:
+                    return _response([])
+                return _response(
+                    [
+                        {
+                            "body": approval.marker(
+                                approval.RECOVERY_READY_PREFIX,
+                                self.recovery_payload,
+                            ),
+                            "created_at": "2026-09-09T12:02:00Z",
+                            "id": 704,
+                            "user": {"login": approval.BOT_LOGIN},
+                        }
+                    ]
+                )
+            if method == "POST" and body is not None:
+                posted = json.loads(body)
+                return sync.HttpResponse(
+                    201,
+                    (
+                        json.dumps(
+                            {
+                                "body": posted["body"],
+                                "id": 704,
+                                "user": {"login": approval.BOT_LOGIN},
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode(),
+                )
+        raise AssertionError(f"unexpected request: {method} {url}")
 
 
 class PlatformApprovalTests(unittest.TestCase):
@@ -1119,6 +1501,188 @@ class PlatformApprovalTests(unittest.TestCase):
             ("POST", f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments"),
             transport.calls,
         )
+
+    def test_recovery_ready_binds_unchanged_release_harness_and_failed_run(self):
+        contract = _recovery_contract()
+        transport = RecoveryTransport(ready=True)
+        with tempfile.TemporaryDirectory() as temp:
+            report = approval.ready_recovery(
+                contract,
+                TOKEN,
+                owner=OWNER,
+                repository=REPOSITORY,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "recovery.json",
+                feature_readiness=_published_readiness(),
+                validation_attestation=_recovery_attestation(),
+                validation_artifact_id=RECOVERY_ARTIFACT_ID,
+                validation_artifact_name=RECOVERY_ARTIFACT,
+                validation_artifact_digest=RECOVERY_ARTIFACT_DIGEST,
+                transport=transport,
+                sleeper=lambda _: None,
+            )
+        ready = report["ready"]
+        self.assertEqual(ready["schema_version"], approval.RECOVERY_SCHEMA_VERSION)
+        self.assertEqual(ready["source_commit"], SOURCE)
+        self.assertEqual(ready["release_commit"], RELEASE)
+        self.assertEqual(ready["sync_validation_run_id"], RECOVERY_RUN)
+        self.assertEqual(
+            ready["recovery_validation"]["attestation"]["harness"]["commit"],
+            ACTIVATION,
+        )
+        self.assertEqual(
+            ready["recovery_validation"]["artifact_digest"],
+            RECOVERY_ARTIFACT_DIGEST,
+        )
+        self.assertEqual(ready["approval_nonce"], approval._nonce(ready))
+        self.assertTrue(
+            report["approval_marker"].startswith(
+                approval.RECOVERY_APPROVAL_PREFIX
+            )
+        )
+
+    def test_recovery_ready_rejects_changed_workflow_and_artifact(self):
+        contract = _recovery_contract()
+        for field, value, message in (
+            ("path", ".github/workflows/other.yml", "workflow identity"),
+            ("status", "completed", "not active"),
+        ):
+            with self.subTest(field=field):
+                transport = RecoveryTransport(ready=True)
+                if field == "path":
+                    transport.recovery_run_path = value
+                else:
+                    transport.recovery_run_status = value
+                with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
+                    approval.ApprovalError, message
+                ):
+                    approval.ready_recovery(
+                        contract,
+                        TOKEN,
+                        owner=OWNER,
+                        repository=REPOSITORY,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=Path(temp) / "recovery.json",
+                        feature_readiness=_published_readiness(),
+                        validation_attestation=_recovery_attestation(),
+                        validation_artifact_id=RECOVERY_ARTIFACT_ID,
+                        validation_artifact_name=RECOVERY_ARTIFACT,
+                        validation_artifact_digest=RECOVERY_ARTIFACT_DIGEST,
+                        transport=transport,
+                        sleeper=lambda _: None,
+                    )
+
+        with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
+            approval.ApprovalError, "artifact digest"
+        ):
+            approval.ready_recovery(
+                contract,
+                TOKEN,
+                owner=OWNER,
+                repository=REPOSITORY,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "recovery.json",
+                feature_readiness=_published_readiness(),
+                validation_attestation=_recovery_attestation(),
+                validation_artifact_id=RECOVERY_ARTIFACT_ID,
+                validation_artifact_name=RECOVERY_ARTIFACT,
+                validation_artifact_digest="changed",
+                transport=RecoveryTransport(ready=True),
+                sleeper=lambda _: None,
+            )
+
+    def test_authorize_accepts_recovered_validation_after_activation_merge(self):
+        payload = _recovery_ready_payload()
+        transport = RecoveryTransport(ready=False, payload=payload)
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            approval.validation_recovery,
+            "load_contract",
+            return_value=_recovery_contract(),
+        ):
+            report = approval.authorize(
+                _recovery_event(),
+                owner=OWNER,
+                repository=REPOSITORY,
+                actor=OWNER,
+                triggering_actor=OWNER,
+                run_attempt=1,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "approval.json",
+                token=TOKEN,
+                transport=transport,
+                sleeper=lambda _: None,
+            )
+        self.assertEqual(report["validation_mode"], "published-release-recovery")
+        self.assertEqual(report["release_commit"], RELEASE)
+        self.assertEqual(report["source_commit"], SOURCE)
+        self.assertEqual(report["sync_validation_run_id"], RECOVERY_RUN)
+        self.assertEqual(
+            report["recovery_validation"]["attestation"]["activation"][
+                "activation_commit"
+            ],
+            ACTIVATION,
+        )
+
+    def test_authorize_recovery_rejects_wrong_merge_and_failed_validation(self):
+        payload = _recovery_ready_payload()
+        contract = _recovery_contract()
+        transport = RecoveryTransport(ready=False, payload=payload)
+        transport.main_tip = MERGE
+        original_request = transport.request
+
+        def wrong_merge(method, url, headers, body, timeout):
+            if urllib.parse.urlsplit(url).path.endswith(f"/commits/{MERGE}"):
+                response = json.loads(
+                    original_request(method, url, headers, body, timeout).body
+                )
+                response["parents"][0]["sha"] = SOURCE
+                return _response(response)
+            return original_request(method, url, headers, body, timeout)
+
+        transport.request = wrong_merge  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            approval.validation_recovery, "load_contract", return_value=contract
+        ), self.assertRaisesRegex(approval.ApprovalError, "tested source"):
+            approval.authorize(
+                _recovery_event(),
+                owner=OWNER,
+                repository=REPOSITORY,
+                actor=OWNER,
+                triggering_actor=OWNER,
+                run_attempt=1,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "approval.json",
+                token=TOKEN,
+                transport=transport,
+                sleeper=lambda _: None,
+            )
+
+        transport = RecoveryTransport(ready=False, payload=payload)
+        transport.recovery_run_conclusion = "failure"
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            approval.validation_recovery, "load_contract", return_value=contract
+        ), self.assertRaisesRegex(
+            approval.ApprovalError, "did not complete successfully"
+        ):
+            approval.authorize(
+                _recovery_event(),
+                owner=OWNER,
+                repository=REPOSITORY,
+                actor=OWNER,
+                triggering_actor=OWNER,
+                run_attempt=1,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=Path(temp) / "approval.json",
+                token=TOKEN,
+                transport=transport,
+                sleeper=lambda _: None,
+            )
 
     def test_ready_reports_denied_comment_publication_without_response_data(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1515,102 +1515,136 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             ).hexdigest()
             preflight_artifact = "platform-v2-preflight-6000002-1"
 
-            # Bind publication and later authorization to evidence produced by
-            # this recovery rehearsal, rather than to an unrelated canned
-            # release fixture.
+            # Rehearse the one published-release recovery protocol and carry
+            # its authorization output into the existing deployment handoff.
+            # The immutable release and source are this test's real assembled
+            # objects; activation/workflow identities remain synthetic remote
+            # evidence and are kept explicitly separate.
+            activation = "a" * 40
+            activation_head = "b" * 40
+            activation_tree = "c" * 40
+            activation_run = 6000003
+            recovery_run = 6000004
+            recovery_artifact_digest = "sha256:" + hashlib.sha256(
+                b"synthetic exact-release validation artifact"
+            ).hexdigest()
+            recovery_artifact = (
+                f"platform-validation-recovery-v{target['platform_version']}-"
+                f"{release_commit[:12]}-{recovery_run}-1"
+            )
             with mock.patch.multiple(
                 approval_fixture,
+                ACTIVATION=activation,
+                ACTIVATION_HEAD=activation_head,
+                ACTIVATION_RUN=activation_run,
+                ACTIVATION_TREE=activation_tree,
                 ARTIFACT=preflight_artifact,
                 ARTIFACT_DIGEST=preflight_digest,
                 FIRST_PARENT=head,
                 MANIFEST=target["manifest_sha256"],
                 PREFLIGHT_RUN=6000002,
+                RECOVERY_ARTIFACT=recovery_artifact,
+                RECOVERY_ARTIFACT_DIGEST=recovery_artifact_digest,
+                RECOVERY_RUN=recovery_run,
                 RELEASE=release_commit,
                 SOURCE=head,
                 VERSION=target["platform_version"],
             ):
-                ready_config = approval_fixture.approval._config(
+                contract = approval_fixture._recovery_contract()
+                attestation = approval_fixture._recovery_attestation()
+                ready_report = approval_fixture.approval.ready_recovery(
+                    contract,
+                    approval_fixture.TOKEN,
                     owner=approval_fixture.OWNER,
                     repository=approval_fixture.REPOSITORY,
-                    version=target["platform_version"],
-                    source_commit=head,
-                    release_commit=release_commit,
                     api_url="https://api.github.com",
                     server_url="https://github.com",
-                    output=base / "ready.json",
-                )
-                ready_report = approval_fixture.approval.ready(
-                    ready_config,
-                    approval_fixture.TOKEN,
-                    number=approval_fixture.PR_NUMBER,
+                    output=base / "recovery-ready.json",
                     feature_readiness=approval_fixture._published_readiness(),
-                    main_validation_run_id=approval_fixture.MAIN_RUN,
-                    main_validation_run_attempt=1,
-                    manifest_sha256=approval_fixture.MANIFEST,
-                    preflight_run_id=approval_fixture.PREFLIGHT_RUN,
-                    preflight_run_attempt=1,
-                    preflight_artifact=approval_fixture.ARTIFACT,
-                    transport=approval_fixture.ReadyTransport(),
+                    validation_attestation=attestation,
+                    validation_artifact_id=(
+                        approval_fixture.RECOVERY_ARTIFACT_ID
+                    ),
+                    validation_artifact_name=recovery_artifact,
+                    validation_artifact_digest=recovery_artifact_digest,
+                    transport=approval_fixture.RecoveryTransport(ready=True),
                     sleeper=lambda _: None,
-                    polls=1,
                 )
                 self.assertTrue(
                     ready_report["approval_marker"].startswith(
-                        approval_fixture.approval.APPROVAL_PREFIX
+                        approval_fixture.approval.RECOVERY_APPROVAL_PREFIX
                     )
                 )
-                with self.assertRaises(approval_fixture.sync.SyncPrError):
-                    approval_fixture.approval.ready(
-                        ready_config,
-                        approval_fixture.TOKEN,
-                        number=approval_fixture.PR_NUMBER,
-                        feature_readiness=approval_fixture._published_readiness(),
-                        main_validation_run_id=approval_fixture.MAIN_RUN,
-                        main_validation_run_attempt=1,
-                        manifest_sha256=target["manifest_sha256"],
-                        preflight_run_id=6000002,
-                        preflight_run_attempt=1,
-                        preflight_artifact=preflight_artifact,
-                        transport=approval_fixture.DeniedReadyTransport(),
-                        sleeper=lambda _: None,
-                        polls=1,
-                    )
+                self.assertEqual(
+                    ready_report["ready"]["recovery_validation"]["attestation"][
+                        "release"
+                    ]["commit"],
+                    release_commit,
+                )
+                self.assertEqual(
+                    ready_report["ready"]["recovery_validation"]["attestation"][
+                        "harness"
+                    ]["commit"],
+                    activation,
+                )
 
                 authorization_index = 0
 
                 def authorize(transport):
                     nonlocal authorization_index
                     authorization_index += 1
-                    return approval_fixture.approval.authorize(
-                        approval_fixture._event(),
-                        owner=approval_fixture.OWNER,
-                        repository=approval_fixture.REPOSITORY,
-                        actor=approval_fixture.OWNER,
-                        triggering_actor=approval_fixture.OWNER,
-                        run_attempt=1,
-                        api_url="https://api.github.com",
-                        server_url="https://github.com",
-                        output=base / f"approval-{authorization_index}.json",
-                        token=approval_fixture.TOKEN,
-                        transport=transport,
-                        sleeper=lambda _: None,
-                    )
+                    with mock.patch.object(
+                        approval_fixture.approval.validation_recovery,
+                        "load_contract",
+                        return_value=contract,
+                    ):
+                        return approval_fixture.approval.authorize(
+                            approval_fixture._recovery_event(),
+                            owner=approval_fixture.OWNER,
+                            repository=approval_fixture.REPOSITORY,
+                            actor=approval_fixture.OWNER,
+                            triggering_actor=approval_fixture.OWNER,
+                            run_attempt=1,
+                            api_url="https://api.github.com",
+                            server_url="https://github.com",
+                            output=base / f"approval-{authorization_index}.json",
+                            token=approval_fixture.TOKEN,
+                            transport=transport,
+                            sleeper=lambda _: None,
+                        )
 
                 with self.assertRaisesRegex(
                     approval_fixture.approval.ApprovalError,
                     "lacks the ChatGPT approval marker",
                 ):
                     authorize(
-                        approval_fixture.ApprovalTransport(
+                        approval_fixture.RecoveryTransport(
+                            ready=False,
+                            payload=ready_report["ready"],
                             include_merge_marker=False
                         )
                     )
-                authorized = authorize(approval_fixture.ApprovalTransport())
+                authorized = authorize(
+                    approval_fixture.RecoveryTransport(
+                        ready=False, payload=ready_report["ready"]
+                    )
+                )
+                self.assertEqual(
+                    authorized["validation_mode"], "published-release-recovery"
+                )
                 self.assertEqual(authorized["release_commit"], release_commit)
-                changed_evidence = approval_fixture.ApprovalTransport()
-                changed_evidence.artifact_digest = "sha256:" + "a" * 64
+                self.assertEqual(authorized["source_commit"], head)
+                self.assertEqual(
+                    authorized["manifest_sha256"],
+                    deployment_bundle.request.manifest_sha256,
+                )
+                changed_evidence = approval_fixture.RecoveryTransport(
+                    ready=False, payload=ready_report["ready"]
+                )
+                changed_evidence.recovery_run_conclusion = "failure"
                 with self.assertRaisesRegex(
-                    approval_fixture.approval.ApprovalError, "artifact digest"
+                    approval_fixture.approval.ApprovalError,
+                    "did not complete successfully",
                 ):
                     authorize(changed_evidence)
 

@@ -118,6 +118,113 @@ are installed or wheels are built. The canonical JSON report is pinned through
 candidate preparation and final publication so a remote-ledger change cannot be
 silently accepted midway through a run.
 
+## One-time published-v0.6.2 validation recovery
+
+`published-release-recovery-v0.6.2.json` is the executable, one-release recovery
+contract for immutable commit
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`. It pins its source and tree,
+release-manifest hash, synchronization PR #52, original main validation, every
+job in the original Prepare Release run, and the successful retained preflight
+artifact. It does not rebuild or change v0.6.2.
+
+PR #53 is the only activation PR. During its review, the normal release ledger
+still fails first because v0.6.2 is published but not yet in its source tree.
+`validation_recovery.py ledger` accepts only that exact error, PR number, base,
+and allowlisted tree delta. It then constructs a disposable synthetic merge of
+the candidate activation with the existing immutable release, runs the ordinary
+ledger verifier on that future tree, and requires the resulting next plan to be
+v0.6.3 from v0.6.2. Every other ledger failure remains fatal.
+
+After activation, `Validate Published Release Recovery` runs the complete
+reusable source suite against the exact published v0.6.2 commit. Only the fast
+lane receives the two reviewed test-fixture files from the activation merge:
+
+- `tests/deploy/test_request_archive.py`
+- `tests/platform/test_coordinated_recovery_rehearsal.py`
+
+The workflow records the immutable release commit/tree separately from the
+activation commit/tree and both harness blob hashes. Application, runtime,
+receiver, workflow-under-test, and release bytes therefore remain those of
+v0.6.2. Its last job revalidates the original feature readiness, PR #53's exact
+published readiness, activation main CI, the original failed release run's exact
+job set, and the retained successful preflight before it may place a distinct
+recovery-readiness record on PR #52. Authorization repeats those live checks.
+The deployment workflow stages the recovery-aware verifier from the exact PR #52
+merge before checking out v0.6.2, then uses that staged verifier at both queued
+authorization boundaries. The deployment archive and receiver still come only
+from the immutable release.
+
+The recovery descriptor also holds automatic release creation on both the PR
+#53 activation merge and the later PR #52 synchronization merge. This is a
+deliberate, bounded activation exception: main temporarily contains one
+unconsumed platform fragment while the already-published release is not yet
+synchronized, but ordinary ledger validation is never disabled and no new
+release may start. Any main advance, unexpected parent/tree, changed ref,
+rerun, missing artifact, or expired artifact fails closed.
+
+### Work activation sequence
+
+Work must perform these steps in order; none is an instruction for Codex or a
+routine operator to merge or deploy:
+
+1. Require PR #53's final head to have all required checks, applicable Preview
+   UI evidence, trusted readiness, and no `needs-codex`. Reconfirm that main is
+   exactly `4f98e7cb559ee1a9b269ea1f94938678d2dac4df`, PR #52 is open at
+   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, and both `release/platform-v0.6.2`
+   and `sync/platform-v0.6.2` still resolve to that commit.
+2. Merge PR #53 with a merge commit, without squash or rebase. Its ordered
+   parents must be the base above and the reviewed final PR head, and its tree
+   must equal the reviewed head. If main has moved, stop and review a new bounded
+   contract rather than updating the base opportunistically.
+3. Require the push-triggered `Validate PR` for that activation merge to pass.
+   Inspect the associated `Prepare Release` run and require the
+   `published-release-recovery` hold result; it must not build or publish v0.6.3.
+4. While the retained preflight artifact is still present and unexpired, dispatch
+   the reviewed workflow from that exact main commit:
+
+   ```bash
+   gh workflow run source-published-release-recovery.yml \
+     --repo Fifty5D/B-UH-AllianceAuth \
+     --ref main \
+     --field confirmation='VALIDATE PUBLISHED V0.6.2'
+   ```
+
+   Only the repository owner or the exact `BUH_CHATGPT_WORK_ACTOR` may dispatch
+   it. Run attempt 1 must complete successfully; do not rerun a failed attempt.
+   Inspect its `platform-validation-recovery-v0.6.2-6074b965cbd2-<run>-1`
+   artifact and the bot-authored recovery-readiness comment on PR #52.
+5. Present that exact validation artifact, unchanged release/manifest, original
+   preflight evidence, and generated approval marker to Anthony for the single
+   production approval. Before approval, do not merge PR #52. After explicit
+   approval, Work may merge PR #52 with a merge commit whose message contains
+   the exact generated `buh-chatgpt-approved-recovery:v1` marker. Its ordered
+   parents must be the activation merge and the immutable v0.6.2 commit.
+6. The existing `Deploy Production` pull-request event must authorize and deploy
+   only v0.6.2. Do not manually dispatch another deployment or retry a failed
+   production run. Confirm its retained evidence and final version through the
+   normal reporting path.
+7. Keep the recovery contract and release hold in place until production v0.6.2
+   is confirmed. Retiring this one-time mechanism is a later reviewed PR; it
+   must preserve the still-unconsumed platform fragment so the next ordinary
+   release is planned as v0.6.3 from synchronized v0.6.2.
+
+Useful read-only checks before steps 2 and 4 are:
+
+```bash
+gh pr view 53 --repo Fifty5D/B-UH-AllianceAuth \
+  --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,labels
+gh pr view 52 --repo Fifty5D/B-UH-AllianceAuth \
+  --json headRefOid,baseRefOid,state,isDraft,title
+gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/release/platform-v0.6.2
+gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/sync/platform-v0.6.2
+```
+
+If preflight artifact `10083806725` (digest
+`sha256:d527be28e5f79972835cd2d12c92e6ce98f4c9f77f081e872df76908c6ca0510`)
+expires or any pinned identity differs, this activation is blocked. Do not
+relabel old evidence or rebuild v0.6.2; a separately reviewed contract update
+must bind a truthful fresh no-change preflight for the same immutable release.
+
 The assembled directory contains `RELEASE.json`, `INSTALL_PLAN.json`, release
 notes, wheels, and strict SHA-256 sums. The reusable and manually dispatchable
 `build-platform-release.yml` workflow can optionally add the new directory,
