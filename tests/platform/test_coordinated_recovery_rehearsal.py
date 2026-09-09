@@ -40,6 +40,13 @@ from tests.release import test_platform_approval as approval_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 V061_RELEASE = "43234a8c0b6371fdfc62b59fa75a7980924ac3a5"
+SYNTHETIC_RECOVERY_FRAGMENT = """\
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Exercise the bounded coordinated-recovery release rehearsal."
+deployment_predecessor = "0.5.6"
+"""
 
 
 def run(*arguments: object, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -50,6 +57,39 @@ def run(*arguments: object, cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         encoding="utf-8",
+    )
+
+
+def synthetic_recovery_plan(
+    checkout: Path,
+    fixture_root: Path,
+    source_commit: str,
+) -> dict[str, Any]:
+    """Plan the bounded recovery from fixture-owned intent."""
+
+    synthetic_changes = fixture_root / "synthetic-release-intent"
+    synthetic_changes.mkdir(parents=True)
+    (synthetic_changes / "coordinated-recovery-rehearsal.toml").write_text(
+        SYNTHETIC_RECOVERY_FRAGMENT,
+        encoding="utf-8",
+    )
+    return buh_release.create_plan(
+        repo_root=checkout,
+        registry_path=checkout / "ops/release/apps.toml",
+        compatibility_path=checkout / "platform/compatibility.toml",
+        changes_dir=synthetic_changes,
+        previous_manifest_path=(
+            checkout / "releases/platform/v0.6.1/RELEASE.json"
+        ),
+        source_commit=source_commit,
+        test_run="synthetic-coordinated-rehearsal",
+    )
+
+
+def release_fingerprint(release_dir: Path) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(release_dir.iterdir(), key=lambda item: item.name)
     )
 
 
@@ -925,6 +965,105 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 schema_v1_host.validate(make_recovery_bundle(root))
             compose.assert_not_called()
 
+    def test_release_fixture_accepts_source_and_published_shapes(self) -> None:
+        """Run the planner/assembler with both caller release states."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            checkout = base / "caller-snapshot"
+            cloned = run(
+                "git",
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                "--no-hardlinks",
+                "--",
+                ROOT,
+                checkout,
+                cwd=ROOT,
+            )
+            self.assertEqual(cloned.returncode, 0, cloned.stderr[-1000:])
+            head = run("git", "rev-parse", "HEAD", cwd=ROOT).stdout.strip()
+            self.assertEqual(
+                run(
+                    "git", "config", "core.autocrlf", "false", cwd=checkout
+                ).returncode,
+                0,
+            )
+            checked_out = run(
+                "git", "checkout", "--quiet", "--detach", head, cwd=checkout
+            )
+            self.assertEqual(checked_out.returncode, 0, checked_out.stderr[-1000:])
+
+            source_plan = synthetic_recovery_plan(
+                checkout,
+                base / "source-shape",
+                head,
+            )
+            source_output = checkout / ".recovery-source-shape/platform/v0.6.2"
+            self.assertFalse(source_output.exists())
+            buh_release.assemble_release(
+                plan=source_plan,
+                wheel_dir=base / "unused-source-wheels",
+                previous_release_dir=checkout / "releases/platform/v0.6.1",
+                output_dir=source_output,
+                repo_root=checkout,
+            )
+            self.assertEqual(
+                buh_release.verify_release_dir(source_output)["platform_version"],
+                "0.6.2",
+            )
+
+            # Reproduce the release snapshot's two material properties inside
+            # this disposable checkout: source fragments are consumed and the
+            # immutable target directory already exists. Use the exact payload
+            # just assembled rather than a marker or mocked directory.
+            published_release = checkout / "releases/platform/v0.6.2"
+            if not published_release.exists():
+                buh_release.assemble_release(
+                    plan=source_plan,
+                    wheel_dir=base / "unused-published-wheels",
+                    previous_release_dir=checkout / "releases/platform/v0.6.1",
+                    output_dir=published_release,
+                    repo_root=checkout,
+                )
+            self.assertEqual(
+                buh_release.verify_release_dir(published_release)[
+                    "platform_version"
+                ],
+                "0.6.2",
+            )
+            for fragment in (checkout / "changes").glob("*.toml"):
+                fragment.unlink()
+            self.assertEqual(list((checkout / "changes").glob("*.toml")), [])
+            published_fingerprint = release_fingerprint(published_release)
+
+            published_plan = synthetic_recovery_plan(
+                checkout,
+                base / "published-shape",
+                head,
+            )
+            published_output = (
+                checkout / ".recovery-published-shape/platform/v0.6.2"
+            )
+            buh_release.assemble_release(
+                plan=published_plan,
+                wheel_dir=base / "unused-post-published-wheels",
+                previous_release_dir=checkout / "releases/platform/v0.6.1",
+                output_dir=published_output,
+                repo_root=checkout,
+            )
+            self.assertEqual(
+                buh_release.verify_release_dir(published_output)[
+                    "platform_version"
+                ],
+                "0.6.2",
+            )
+            self.assertEqual(
+                release_fingerprint(published_release),
+                published_fingerprint,
+            )
+
     def test_complete_recovery_and_next_release_sequence(self) -> None:
         policy = recovery_policy.load_policy()
         self.assertEqual(
@@ -1015,16 +1154,15 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 history_host._validate_release_transition(history_bundle)
             self.assertEqual(live["platform_version"], "0.5.6")
 
-            plan = buh_release.create_plan(
-                repo_root=checkout,
-                registry_path=checkout / "ops/release/apps.toml",
-                compatibility_path=checkout / "platform/compatibility.toml",
-                changes_dir=checkout / "changes",
-                previous_manifest_path=(
-                    checkout / "releases/platform/v0.6.1/RELEASE.json"
-                ),
-                source_commit=head,
-                test_run="synthetic-coordinated-rehearsal",
+            # Keep the synthetic release intent independent of whether the
+            # caller is the feature source (fragment present, v0.6.2 absent) or
+            # the already-published release snapshot (fragment consumed,
+            # immutable v0.6.2 present). The real planner still validates every
+            # source input and the reviewed v0.6.1 recovery predecessor.
+            plan = synthetic_recovery_plan(
+                checkout,
+                base / "complete-sequence",
+                head,
             )
             self.assertEqual(plan["platform_version"], "0.6.2")
             self.assertEqual(plan["previous_platform_version"], "0.6.1")
@@ -1036,10 +1174,17 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 policy["published_releases"][1:],
             )
 
-            # Assemble and commit the eventual release exactly as the release
-            # workflow will: the immutable release commit has the reviewed
-            # feature source as its sole parent and reuses unchanged wheels.
-            next_release = checkout / "releases/platform/v0.6.2"
+            # Assemble the same release payload under a fixture-only path. The
+            # commit still has the reviewed source as its sole parent and
+            # reuses the exact prior wheels, while never colliding with or
+            # editing a caller's already-published v0.6.2 directory.
+            next_release = (
+                checkout / ".recovery-rehearsal-output/platform/v0.6.2"
+            )
+            self.assertNotEqual(
+                next_release,
+                checkout / "releases/platform/v0.6.2",
+            )
             buh_release.assemble_release(
                 plan=plan,
                 wheel_dir=base / "unused-wheels",
@@ -1049,7 +1194,12 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             )
             self.assertEqual(
                 run(
-                    "git", "add", "--", "releases/platform/v0.6.2", cwd=checkout
+                    "git",
+                    "add",
+                    "--force",
+                    "--",
+                    ".recovery-rehearsal-output/platform/v0.6.2",
+                    cwd=checkout,
                 ).returncode,
                 0,
             )
@@ -1066,6 +1216,22 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             self.assertEqual(
                 run("git", "show", "-s", "--format=%P", release_commit, cwd=checkout).stdout.strip(),
                 head,
+            )
+            preserved_caller_state = run(
+                "git",
+                "diff",
+                "--exit-code",
+                head,
+                release_commit,
+                "--",
+                "changes",
+                "releases/platform/v0.6.2",
+                cwd=checkout,
+            )
+            self.assertEqual(
+                preserved_caller_state.returncode,
+                0,
+                preserved_caller_state.stderr[-1000:],
             )
             production_archive = base / "production-recovery.tar.gz"
             production_metadata = request_archive.build_archive(
