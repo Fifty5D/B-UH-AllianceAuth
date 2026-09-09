@@ -197,6 +197,18 @@ def _rollback_record(recovery: str, passed: bool) -> dict[str, str]:
 
 def _base_record(bundle: ValidatedBundle, operation: str) -> dict[str, Any]:
     now = _timestamp()
+    transition = bundle.request.recovery_transition
+    release_recovery = None
+    if transition is not None:
+        release_recovery = {
+            "baseline_platform_version": transition["releases"][0][
+                "platform_version"
+            ],
+            "policy_id": transition["policy_id"],
+            "purpose": transition["purpose"],
+            "release_count": len(transition["releases"]),
+            "sha256": bundle.request.recovery_sha256,
+        }
     return {
         "schema_version": 1,
         "operation": operation,
@@ -206,6 +218,7 @@ def _base_record(bundle: ValidatedBundle, operation: str) -> dict[str, Any]:
         "source_commit": bundle.manifest["source_commit"],
         "platform_version": bundle.request.platform_version,
         "manifest_sha256": bundle.request.manifest_sha256,
+        "release_recovery": release_recovery,
         "started_at": now,
         "updated_at": now,
         "state": None,
@@ -504,7 +517,6 @@ class DeploymentEngine:
                         pass
             except BaseException as error:
                 signal_guard.protect_recovery()
-                verification = self.backend.stabilization_evidence()
                 try:
                     recovery = self.backend.rollback(bundle, self.journal.state)
                     rollback_passed = True
@@ -516,6 +528,10 @@ class DeploymentEngine:
                         f"({rollback_error.__class__.__name__}: {rollback_summary})."
                     )
                     rollback_passed = False
+                # Rollback can itself produce a narrowly verified transition
+                # warning.  Capture evidence after that attempt so the failure
+                # journal never silently discards it.
+                verification = self.backend.stabilization_evidence()
                 self.journal.fail(
                     error,
                     recovery,

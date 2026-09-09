@@ -120,6 +120,7 @@ python_environment=(
 )
 python_environment+=(
   BUH_REVIEWED_INVENTORY="${reviewed_inventory}"
+  BUH_REVIEWED_INVENTORY_SHA256="${reviewed_inventory_sha256}"
   BUH_REVIEWED_COMMIT="${expected_commit}"
   BUH_RECEIVER_CONFIG_PATH="${config_path}"
   BUH_PINNED_CONFIG_SHA256="${BUH_PINNED_CONFIG_SHA256}"

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ops.deploy import receiver_upgrade
+from ops.release import recovery_policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +127,73 @@ def independent_fingerprint(root: Path):
             )
         result[logical] = entries
     return result
+
+
+class ConfirmedReceiverBaselineTests(unittest.TestCase):
+    def _exercise(self, *, changed_path: str | None = None):
+        policy = recovery_policy.load_policy()
+        expected = policy["host_baseline"]["installed_receiver"]
+        identities = {
+            expected["config"]["path"]: expected["config"],
+            expected["install_record"]["path"]: expected["install_record"],
+            **expected["files"],
+        }
+        record_files = {
+            "ops/deploy/contracts.py": expected["files"][
+                "/usr/local/lib/buh-platform-v2/ops/deploy/contracts.py"
+            ]["sha256"],
+            "ops/deploy/docker_host.py": expected["files"][
+                "/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py"
+            ]["sha256"],
+            "ops/deploy/buh-deploy-dispatch": expected["files"][
+                "/usr/local/sbin/buh-deploy-dispatch"
+            ]["sha256"],
+            "ops/deploy/buh-platform-v2-receiver": expected["files"][
+                "/usr/local/sbin/buh-platform-v2-receiver"
+            ]["sha256"],
+        }
+
+        def details_for(path):
+            logical = "/" + Path(path).as_posix().lstrip("/")
+            identity = identities[logical]
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | int(identity["mode"], 8),
+                st_uid=identity["uid"],
+                st_gid=identity["gid"],
+            )
+
+        def digest_for(path, _context):
+            logical = "/" + Path(path).as_posix().lstrip("/")
+            if logical == changed_path:
+                return "0" * 64
+            return identities[logical]["sha256"]
+
+        record = {
+            "config_sha256": expected["config"]["sha256"],
+            "files": record_files,
+            "schema_version": 1,
+            "source_commit": expected["install_record"]["source_commit"],
+        }
+        with mock.patch.object(Path, "lstat", details_for), mock.patch.object(
+            receiver_upgrade, "_checked_sha256", side_effect=digest_for
+        ), mock.patch.object(
+            receiver_upgrade.ReceiverConfig,
+            "load",
+            return_value=SimpleNamespace(schema_version=1),
+        ), mock.patch.object(
+            receiver_upgrade, "_load_json_object", return_value=record
+        ):
+            receiver_upgrade._verify_confirmed_installed_receiver()
+
+    def test_accepts_the_exact_confirmed_installed_receiver(self):
+        self._exercise()
+
+    def test_rejects_any_changed_confirmed_receiver_file(self):
+        with self.assertRaisesRegex(
+            receiver_upgrade.UpgradeError,
+            "Confirmed installed receiver baseline changed",
+        ):
+            self._exercise(changed_path="/usr/local/sbin/buh-platform-v2-receiver")
 
 
 class ReceiverUpgradeBehaviorTests(unittest.TestCase):
@@ -1320,6 +1388,7 @@ class ReceiverInstallerBehaviorTests(unittest.TestCase):
                 "ops/buh-redact-diagnostics.py",
                 "ops/deploy/__init__.py",
                 "ops/deploy/contracts.py",
+                "ops/deploy/coordinated-recovery.json",
                 "ops/deploy/docker_host.py",
                 "ops/deploy/engine.py",
                 "ops/deploy/receiver.py",
@@ -1328,6 +1397,7 @@ class ReceiverInstallerBehaviorTests(unittest.TestCase):
                 "ops/deploy/install-receiver.sh",
                 "ops/release/__init__.py",
                 "ops/release/buh_release.py",
+                "ops/release/recovery_policy.py",
             )
             for relative in install_sources:
                 destination = repo / relative
@@ -1453,6 +1523,9 @@ source "$1" "${@:2}"
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["BUH_REVIEWED_COMMIT"] = commit
             environment["BUH_REVIEWED_INVENTORY"] = str(inventory)
+            environment["BUH_REVIEWED_INVENTORY_SHA256"] = hashlib.sha256(
+                inventory.read_bytes()
+            ).hexdigest()
             environment["BUH_RECEIVER_CONFIG_PATH"] = (
                 receiver_upgrade.CANONICAL_CONFIG_PATH
             )
@@ -1461,6 +1534,9 @@ source "$1" "${@:2}"
             )
             environment["BUH_PINNED_LEGACY_SHA256"] = hashlib.sha256(
                 legacy_bytes
+            ).hexdigest()
+            environment["BUH_PINNED_CONFIG_SHA256"] = hashlib.sha256(
+                config.read_bytes()
             ).hexdigest()
             result = subprocess.run(
                 [
@@ -1571,6 +1647,8 @@ class ReceiverPowerShellPreRootTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repo = Path(self.temporary.name) / "repo"
         self.repo.mkdir()
+        self.preflight = Path(self.temporary.name) / "prepared-preflight.tar.gz"
+        self.preflight.write_bytes(b"synthetic prepared preflight\n")
         for relative in powershell_required_sources():
             destination = self.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1619,7 +1697,7 @@ class ReceiverPowerShellPreRootTests(unittest.TestCase):
                 "-ReviewedCommit",
                 self.commit,
                 "-PreflightRequest",
-                "/root/preflight-request.json",
+                self.preflight,
                 *extra_arguments,
             ],
             cwd=self.repo,
@@ -1737,6 +1815,224 @@ class ReceiverRootBootstrapContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("root-private reviewed receiver bootstrap", result.stderr)
 
+    @unittest.skipUnless(
+        os.name == "posix" and BASH and PYTHON3 and shutil.which("git"),
+        "requires POSIX, Bash, Python, and Git",
+    )
+    def test_shell_handoff_forwards_verified_inventory_identity(self):
+        """Drive the real env-i array into the real Python source verifier."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            reviewed_repo = base / "reviewed-repo"
+            exported = base / "isolated-export"
+            reviewed_repo.mkdir()
+            exported.mkdir()
+            config = base / "receiver.json"
+            legacy = base / "legacy-receiver"
+            request = base / "preflight-request.tar.gz"
+            config.write_text("{}\n", encoding="ascii")
+            legacy.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            request.write_bytes(b"synthetic no-change preflight request\n")
+            config.chmod(0o600)
+            legacy.chmod(0o700)
+            request.chmod(0o600)
+
+            required = powershell_required_sources()
+            for relative in required:
+                destination = reviewed_repo / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+
+            upgrade = reviewed_repo / "ops/deploy/upgrade-receiver.sh"
+            script = upgrade.read_text(encoding="utf-8")
+            replacements = {
+                "canonical_config=/etc/buh-platform-v2/receiver.json": (
+                    f"canonical_config={config}"
+                ),
+                "canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote": (
+                    f"canonical_legacy={legacy}"
+                ),
+            }
+            for original, replacement in replacements.items():
+                self.assertEqual(script.count(original), 1)
+                script = script.replace(original, replacement, 1)
+
+            suite_command = (
+                '"${python_environment[@]}" python3 -P -m unittest discover \\\n'
+                '  -s "${repo_root}/tests/deploy" -t "${repo_root}" '
+                "-p 'test_*.py'"
+            )
+            self.assertEqual(script.count(suite_command), 1)
+            script = script.replace(
+                suite_command,
+                ": # Focused regression stubs the already-covered deployment suite.",
+                1,
+            )
+            upgrade_command = (
+                '"${python_environment[@]}" python3 -P '
+                "-m ops.deploy.receiver_upgrade upgrade \\\n"
+                '  "${expected_commit}" "${repo_root}" "${config}" '
+                '"${legacy}" "${request}"'
+            )
+            verification_command = (
+                '"${python_environment[@]}" python3 -P -c '
+                "'import os, sys; from pathlib import Path; "
+                "from ops.deploy.receiver_upgrade import _verify_reviewed_source; "
+                'assert "BUH_UNTRUSTED_SENTINEL" not in os.environ; '
+                "_verify_reviewed_source(Path(sys.argv[2]), sys.argv[1]); "
+                "print(\"SANITIZED-INVENTORY-HANDOFF-PASSED\")' \\\n"
+                '  "${expected_commit}" "${repo_root}"'
+            )
+            self.assertEqual(script.count(upgrade_command), 1)
+            script = script.replace(upgrade_command, verification_command, 1)
+            upgrade.write_text(script, encoding="utf-8", newline="\n")
+            upgrade.chmod(0o755)
+
+            commands = (
+                ("git", "init", "--quiet", reviewed_repo),
+                ("git", "-C", reviewed_repo, "config", "user.name", "Receiver Gate"),
+                (
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "config",
+                    "user.email",
+                    "receiver-gate@example.invalid",
+                ),
+                ("git", "-C", reviewed_repo, "add", "--", *required),
+                ("git", "-C", reviewed_repo, "commit", "--quiet", "-m", "handoff"),
+            )
+            for command in commands:
+                result = subprocess.run(
+                    [str(item) for item in command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+            commit = subprocess.run(
+                ["git", "-C", reviewed_repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory = base / "TRACKED"
+            inventory.write_text(
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        reviewed_repo,
+                        "ls-tree",
+                        "-r",
+                        "--full-tree",
+                        commit,
+                        "--",
+                        *required,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                encoding="ascii",
+                newline="\n",
+            )
+            inventory.chmod(0o600)
+            archive_path = base / "receiver-tree.tar"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive_path}",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                check=True,
+            )
+            with tarfile.open(archive_path, "r:") as archive:
+                archive.extractall(exported, filter="data")
+            exported.chmod(0o700)
+            for directory in (
+                path for path in exported.rglob("*") if path.is_dir()
+            ):
+                directory.chmod(0o700)
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "BUH_LEGACY_RECEIVER_PATH": str(legacy),
+                    "BUH_PINNED_CONFIG_SHA256": hashlib.sha256(
+                        config.read_bytes()
+                    ).hexdigest(),
+                    "BUH_PINNED_LEGACY_SHA256": hashlib.sha256(
+                        legacy.read_bytes()
+                    ).hexdigest(),
+                    "BUH_PINNED_REQUEST_SHA256": hashlib.sha256(
+                        request.read_bytes()
+                    ).hexdigest(),
+                    "BUH_RECEIVER_CONFIG_PATH": str(config),
+                    "BUH_REVIEWED_COMMIT": commit,
+                    "BUH_REVIEWED_INVENTORY": str(inventory),
+                    "BUH_REVIEWED_INVENTORY_SHA256": hashlib.sha256(
+                        inventory.read_bytes()
+                    ).hexdigest(),
+                    "BUH_UNTRUSTED_SENTINEL": secrets.token_hex(24),
+                }
+            )
+            wrapper = r'''
+id() {
+  if [[ "${1-}" == "-u" ]]; then printf '0\n'; else command id "$@"; fi
+}
+stat() {
+  if [[ "${1-}" == "-c" && "${2-}" == "%u" ]]; then
+    printf '0\n'
+  elif [[ "${1-}" == "-c" && "${2-}" == "%u:%a" ]]; then
+    printf '0:%s\n' "$(command stat -c '%a' -- "${@: -1}")"
+  else
+    command stat "$@"
+  fi
+}
+source "$1" "${@:2}"
+'''
+
+            def run_handoff():
+                return subprocess.run(
+                    [
+                        BASH,
+                        "-c",
+                        wrapper,
+                        "receiver-shell-handoff-test",
+                        exported / "ops/deploy/upgrade-receiver.sh",
+                        commit,
+                        config,
+                        legacy,
+                        request,
+                    ],
+                    cwd=exported,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+
+            accepted = run_handoff()
+            bounded = (accepted.stdout[-1200:] + accepted.stderr[-1600:]).strip()
+            self.assertEqual(accepted.returncode, 0, bounded)
+            self.assertIn("SANITIZED-INVENTORY-HANDOFF-PASSED", accepted.stdout)
+
+            inventory.write_bytes(inventory.read_bytes() + b"tampered\n")
+            rejected = run_handoff()
+            bounded = (rejected.stdout[-1200:] + rejected.stderr[-1600:]).strip()
+            self.assertNotEqual(rejected.returncode, 0, bounded)
+            self.assertIn("Reviewed tree inventory changed.", rejected.stderr)
+            self.assertNotIn("SANITIZED-INVENTORY-HANDOFF-PASSED", rejected.stdout)
+
 
 class ReceiverPowerShellPackageTests(unittest.TestCase):
     def test_helper_exports_only_the_explicit_commit_bound_allowlist(self):
@@ -1747,7 +2043,177 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
         self.assertIn("ls-tree -r --full-tree $ReviewedCommit -- $RequiredSources", helper)
         self.assertEqual(len(required), len(set(required)))
         self.assertIn("tests/deploy/test_upgrade_receiver.py", required)
+        self.assertIn(
+            "tests/deploy/fixtures/discord-owner-50013-mainprocess.log", required
+        )
+        self.assertEqual(
+            {
+                "releases/platform/v0.5.6/RELEASE.json",
+                "releases/platform/v0.6.0/RELEASE.json",
+                "releases/platform/v0.6.1/INSTALL_PLAN.json",
+                "releases/platform/v0.6.1/RELEASE.json",
+            },
+            {item for item in required if item.startswith("releases/")},
+        )
         self.assertNotIn(".env", required)
+
+    @unittest.skipUnless(
+        os.name == "posix"
+        and BASH
+        and shutil.which("git")
+        and shutil.which("python3")
+        and os.environ.get("BUH_EXPORTED_GATE_CHILD") != "1",
+        "requires a POSIX receiver environment and is skipped inside its child gate",
+    )
+    def test_exact_export_passes_root_gate_without_an_enclosing_git_repository(self):
+        """Execute the pre-activation unittest command against only its allowlist."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            reviewed_repo = base / "reviewed-repo"
+            exported = base / "isolated-export"
+            reviewed_repo.mkdir()
+            exported.mkdir()
+            required = powershell_required_sources()
+            for relative in required:
+                destination = reviewed_repo / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+
+            commands = (
+                ("git", "init", "--quiet", reviewed_repo),
+                ("git", "-C", reviewed_repo, "config", "user.name", "Receiver Gate"),
+                (
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "config",
+                    "user.email",
+                    "receiver-gate@example.invalid",
+                ),
+                ("git", "-C", reviewed_repo, "add", "--", *required),
+                ("git", "-C", reviewed_repo, "commit", "--quiet", "-m", "reviewed export"),
+            )
+            for command in commands:
+                result = subprocess.run(
+                    [str(item) for item in command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+            commit = subprocess.run(
+                ["git", "-C", reviewed_repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "ls-tree",
+                    "-r",
+                    "--full-tree",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            inventory = base / "TRACKED"
+            inventory.write_text(inventory_result.stdout, encoding="ascii", newline="\n")
+            archive_path = base / "receiver-tree.tar"
+            archived = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    reviewed_repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive_path}",
+                    commit,
+                    "--",
+                    *required,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(archived.returncode, 0, archived.stderr[-1200:])
+            with tarfile.open(archive_path, "r:") as archive:
+                archive.extractall(exported, filter="data")
+
+            self.assertFalse((exported / ".git").exists())
+            outside_git = subprocess.run(
+                ["git", "-C", exported, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(outside_git.returncode, 0)
+            self.assertEqual(
+                set(required),
+                {
+                    path.relative_to(exported).as_posix()
+                    for path in exported.rglob("*")
+                    if path.is_file()
+                },
+            )
+
+            environment = {
+                "BUH_EXPORTED_GATE_CHILD": "1",
+                "BUH_LEGACY_RECEIVER_PATH": (
+                    receiver_upgrade.CANONICAL_LEGACY_RECEIVER_PATH
+                ),
+                "BUH_PINNED_CONFIG_SHA256": "1" * 64,
+                "BUH_PINNED_LEGACY_SHA256": "2" * 64,
+                "BUH_PINNED_REQUEST_SHA256": "3" * 64,
+                "BUH_RECEIVER_CONFIG_PATH": receiver_upgrade.CANONICAL_CONFIG_PATH,
+                "BUH_REVIEWED_COMMIT": commit,
+                "BUH_REVIEWED_INVENTORY": str(inventory),
+                "BUH_REVIEWED_INVENTORY_SHA256": hashlib.sha256(
+                    inventory.read_bytes()
+                ).hexdigest(),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "HOME": str(base / "root-home"),
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(exported),
+            }
+            (base / "root-home").mkdir()
+            gate = subprocess.run(
+                [
+                    BASH,
+                    "-c",
+                    'umask 077\nexec "$@"',
+                    "receiver-export-gate",
+                    "python3",
+                    "-P",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    exported / "tests/deploy",
+                    "-t",
+                    exported,
+                    "-p",
+                    "test_*.py",
+                ],
+                cwd=exported,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=180,
+            )
+            bounded = (gate.stdout[-1200:] + gate.stderr[-2400:]).strip()
+            self.assertEqual(gate.returncode, 0, bounded)
 
     def test_manual_recovery_imports_only_independently_verified_reviewed_source(self):
         helper = (ROOT / "setup/Upgrade-BUH-PlatformV2Receiver.ps1").read_text()
@@ -1836,6 +2302,201 @@ class ReceiverPowerShellPackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(
+        os.name == "posix" and BASH and shutil.which("git"),
+        "requires POSIX, Bash, and Git",
+    )
+    def test_embedded_root_bootstrap_pins_under_root_and_rejects_unsafe_parents(self):
+        privilege = []
+        if os.geteuid() != 0:
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                self.skipTest("requires root or passwordless sudo")
+            probe = subprocess.run(
+                [sudo, "-n", "true"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if probe.returncode != 0:
+                self.skipTest("requires root or passwordless sudo")
+            privilege = [sudo, "-n"]
+
+        helper = (ROOT / "setup/Upgrade-BUH-PlatformV2Receiver.ps1").read_text()
+        bootstrap = helper.split("$RootBootstrap = @'\n", 1)[1].split(
+            "\n'@", 1
+        )[0]
+        self.assertIn(
+            'root_stage="$(mktemp -d /root/buh-reviewed-receiver.XXXXXXXX)"',
+            bootstrap,
+        )
+        self.assertNotIn("/var/tmp/buh-reviewed-receiver.", bootstrap)
+        self.assertNotEqual(
+            stat.S_IMODE(Path("/var/tmp").stat().st_mode) & 0o022,
+            0,
+            "/var/tmp must exercise an unsafe parent",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo = base / "reviewed"
+            stub = repo / "ops/deploy/upgrade-receiver.sh"
+            stub.parent.mkdir(parents=True)
+            stub.write_text(
+                """#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$#" -eq 4 ]]
+[[ "$1" =~ ^[0-9a-f]{40}$ ]]
+input_root="$(dirname -- "$2")"
+[[ "$input_root" == /root/buh-reviewed-receiver.????????/inputs ]]
+[[ "$3" == "$input_root/legacy" ]]
+[[ "$4" == "$input_root/request.tar" ]]
+[[ "$(stat -c '%a' "$2")" == 600 ]]
+[[ "$(stat -c '%a' "$3")" == 500 ]]
+[[ "$(stat -c '%a' "$4")" == 600 ]]
+[[ "$(stat -c '%a' "$input_root/SHA256")" == 600 ]]
+[[ "$(wc -l < "$input_root/SHA256")" -eq 3 ]]
+[[ "$(sha256sum "$2" | cut -d' ' -f1)" == "$BUH_PINNED_CONFIG_SHA256" ]]
+[[ "$(sha256sum "$3" | cut -d' ' -f1)" == "$BUH_PINNED_LEGACY_SHA256" ]]
+[[ "$(sha256sum "$4" | cut -d' ' -f1)" == "$BUH_PINNED_REQUEST_SHA256" ]]
+printf '%s\n' 'INSTALL-STUB-HANDOFF'
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            stub.chmod(0o755)
+            subprocess.run(["git", "init", "--quiet", repo], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "config", "user.name", "Bootstrap Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "config",
+                    "user.email",
+                    "bootstrap@example.invalid",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "-C", repo, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "commit", "--quiet", "-m", "stub"],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            inventory = base / "TRACKED"
+            inventory.write_text(
+                subprocess.run(
+                    ["git", "-C", repo, "ls-tree", "-r", "--full-tree", commit],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                encoding="ascii",
+                newline="\n",
+            )
+            archive = base / "receiver-tree.tar"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive}",
+                    commit,
+                ],
+                check=True,
+            )
+            request = base / "preflight-request.tar"
+            request.write_bytes(b"synthetic no-change preflight request\n")
+            archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+            inventory_hash = hashlib.sha256(inventory.read_bytes()).hexdigest()
+            request_hash = hashlib.sha256(request.read_bytes()).hexdigest()
+            wrapper = """set -Eeuo pipefail
+fixture_root="$1"
+config="$2"
+legacy="$3"
+bootstrap="$4"
+shift 4
+[[ "$fixture_root" =~ ^/(root|var/tmp)/buh-bootstrap-test-[0-9a-f]{24}$ ]]
+[[ "$config" == "$fixture_root/config.json" ]]
+[[ "$legacy" == "$fixture_root/legacy" ]]
+trap 'rm -rf -- "$fixture_root"' EXIT
+install -d -m 0700 "$fixture_root"
+printf '%s\n' '{}' > "$config"
+chmod 0600 "$config"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$legacy"
+chmod 0755 "$legacy"
+/usr/bin/env -i HOME=/root LANG=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /bin/bash -seu -- "$@" < "$bootstrap"
+"""
+
+            def execute(fixture_root: str, label: str):
+                config = f"{fixture_root}/config.json"
+                legacy = f"{fixture_root}/legacy"
+                selected = bootstrap.replace(
+                    "canonical_config=/etc/buh-platform-v2/receiver.json",
+                    f"canonical_config={config}",
+                ).replace(
+                    "canonical_legacy=/usr/local/sbin/buh-moon-tax-platform-remote",
+                    f"canonical_legacy={legacy}",
+                )
+                bootstrap_path = base / f"bootstrap-{label}.sh"
+                bootstrap_path.write_text(
+                    selected, encoding="utf-8", newline="\n"
+                )
+                return subprocess.run(
+                    [
+                        *privilege,
+                        BASH,
+                        "-c",
+                        wrapper,
+                        "receiver-bootstrap-test",
+                        fixture_root,
+                        config,
+                        legacy,
+                        bootstrap_path,
+                        archive,
+                        archive_hash,
+                        str(archive.stat().st_size),
+                        inventory,
+                        inventory_hash,
+                        str(inventory.stat().st_size),
+                        commit,
+                        "upgrade",
+                        request,
+                        config,
+                        legacy,
+                        str(request.stat().st_size),
+                        request_hash,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+
+            token = secrets.token_hex(12)
+            success = execute(f"/root/buh-bootstrap-test-{token}", "protected")
+            bounded = (success.stdout[-1200:] + success.stderr[-1200:]).strip()
+            self.assertEqual(success.returncode, 0, bounded)
+            self.assertIn("INSTALL-STUB-HANDOFF", success.stdout)
+
+            unsafe = execute(f"/var/tmp/buh-bootstrap-test-{token}", "unsafe")
+            bounded = (unsafe.stdout[-1200:] + unsafe.stderr[-1200:]).strip()
+            self.assertEqual(unsafe.returncode, 65, bounded)
+            self.assertIn("Receiver input pinning failed.", unsafe.stderr)
+            self.assertNotIn("INSTALL-STUB-HANDOFF", unsafe.stdout)
+
+    @unittest.skipUnless(
         os.name == "posix" and POWERSHELL and shutil.which("git"),
         "requires POSIX, PowerShell, and Git",
     )
@@ -1916,6 +2577,9 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 executable.chmod(0o755)
 
             secret = f"local-{secrets.token_hex(24)}"
+            preflight_secret = f"preflight-{secrets.token_hex(24)}"
+            preflight = base / "prepared-preflight.tar.gz"
+            preflight.write_text(preflight_secret + "\n", encoding="ascii")
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
             environment["BUH_FAKE_CAPTURE"] = str(capture)
@@ -1931,7 +2595,7 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                     "-ReviewedCommit",
                     commit,
                     "-PreflightRequest",
-                    "/root/preflight-request.json",
+                    preflight,
                 ],
                 cwd=repo,
                 env=environment,
@@ -1940,7 +2604,7 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 check=False,
                 timeout=120,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr[-1000:])
 
             archive = capture / "receiver-tree.tar"
             inventory = capture / "TRACKED"
@@ -1952,7 +2616,10 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             expected_hashes = dict(
                 zip(checksum_parts[1::2], checksum_parts[0::2], strict=True)
             )
-            self.assertEqual(set(expected_hashes), {"receiver-tree.tar", "TRACKED"})
+            self.assertEqual(
+                set(expected_hashes),
+                {"receiver-tree.tar", "TRACKED", "preflight-request.tar.gz"},
+            )
             self.assertEqual(
                 hashlib.sha256(archive.read_bytes()).hexdigest(),
                 expected_hashes["receiver-tree.tar"],
@@ -1960,6 +2627,12 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             self.assertEqual(
                 hashlib.sha256(inventory.read_bytes()).hexdigest(),
                 expected_hashes["TRACKED"],
+            )
+            transferred_request = capture / "preflight-request.tar.gz"
+            self.assertEqual(transferred_request.read_text(encoding="ascii"), preflight_secret + "\n")
+            self.assertEqual(
+                hashlib.sha256(transferred_request.read_bytes()).hexdigest(),
+                expected_hashes["preflight-request.tar.gz"],
             )
             archived_commit = subprocess.run(
                 ["git", "get-tar-commit-id"],
@@ -2019,7 +2692,13 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
                 if value != "--" and not value.startswith("b-uh:")
             }
             self.assertEqual(
-                transferred, {"receiver-tree.tar", "TRACKED", "SHA256SUMS"}
+                transferred,
+                {
+                    "receiver-tree.tar",
+                    "TRACKED",
+                    "SHA256SUMS",
+                    "preflight-request.tar.gz",
+                },
             )
             self.assertFalse(any("bundle" in value for value in transferred))
             root_call = next(
@@ -2030,8 +2709,10 @@ elif any("/bin/bash -seu" in value for value in sys.argv[1:]):
             self.assertEqual(root_call["argv"][:2], ["-T", "b-uh"])
             root_command = root_call["argv"][2]
             self.assertIn(commit, root_command)
-            self.assertIn("/root/preflight-request.json", root_command)
+            self.assertIn("/tmp/buh-receiver-upgrade-", root_command)
+            self.assertIn("preflight-request.tar.gz", root_command)
             self.assertNotIn(secret, root_command)
+            self.assertNotIn(preflight_secret, root_command)
 
 
 class ReceiverExecutableContractTests(unittest.TestCase):

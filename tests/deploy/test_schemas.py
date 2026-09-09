@@ -52,9 +52,22 @@ class DeploymentSchemaContracts(unittest.TestCase):
         parser_fields = {field.name for field in dataclasses.fields(DeploymentRequest)}
         schema_fields = set(schema["properties"]) - {"schema_version"}
         self.assertEqual(parser_fields, schema_fields)
-        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(
+            set(schema["required"]),
+            set(schema["properties"]) - {"recovery_transition"},
+        )
         self.assertIs(schema["additionalProperties"], False)
-        self.assertEqual(schema["properties"]["schema_version"], {"const": 1})
+        self.assertEqual(schema["properties"]["schema_version"], {"enum": [1, 2]})
+        self.assertEqual(
+            schema["allOf"],
+            [
+                {
+                    "if": {"properties": {"schema_version": {"const": 2}}},
+                    "then": {"required": ["recovery_transition"]},
+                    "else": {"not": {"required": ["recovery_transition"]}},
+                }
+            ],
+        )
 
     def test_schema_identifiers_are_unique_and_versioned(self):
         paths = (

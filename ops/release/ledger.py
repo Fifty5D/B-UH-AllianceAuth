@@ -97,6 +97,26 @@ AMBIGUOUS_ATTRIBUTE_ASSIGNMENT_RE = (
     r"(unset|unspecified)($|[[:space:]])"
 )
 
+# Exact immutable releases created by the former deployment-equivalence bridge.
+# They remain replayable for append-only ledger history, while every other
+# non-immediate predecessor is rejected.
+LEGACY_DEPLOYMENT_BRIDGES = {
+    "0.5.2": {
+        "manifest_sha256": (
+            "76d8eb70c23f6145dba1264bc14f4719dee74dace3e66e11e4a00e7f256b981c"
+        ),
+        "release_commit": "d5e8db7e393f9596b98668ba9b50c8bb47bb3255",
+        "source_commit": "c282fa9ece625778b9100037636814909073607b",
+    },
+    "0.5.3": {
+        "manifest_sha256": (
+            "05c166a49c2b32501955326a6c29a80ed574604cc603975849289d18a4437270"
+        ),
+        "release_commit": "8827ac8ed9166e1baf67898b90c0f6fedfad1a51",
+        "source_commit": "f03a142004b31550b3b697a5b79ac5a592c1f975",
+    },
+}
+
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 RELEASE_REF_RE = re.compile(
     r"^refs/heads/release/platform-v"
@@ -1408,15 +1428,34 @@ def _validate_authoritative_plan_replay(
             raise LedgerError(
                 "Authoritative historical deployment_predecessor is malformed"
             )
-        expected_predecessor = {
-            key: planned_deployment_predecessor.get(key)
-            for key in (
-                "platform_version",
-                "source_commit",
-                "manifest_sha256",
-            )
+        legacy_fields = {
+            "manifest_sha256",
+            "path",
+            "payload_sha256",
+            "platform_version",
+            "source_commit",
         }
-    elif previous_manifest is not None:
+        if set(planned_deployment_predecessor) == legacy_fields:
+            expected_predecessor = {
+                key: planned_deployment_predecessor[key]
+                for key in (
+                    "manifest_sha256",
+                    "platform_version",
+                    "source_commit",
+                )
+            }
+            expected_recovery = None
+        else:
+            expected_predecessor = None
+            expected_recovery = {
+                key: value
+                for key, value in planned_deployment_predecessor.items()
+                if key != "path"
+            }
+    else:
+        expected_predecessor = None
+        expected_recovery = None
+    if expected_predecessor is None and previous_manifest is not None:
         previous_path = release_dir.parent / (
             f"v{previous_manifest['platform_version']}/RELEASE.json"
         )
@@ -1425,17 +1464,13 @@ def _validate_authoritative_plan_replay(
             "source_commit": previous_manifest["source_commit"],
             "manifest_sha256": sha256_file(previous_path),
         }
-    else:
-        expected_predecessor = None
     if manifest.get("previous_release") != expected_predecessor:
-        if planned_deployment_predecessor is None:
-            raise LedgerError(
-                "Release does not name the exact immediately preceding "
-                "verified release"
-            )
         raise LedgerError(
-            "Release deployment predecessor differs from its authoritative "
-            "historical plan"
+            "Release does not name the exact immediately preceding verified release"
+        )
+    if manifest.get("deployment_recovery") != expected_recovery:
+        raise LedgerError(
+            "Release deployment recovery differs from its authoritative historical plan"
         )
     if (
         not plan.get("release_required")
@@ -2417,6 +2452,15 @@ def verify_ledger(
             }
             _require_ancestor(root, previous_record["release_commit"], parent)
             if predecessor != expected_predecessor:
+                legacy = LEGACY_DEPLOYMENT_BRIDGES.get(str(version))
+                if legacy != {
+                    "manifest_sha256": manifest_digest,
+                    "release_commit": release_commit,
+                    "source_commit": manifest_source,
+                }:
+                    raise LedgerError(
+                        f"Release v{version} does not name its exact immediate predecessor"
+                    )
                 matches = [
                     (index, record)
                     for index, record in enumerate(records)
@@ -2429,7 +2473,7 @@ def verify_ledger(
                 ]
                 if len(matches) != 1:
                     raise LedgerError(
-                        f"Release v{version} deployment predecessor is not an exact "
+                        f"Historical release v{version} predecessor is not an exact "
                         "verified ledger release"
                     )
                 predecessor_index, predecessor_record = matches[0]
@@ -2444,19 +2488,16 @@ def verify_ledger(
                             / f"v{skipped_record['platform_version']}"
                         ) != payload:
                             raise LedgerError(
-                                f"Release v{version} cannot bridge over "
-                                f"deployment-changing release "
-                                f"v{skipped_record['platform_version']}"
+                                f"Historical release v{version} crosses changed "
+                                f"payload v{skipped_record['platform_version']}"
                             )
                     if deployment_payload_identity(release_dir) != payload:
                         raise LedgerError(
-                            f"Release v{version} reconciliation payload differs from "
-                            "its declared deployment predecessor"
+                            f"Historical release v{version} reconciliation payload changed"
                         )
                 except (OSError, ReleaseError) as exc:
                     raise LedgerError(
-                        f"Release v{version} deployment reconciliation cannot be "
-                        "verified"
+                        f"Historical release v{version} reconciliation cannot be verified"
                     ) from exc
 
         record = {

@@ -153,6 +153,31 @@ if verification is not None:
         raise SystemExit("The requested Platform v2 verification evidence is unsafe")
 selected["verification"] = verification
 
+release_recovery = data.get("release_recovery")
+if release_recovery is not None and (
+    not isinstance(release_recovery, dict)
+    or set(release_recovery) != {
+        "baseline_platform_version",
+        "policy_id",
+        "purpose",
+        "release_count",
+        "sha256",
+    }
+    or not re.fullmatch(
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",
+        release_recovery.get("baseline_platform_version", ""),
+    )
+    or release_recovery.get("policy_id")
+    != "production-v0.5.6-published-gap-20260907"
+    or release_recovery.get("purpose")
+    not in {"receiver-upgrade-preflight", "production-recovery"}
+    or type(release_recovery.get("release_count")) is not int
+    or not 3 <= release_recovery["release_count"] <= 9
+    or not re.fullmatch(r"[0-9a-f]{64}", release_recovery.get("sha256", ""))
+):
+    raise SystemExit("The requested Platform v2 recovery evidence is unsafe")
+selected["release_recovery"] = release_recovery
+
 rollback = data.get("rollback")
 if rollback is not None and (
     not isinstance(rollback, dict)

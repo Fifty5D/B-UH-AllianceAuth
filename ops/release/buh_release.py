@@ -30,6 +30,21 @@ from collections import defaultdict, deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+try:  # Support package imports and direct execution from this directory.
+    from .recovery_policy import (
+        RecoveryPolicyError,
+        load_policy as load_recovery_policy,
+        manifest_recovery,
+        validate_manifest_recovery,
+    )
+except ImportError:  # pragma: no cover - exercised by CLI integration tests.
+    from recovery_policy import (  # type: ignore[no-redef]
+        RecoveryPolicyError,
+        load_policy as load_recovery_policy,
+        manifest_recovery,
+        validate_manifest_recovery,
+    )
+
 
 SCHEMA_VERSION = 1
 PLAN_SCHEMA_V1 = 1
@@ -78,6 +93,17 @@ PLATFORM_INPUT_IGNORED_PARTS = {
     "__pycache__",
     "node_modules",
 }
+
+# These two immutable source commits used the former deployment-equivalence
+# reconciliation before the coordinated recovery policy existed. The current
+# planner recognizes them only so ledger verification can replay their exact
+# historical plans; no other source may select the legacy behavior.
+LEGACY_DEPLOYMENT_RECONCILIATION_SOURCES = frozenset(
+    {
+        "c282fa9ece625778b9100037636814909073607b",
+        "f03a142004b31550b3b697a5b79ac5a592c1f975",
+    }
+)
 
 
 class ReleaseError(ValueError):
@@ -1339,7 +1365,7 @@ def create_plan_v1(
             planned_dependency["git_blob_sha"] = prior["git_blob_sha"]
         dependency_artifacts.append(planned_dependency)
 
-    deployment_predecessor: dict[str, str] | None = None
+    deployment_predecessor: dict[str, Any] | None = None
     reconciliation_changes = [
         change for change in changes if change.deployment_predecessor is not None
     ]
@@ -1352,13 +1378,6 @@ def create_plan_v1(
         if len(changes) != 1 or directly_changed:
             raise ReleaseError(
                 "deployment_predecessor requires one platform-only fix"
-            )
-        if (
-            previous_build.get("registry_sha256") != registry.sha256
-            or previous_build.get("compatibility_sha256") != compatibility_sha
-        ):
-            raise ReleaseError(
-                "deployment_predecessor cannot cross registry or compatibility changes"
             )
         requested_version = SemVer.parse(reconciliation.deployment_predecessor)
         immediate_version = SemVer.parse(previous["platform_version"])
@@ -1374,38 +1393,102 @@ def create_plan_v1(
                 "Previous manifest path does not match its platform version"
             )
         immediate_dir = previous_manifest_path.parent
-        requested_dir = immediate_dir.parent / f"v{requested_version}"
         immediate_manifest = verify_release_dir(immediate_dir)
-        requested_manifest = verify_release_dir(requested_dir)
         if (
             immediate_manifest != previous
             or sha256_file(previous_manifest_path) != previous_manifest_sha
         ):
-            raise ReleaseError("Immediate release changed during reconciliation planning")
-        if (
-            requested_manifest["platform_id"] != registry.platform_id
-            or requested_manifest["platform_version"] != str(requested_version)
-        ):
-            raise ReleaseError(
-                "deployment_predecessor does not identify this platform release"
-            )
-        requested_payload = deployment_payload_identity(requested_dir)
-        if deployment_payload_identity(immediate_dir) != requested_payload:
-            raise ReleaseError(
-                "deployment_predecessor and immediate release are not "
-                "deployment-equivalent"
-            )
-        deployment_predecessor = {
-            "path": (
-                f"{registry.release_root}/v{requested_version}/RELEASE.json"
-            ),
-            "platform_version": str(requested_version),
-            "source_commit": requested_manifest["source_commit"],
-            "manifest_sha256": sha256_file(requested_dir / "RELEASE.json"),
-            "payload_sha256": _sha256_bytes(
-                _canonical_json_bytes(requested_payload)
-            ),
-        }
+            raise ReleaseError("Immediate release changed during recovery planning")
+        policy_path = repo_root / "ops" / "deploy" / "coordinated-recovery.json"
+        if not policy_path.exists():
+            if source_commit not in LEGACY_DEPLOYMENT_RECONCILIATION_SOURCES:
+                raise ReleaseError("Reviewed recovery policy is unavailable")
+            if (
+                previous_build.get("registry_sha256") != registry.sha256
+                or previous_build.get("compatibility_sha256") != compatibility_sha
+            ):
+                raise ReleaseError(
+                    "deployment_predecessor cannot cross registry or compatibility changes"
+                )
+            requested_dir = immediate_dir.parent / f"v{requested_version}"
+            requested_manifest = verify_release_dir(requested_dir)
+            if (
+                requested_manifest["platform_id"] != registry.platform_id
+                or requested_manifest["platform_version"] != str(requested_version)
+            ):
+                raise ReleaseError(
+                    "deployment_predecessor does not identify this platform release"
+                )
+            requested_payload = deployment_payload_identity(requested_dir)
+            if deployment_payload_identity(immediate_dir) != requested_payload:
+                raise ReleaseError(
+                    "deployment_predecessor and immediate release are not "
+                    "deployment-equivalent"
+                )
+            deployment_predecessor = {
+                "path": (
+                    f"{registry.release_root}/v{requested_version}/RELEASE.json"
+                ),
+                "platform_version": str(requested_version),
+                "source_commit": requested_manifest["source_commit"],
+                "manifest_sha256": sha256_file(requested_dir / "RELEASE.json"),
+                "payload_sha256": _sha256_bytes(
+                    _canonical_json_bytes(requested_payload)
+                ),
+            }
+        else:
+            try:
+                policy = load_recovery_policy(policy_path)
+                recovery = manifest_recovery(policy)
+            except RecoveryPolicyError as exc:
+                raise ReleaseError(str(exc)) from exc
+            if policy["repository"] != "Fifty5D/B-UH-AllianceAuth":
+                raise ReleaseError("Deployment recovery policy targets another repository")
+            if recovery["baseline"]["platform_version"] != str(requested_version):
+                raise ReleaseError(
+                    "deployment_predecessor does not match the reviewed recovery baseline"
+                )
+            releases = [recovery["baseline"], *recovery["intervening_releases"]]
+            if releases[-1]["platform_version"] != str(immediate_version):
+                raise ReleaseError(
+                    "Reviewed recovery chain does not end at the immediate release"
+                )
+            prior_identity: dict[str, str] | None = None
+            for index, identity in enumerate(releases):
+                release_path = immediate_dir.parent / f"v{identity['platform_version']}"
+                verified = verify_release_dir(release_path)
+                if (
+                    verified["platform_id"] != registry.platform_id
+                    or verified["platform_version"] != identity["platform_version"]
+                    or verified["source_commit"] != identity["source_commit"]
+                    or sha256_file(release_path / "RELEASE.json")
+                    != identity["manifest_sha256"]
+                ):
+                    raise ReleaseError(
+                        f"Reviewed recovery release {index} changed during planning"
+                    )
+                if verified["compatibility"]["sha256"] != compatibility_sha:
+                    raise ReleaseError(
+                        "Reviewed recovery chain crosses a compatibility boundary"
+                    )
+                if (
+                    prior_identity is not None
+                    and verified["previous_release"] != prior_identity
+                ):
+                    raise ReleaseError(
+                        "Reviewed recovery release chain is incomplete or reordered"
+                    )
+                prior_identity = {
+                    "manifest_sha256": identity["manifest_sha256"],
+                    "platform_version": identity["platform_version"],
+                    "source_commit": identity["source_commit"],
+                }
+            deployment_predecessor = {
+                "path": (
+                    f"{registry.release_root}/v{requested_version}/RELEASE.json"
+                ),
+                **recovery,
+            }
 
     return {
         "schema_version": PLAN_SCHEMA_V1,
@@ -1893,6 +1976,7 @@ def validate_manifest_data(manifest: Mapping[str, Any]) -> None:
             "platform_version",
             "source_commit",
             "previous_release",
+            "deployment_recovery",
             "build",
             "compatibility",
             "artifacts",
@@ -1949,6 +2033,24 @@ def validate_manifest_data(manifest: Mapping[str, Any]) -> None:
             previous["manifest_sha256"]
         ):
             raise ReleaseError("Invalid previous manifest SHA-256")
+    recovery = manifest.get("deployment_recovery")
+    if recovery is not None:
+        try:
+            normalized_recovery = validate_manifest_recovery(recovery)
+        except RecoveryPolicyError as exc:
+            raise ReleaseError(str(exc)) from exc
+        if normalized_recovery != recovery:
+            raise ReleaseError("Deployment recovery metadata is not canonical")
+        last = normalized_recovery["intervening_releases"][-1]
+        expected_previous = {
+            "manifest_sha256": last["manifest_sha256"],
+            "platform_version": last["platform_version"],
+            "source_commit": last["source_commit"],
+        }
+        if previous != expected_previous:
+            raise ReleaseError(
+                "Deployment recovery does not end at the immediate predecessor"
+            )
     build = manifest["build"]
     if not isinstance(build, dict):
         raise ReleaseError("build must be an object")
@@ -2214,54 +2316,53 @@ def _ordered_app_ids(app_plans: Sequence[Mapping[str, Any]]) -> list[str]:
 def _load_planned_deployment_predecessor(
     plan: Mapping[str, Any],
     repo_root: Path,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> dict[str, Any] | None:
     value = plan.get("deployment_predecessor")
     if value is None:
-        return None, None
+        return None
     if not isinstance(value, Mapping):
         raise ReleaseError("Planned deployment_predecessor must be an object")
-    _strict_keys(
-        value,
-        {
-            "path",
-            "platform_version",
-            "source_commit",
-            "manifest_sha256",
-            "payload_sha256",
-        },
-        "planned deployment_predecessor",
-        {
-            "path",
-            "platform_version",
-            "source_commit",
-            "manifest_sha256",
-            "payload_sha256",
-        },
-    )
-    version = SemVer.parse(value["platform_version"])
+    try:
+        policy = load_recovery_policy(
+            repo_root / "ops" / "deploy" / "coordinated-recovery.json"
+        )
+        recovery = manifest_recovery(policy)
+    except RecoveryPolicyError as exc:
+        raise ReleaseError(str(exc)) from exc
+    version = SemVer.parse(recovery["baseline"]["platform_version"])
     if version >= SemVer.parse(plan.get("platform_version")):
         raise ReleaseError(
             "Planned deployment_predecessor is not older than the target release"
         )
-    expected_path = (
-        f"{plan.get('release_root')}/v{version}/RELEASE.json"
-    )
-    if value["path"] != expected_path:
-        raise ReleaseError("Planned deployment_predecessor path is not canonical")
-    path = repo_root / PurePosixPath(expected_path)
-    if path.is_symlink() or path.name != "RELEASE.json":
-        raise ReleaseError("Planned deployment_predecessor path is unsafe")
-    manifest = verify_release_dir(path.parent)
-    if (
-        manifest["platform_version"] != str(version)
-        or manifest["source_commit"] != value["source_commit"]
-        or sha256_file(path) != value["manifest_sha256"]
+    expected_path = f"{plan.get('release_root')}/v{version}/RELEASE.json"
+    expected = {"path": expected_path, **recovery}
+    if dict(value) != expected:
+        raise ReleaseError("Planned deployment recovery identity changed")
+    previous: dict[str, str] | None = None
+    for index, identity in enumerate(
+        [recovery["baseline"], *recovery["intervening_releases"]]
     ):
-        raise ReleaseError("Planned deployment_predecessor identity changed")
-    payload = deployment_payload_identity(path.parent)
-    if _sha256_bytes(_canonical_json_bytes(payload)) != value["payload_sha256"]:
-        raise ReleaseError("Planned deployment_predecessor payload changed")
-    return manifest, payload
+        path = repo_root / PurePosixPath(
+            f"{plan.get('release_root')}/v{identity['platform_version']}/RELEASE.json"
+        )
+        if path.is_symlink() or path.name != "RELEASE.json":
+            raise ReleaseError("Planned deployment recovery path is unsafe")
+        manifest = verify_release_dir(path.parent)
+        if (
+            manifest["platform_version"] != identity["platform_version"]
+            or manifest["source_commit"] != identity["source_commit"]
+            or sha256_file(path) != identity["manifest_sha256"]
+            or (previous is not None and manifest["previous_release"] != previous)
+        ):
+            raise ReleaseError(
+                f"Planned deployment recovery release {index} changed"
+            )
+        previous = {
+            "manifest_sha256": identity["manifest_sha256"],
+            "platform_version": identity["platform_version"],
+            "source_commit": identity["source_commit"],
+        }
+    return recovery
 
 
 def assemble_release(
@@ -2281,9 +2382,7 @@ def assemble_release(
     if repo_root is None:
         raise ReleaseError("Release assembly requires the repository root")
     repo_root = repo_root.resolve()
-    deployment_manifest, deployment_payload = (
-        _load_planned_deployment_predecessor(plan, repo_root)
-    )
+    deployment_recovery = _load_planned_deployment_predecessor(plan, repo_root)
     output_dir.mkdir(parents=True, mode=0o755)
     built_used: set[Path] = set()
     artifacts: list[dict[str, Any]] = []
@@ -2461,13 +2560,7 @@ def assemble_release(
     install_path.write_bytes(_canonical_json_bytes(install_plan))
 
     previous_release = None
-    if deployment_manifest is not None:
-        previous_release = {
-            "platform_version": deployment_manifest["platform_version"],
-            "source_commit": deployment_manifest["source_commit"],
-            "manifest_sha256": plan["deployment_predecessor"]["manifest_sha256"],
-        }
-    elif plan.get("previous_manifest"):
+    if plan.get("previous_manifest"):
         previous_release = {
             "platform_version": plan["previous_platform_version"],
             "source_commit": plan["previous_manifest"]["source_commit"],
@@ -2479,6 +2572,11 @@ def assemble_release(
         "platform_version": plan["platform_version"],
         "source_commit": plan["source_commit"],
         "previous_release": previous_release,
+        **(
+            {"deployment_recovery": deployment_recovery}
+            if deployment_recovery is not None
+            else {}
+        ),
         "build": {
             **plan["build"],
             "test_run": plan.get("test_run"),
@@ -2518,13 +2616,6 @@ def assemble_release(
     sums = "".join(f"{sha256_file(path)}  {path.name}\n" for path in checked_files)
     (output_dir / "SHA256SUMS").write_bytes(sums.encode("ascii"))
     verify_release_dir(output_dir)
-    if (
-        deployment_payload is not None
-        and deployment_payload_identity(output_dir) != deployment_payload
-    ):
-        raise ReleaseError(
-            "Reconciled release is not deployment-equivalent to its predecessor"
-        )
     return output_dir
 
 

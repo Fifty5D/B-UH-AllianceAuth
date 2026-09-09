@@ -30,11 +30,15 @@ from ops.deploy.docker_host import (
     MAX_COMMAND_OUTPUT,
     DockerHost,
 )
+from ops.release import recovery_policy
 
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_IMAGE = (
     "ghcr.io/allianceauth/allianceauth:v5.2.0@sha256:" + "1" * 64
+)
+RETAINED_DISCORD_OWNER_LOG = (
+    ROOT / "tests/deploy/fixtures/discord-owner-50013-mainprocess.log"
 )
 
 
@@ -63,6 +67,116 @@ def simulated_root_owned_lstat(path: Path):
 
 def container_id(number: int) -> str:
     return f"{number:064x}"
+
+
+def discord_nickname_record(
+    *,
+    user: str = "Fifty5D",
+    process: str = "ForkPoolWorker-1",
+    operation: str = "update_nickname",
+    denied: str = "Discord HTTP 403, code 50013: Missing Permissions",
+    frames: int = 12,
+) -> str:
+    """Synthetic Alliance Auth 5.2.0 multi-line Celery logging record."""
+
+    lines = [
+        (
+            f"[2026-09-07 22:18:00,000: WARNING/{process}] [Discord Service] "
+            f"{operation} failed for user {user}, retrying in 60 secs"
+        ),
+        "Traceback (most recent call last):",
+        *[
+            f'  File "/usr/local/lib/python3.11/site-packages/fixture.py", line {index}, in call'
+            for index in range(frames)
+        ],
+        denied,
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@contextmanager
+def owner_log_environment(
+    host: DockerHost,
+    logs: dict[str, str] | None = None,
+    *,
+    changed_container: bool = False,
+    changed_image: bool = False,
+    rollback: bool = False,
+):
+    """Provide exact retained-container and per-container log boundaries."""
+
+    policy = recovery_policy.load_policy()
+    owner = policy["host_baseline"]["discord_owner"]
+    host.recovery_baseline_verified = True
+    host.recovery_discord_owner = (
+        owner["guild_id"],
+        owner["discord_user_id"],
+        owner["auth_username"],
+    )
+    worker_services = tuple(
+        service
+        for service in host.config.auth_services
+        if service not in {
+            host.config.gunicorn_service,
+            host.config.beat_service,
+        }
+    )
+    service_containers: dict[str, tuple[str, ...]] = {}
+    next_id = 20
+    for service in worker_services:
+        count = policy["host_baseline"]["auth_services"][service]["replicas"]
+        service_containers[service] = tuple(
+            container_id(index) for index in range(next_id, next_id + count)
+        )
+        next_id += count
+        host.auth_replica_counts[service] = count
+        host.previous_images[service] = (
+            policy["host_baseline"]["auth_services"][service]["image_id"],
+            f"fixture/{service}:old",
+        )
+    if changed_container:
+        service = worker_services[0]
+        values = list(service_containers[service])
+        values[0] = container_id(99)
+        service_containers[service] = tuple(values)
+    host.restart_baselines.update(
+        {
+            container: 0
+            for containers in service_containers.values()
+            for container in containers
+            if not changed_container or container != container_id(99)
+        }
+    )
+    supplied_logs = logs or {}
+
+    def running(service: str, **_kwargs):
+        return service_containers[service]
+
+    def command(arguments, **_kwargs):
+        container = arguments[-1]
+        if arguments[1] == "inspect":
+            service = next(
+                name
+                for name, containers in service_containers.items()
+                if container in containers
+            )
+            image = host.previous_images[service][0]
+            if changed_image and container == service_containers[worker_services[0]][0]:
+                image = "sha256:" + "f" * 64
+            restart = 0
+            return f"running|{image}|{restart}\n"
+        if arguments[1] == "logs":
+            return supplied_logs.get(container, "")
+        raise AssertionError(f"unexpected synthetic Docker command: {arguments!r}")
+
+    if rollback:
+        host.restart_baselines.clear()
+    with mock.patch.object(
+        host, "_running_service_containers", side_effect=running
+    ), mock.patch.object(host, "_run", side_effect=command), mock.patch.object(
+        host, "_compose", return_value=""
+    ):
+        yield service_containers
 
 
 def make_config(root: Path) -> ReceiverConfig:
@@ -147,6 +261,59 @@ def make_bundle(
         "django_apps": ["buh_moon_tax"],
     }
     return ValidatedBundle(root, root / "release", request, manifest, plan)
+
+
+def make_recovery_bundle(root: Path, *, bootstrap: bool = False) -> ValidatedBundle:
+    policy = recovery_policy.load_policy()
+    fixed = policy["published_releases"]
+    if bootstrap:
+        target = fixed[-1]
+        releases = fixed
+        purpose = "receiver-upgrade-preflight"
+        mode = "preflight"
+    else:
+        target = {
+            "manifest_sha256": "9" * 64,
+            "platform_version": "0.6.2",
+            "release_commit": "8" * 40,
+            "release_ref": "release/platform-v0.6.2",
+            "source_commit": "7" * 40,
+        }
+        releases = [*fixed, target]
+        purpose = "production-recovery"
+        mode = "deploy"
+    request = DeploymentRequest(
+        mode=mode,
+        repository=policy["repository"],
+        release_commit=target["release_commit"],
+        release_ref=target["release_ref"],
+        platform_version=target["platform_version"],
+        manifest_sha256=target["manifest_sha256"],
+        workflow_run_id="1234",
+        workflow_run_attempt=1,
+        recovery_transition={
+            "policy_id": policy["policy_id"],
+            "policy_sha256": recovery_policy.policy_sha256(),
+            "purpose": purpose,
+            "releases": releases,
+        },
+    )
+    manifest = dict(make_bundle(root).manifest)
+    previous = fixed[-2] if bootstrap else fixed[-1]
+    manifest.update(
+        {
+            "platform_version": target["platform_version"],
+            "source_commit": target["source_commit"],
+            "previous_release": {
+                "manifest_sha256": previous["manifest_sha256"],
+                "platform_version": previous["platform_version"],
+                "source_commit": previous["source_commit"],
+            },
+        }
+    )
+    if not bootstrap:
+        manifest["deployment_recovery"] = recovery_policy.manifest_recovery(policy)
+    return ValidatedBundle(root, root / "release", request, manifest, {})
 
 
 def write_host_files(config: ReceiverConfig) -> None:
@@ -705,6 +872,214 @@ class DockerHostContracts(unittest.TestCase):
             with self.assertRaisesRegex(DeploymentError, "not authorized"):
                 host._validate_release_transition(blocked)
 
+    def test_established_host_recovery_requires_the_exact_live_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = DockerHost(make_config(root))
+            bundle = make_recovery_bundle(root)
+            baseline = recovery_policy.load_policy()["baseline"]
+            current = {
+                "manifest_sha256": baseline["manifest_sha256"],
+                "platform_version": baseline["platform_version"],
+                "release_commit": baseline["release_commit"],
+                "source_commit": baseline["source_commit"],
+            }
+            with mock.patch.object(host, "_load_current", return_value=current):
+                host._validate_release_transition(bundle)
+
+            changed = {**current, "manifest_sha256": "0" * 64}
+            with mock.patch.object(
+                host, "_load_current", return_value=changed
+            ), self.assertRaisesRegex(DeploymentError, "baseline.*live state"):
+                host._validate_release_transition(bundle)
+
+            direct = make_bundle(root)
+            direct_manifest = dict(direct.manifest)
+            direct_manifest["previous_release"] = {
+                key: current[key]
+                for key in ("manifest_sha256", "platform_version", "source_commit")
+            }
+            stale = dataclasses.replace(
+                bundle,
+                manifest=direct_manifest,
+                request=dataclasses.replace(
+                    bundle.request,
+                    platform_version="0.5.7",
+                    release_ref="release/platform-v0.5.7",
+                ),
+            )
+            with mock.patch.object(
+                host, "_load_current", return_value=current
+            ), self.assertRaisesRegex(DeploymentError, "stale recovery"):
+                host._validate_release_transition(stale)
+
+    def test_recovery_host_baseline_binds_confirmed_topology_and_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            bundle = make_recovery_bundle(root)
+            policy = recovery_policy.load_policy()
+            expected = policy["host_baseline"]
+            host.previous_images = {
+                service: (identity["image_id"], f"aa-docker-{service}:latest")
+                for service, identity in expected["auth_services"].items()
+            }
+            host.auth_replica_counts = {
+                service: identity["replicas"]
+                for service, identity in expected["auth_services"].items()
+            }
+            marker = config.app_dir / "conf/buh-platform-v2/CURRENT.json"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                json.dumps(
+                    {
+                        "manifest_sha256": policy["baseline"]["manifest_sha256"],
+                        "platform_version": policy["baseline"]["platform_version"],
+                        "release_commit": policy["baseline"]["release_commit"],
+                        "schema_version": 1,
+                    }
+                ),
+                encoding="ascii",
+            )
+
+            def containers(service, **_kwargs):
+                if service in expected["auth_services"]:
+                    count = expected["auth_services"][service]["replicas"]
+                    return tuple(f"{service}-{index}" for index in range(count))
+                if service == expected["nginx"]["service"]:
+                    return (expected["nginx"]["container"],)
+                if service == expected["front_proxy"]["service"]:
+                    return (expected["front_proxy"]["container"],)
+                return ()
+
+            def command(_arguments, *, context, **_kwargs):
+                if "provenance verification" in context:
+                    return json.dumps(
+                        {
+                            "com.b-uh.platform.source": policy["baseline"][
+                                "source_commit"
+                            ],
+                            "com.b-uh.platform.version": policy["baseline"][
+                                "platform_version"
+                            ],
+                        }
+                    )
+                key = "nginx" if "nginx" in context else "front_proxy"
+                identity = expected[key]
+                return (
+                    f"/{identity['container']}|{identity['image_id']}|running|0\n"
+                )
+
+            local = config.app_dir / config.local_settings
+            real_stat = Path.stat
+
+            def stat_with_confirmed_owner(path, *args, **kwargs):
+                details = real_stat(path, *args, **kwargs)
+                if path != local:
+                    return details
+                return SimpleNamespace(
+                    st_mode=(details.st_mode & ~0o777) | 0o640,
+                    st_uid=0,
+                    st_gid=61000,
+                )
+
+            owner = expected["discord_owner"]
+            owner_result = json.dumps(
+                {
+                    "configured": owner["discord_user_id"],
+                    "guild": owner["guild_id"],
+                    "uid": owner["discord_user_id"],
+                    "username": owner["auth_username"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            with mock.patch.object(
+                host,
+                "_compose_files",
+                return_value=tuple(
+                    Path(item)
+                    for item in expected["compose_files_after_activation"]
+                ),
+            ), mock.patch.object(
+                host, "_running_service_containers", side_effect=containers
+            ), mock.patch.object(
+                host, "_run", side_effect=command
+            ), mock.patch.object(
+                host, "_manage_image", return_value=owner_result
+            ), mock.patch.object(Path, "stat", stat_with_confirmed_owner):
+                host._validate_recovery_host_baseline(bundle)
+            self.assertTrue(host.recovery_baseline_verified)
+            self.assertEqual(
+                host.recovery_discord_owner,
+                (
+                    owner["guild_id"],
+                    owner["discord_user_id"],
+                    owner["auth_username"],
+                ),
+            )
+
+            host.recovery_baseline_verified = False
+            host.recovery_discord_owner = None
+            changed_owner_result = json.dumps(
+                {**json.loads(owner_result), "guild": "changed-guild"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            with mock.patch.object(
+                host,
+                "_compose_files",
+                return_value=tuple(
+                    Path(item)
+                    for item in expected["compose_files_after_activation"]
+                ),
+            ), mock.patch.object(
+                host, "_running_service_containers", side_effect=containers
+            ), mock.patch.object(
+                host, "_run", side_effect=command
+            ), mock.patch.object(
+                host, "_manage_image", return_value=changed_owner_result
+            ), mock.patch.object(
+                Path, "stat", stat_with_confirmed_owner
+            ), self.assertRaisesRegex(DeploymentError, "owner association changed"):
+                host._validate_recovery_host_baseline(bundle)
+
+            host.recovery_baseline_verified = False
+            bootstrap_bundle = make_recovery_bundle(root, bootstrap=True)
+            with mock.patch.object(
+                host,
+                "_compose_files",
+                return_value=tuple(
+                    Path(item)
+                    for item in expected["compose_files_before_activation"]
+                ),
+            ), mock.patch.object(
+                host, "_running_service_containers", side_effect=containers
+            ), mock.patch.object(
+                host, "_run", side_effect=command
+            ), mock.patch.object(
+                host, "_manage_image", return_value=owner_result
+            ), mock.patch.object(Path, "stat", stat_with_confirmed_owner):
+                host._validate_recovery_host_baseline(bootstrap_bundle)
+            self.assertTrue(host.recovery_baseline_verified)
+
+            host.recovery_baseline_verified = False
+            host.previous_images[config.beat_service] = (
+                "sha256:" + "0" * 64,
+                "changed",
+            )
+            with mock.patch.object(
+                host,
+                "_compose_files",
+                return_value=tuple(
+                    Path(item)
+                    for item in expected["compose_files_after_activation"]
+                ),
+            ), self.assertRaisesRegex(DeploymentError, "image or replica baseline"):
+                host._validate_recovery_host_baseline(bundle)
+
     def test_runtime_digest_or_host_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1245,6 +1620,8 @@ class DockerHostContracts(unittest.TestCase):
             host.original_dockerfile.write_text("FROM restored\n", encoding="utf-8")
             live_settings = config.app_dir / config.local_settings
             host.original_local_settings.write_bytes(live_settings.read_bytes())
+            if os.name != "nt":
+                live_settings.chmod(0o640)
             details = live_settings.stat()
             host.original_local_settings_metadata = (
                 details.st_uid,
@@ -1433,6 +1810,69 @@ class DockerHostContracts(unittest.TestCase):
                 ),
             )
             self.assertNotIn(config.gunicorn_service, compose.call_args_list[0].args)
+
+    def test_recovery_worker_cutover_scans_owner_before_and_strictly_after_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            host = DockerHost(config)
+            host.recovery_baseline_verified = True
+            host.auth_replica_counts = {
+                service: (5 if service == config.worker_service else 1)
+                for service in config.auth_services
+            }
+            host.candidate_image_ids = {
+                service: "sha256:" + str(index) * 64
+                for index, service in enumerate(config.auth_services, start=1)
+            }
+            host.candidate_web_slots = ("candidate-slot",)
+            replaced = tuple(
+                service
+                for service in config.auth_services
+                if service != config.gunicorn_service
+            )
+            with mock.patch.object(host, "_compose", return_value=""), mock.patch.object(
+                host, "_wait_for_compose_services"
+            ), mock.patch.object(host, "_require_live_images"), mock.patch.object(
+                host, "_version_probe"
+            ), mock.patch.object(host, "_celery_health"), mock.patch.object(
+                host, "_scan_new_logs", return_value=()
+            ) as scan:
+                host.replace_workers(make_recovery_bundle(root))
+
+            self.assertEqual(
+                scan.call_args_list,
+                [
+                    mock.call(
+                        (*config.auth_services, *host.candidate_web_slots),
+                        owner_transition_phase="worker-cutover",
+                    ),
+                    mock.call((*replaced, *host.candidate_web_slots)),
+                ],
+            )
+
+    def test_recovery_candidate_health_uses_only_the_old_worker_owner_phase(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            host = DockerHost(config)
+            host.recovery_baseline_verified = True
+            host.candidate_image_ids = {config.gunicorn_service: "sha256:" + "1" * 64}
+            host.auth_replica_counts = {service: 1 for service in config.auth_services}
+            host.candidate_web_slots = ("candidate-slot",)
+            host.previous_web_slots = ("previous-slot",)
+            with mock.patch.object(host, "_start_web_slots"), mock.patch.object(
+                host, "_containers_healthy", return_value=True
+            ), mock.patch.object(host, "_verify_previous_static_fallback"), mock.patch.object(
+                host, "_candidate_runtime_checks"
+            ), mock.patch.object(host, "_redis_health"), mock.patch.object(
+                host, "_celery_health"
+            ), mock.patch.object(host, "_scan_new_logs", return_value=()) as scan:
+                host.candidate_health(make_recovery_bundle(root))
+            scan.assert_called_once_with(
+                (*config.auth_services, "candidate-slot", "previous-slot"),
+                owner_transition_phase="candidate-health",
+            )
 
     def test_worker_replacement_fails_before_mutation_when_beat_is_scaled(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1956,7 +2396,7 @@ class DockerHostContracts(unittest.TestCase):
             ), mock.patch.object(
                 host,
                 "_verify_restored",
-                side_effect=lambda _services: events.append("verify-restored"),
+                side_effect=lambda _bundle, _services: events.append("verify-restored"),
             ), mock.patch.object(
                 host,
                 "_remove_web_slots",
@@ -2396,7 +2836,7 @@ class DockerHostContracts(unittest.TestCase):
             ), mock.patch.object(
                 host,
                 "_verify_restored",
-                side_effect=lambda _services: calls.append("verify"),
+                side_effect=lambda _bundle, _services: calls.append("verify"),
             ):
                 recovery = host.rollback(make_bundle(root), "stabilized")
 
@@ -2478,7 +2918,7 @@ class DockerHostContracts(unittest.TestCase):
             ), mock.patch.object(
                 host,
                 "_verify_restored",
-                side_effect=lambda _services: events.append("verify"),
+                side_effect=lambda _bundle, _services: events.append("verify"),
             ), mock.patch.object(host, "_remove_web_slots") as remove, self.assertRaisesRegex(
                 DeploymentError, "traffic-first rollback smoke"
             ):
@@ -2666,10 +3106,198 @@ class DockerHostContracts(unittest.TestCase):
                 DeploymentError, "nginx configuration failed"
             ):
                 host._scan_new_logs(config.auth_services)
-            arguments = compose.call_args.args
-            self.assertIn(config.proxy_service, arguments)
-            self.assertIn(config.database_service, arguments)
-            self.assertIn(config.redis_service, arguments)
+            scanned = {call.args[-1] for call in compose.call_args_list}
+            self.assertTrue(
+                {
+                    config.proxy_service,
+                    config.database_service,
+                    config.redis_service,
+                }.issubset(scanned)
+            )
+
+    def test_owner_nickname_records_are_bound_to_old_container_process_and_phase(self):
+        policy = recovery_policy.load_policy()
+        guild = policy["host_baseline"]["discord_owner"]["guild_id"]
+        retained = RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
+        retained_retries = "".join(
+            retained.replace("04:50:00", timestamp)
+            for timestamp in ("04:50:00", "04:51:00", "04:52:00")
+        )
+        cases = (
+            ("fork-pool", discord_nickname_record(frames=40), "ForkPoolWorker-1", "celery"),
+            (
+                "main-process",
+                discord_nickname_record(process="MainProcess", frames=40),
+                "MainProcess",
+                "celery",
+            ),
+            ("retained-production", retained, "MainProcess", "allianceauth,celery"),
+            (
+                "retained-production-retries",
+                retained_retries,
+                "MainProcess",
+                "allianceauth,celery",
+            ),
+        )
+        for phase in ("candidate-health", "worker-cutover", "rollback"):
+            for name, record, process, formats in cases:
+                with (
+                    self.subTest(phase=phase, record=name),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    config = make_config(Path(temporary))
+                    host = DockerHost(config)
+                    container = container_id(20)
+                    with owner_log_environment(
+                        host,
+                        {container: record},
+                        rollback=phase == "rollback",
+                    ):
+                        findings = host._scan_new_logs(
+                            config.auth_services, owner_transition_phase=phase
+                        )
+                    self.assertEqual(len(findings), 1)
+                    self.assertIn(
+                        f"retained {config.worker_service}/{container[:12]}",
+                        findings[0],
+                    )
+                    self.assertIn(f"process {process}", findings[0])
+                    self.assertIn(f"formats {formats}", findings[0])
+                    self.assertIn(f"guild {guild}", findings[0])
+
+    def test_retained_owner_record_near_matches_remain_fatal(self):
+        retained = RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
+        cases = {
+            "another-member": retained.replace("user Fifty5D", "user OrdinaryMember"),
+            "role-operation": retained.replace(
+                "update_nickname failed", "update_groups failed"
+            ),
+            "unrelated-error": retained
+            + "[2026-09-07 04:50:00,226: ERROR/MainProcess] unrelated failure\n",
+            "wrong-member-id": retained.replace(
+                "318985508913020930", "318985508913020931"
+            ),
+            "wrong-guild-id": retained.replace(
+                "1521272563626672198", "1521272563626672199"
+            ),
+        }
+        for name, record in cases.items():
+            with (
+                self.subTest(case=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                config = make_config(Path(temporary))
+                host = DockerHost(config)
+                container = container_id(20)
+                with owner_log_environment(
+                    host,
+                    {container: record},
+                ), self.assertRaisesRegex(
+                    DeploymentError, "fatal AllianceAuth log"
+                ):
+                    host._scan_new_logs(
+                        config.auth_services,
+                        owner_transition_phase="candidate-health",
+                    )
+
+    def test_owner_transition_rejects_ambiguous_member_role_repeated_and_transient_records(self):
+        owner = discord_nickname_record(frames=4)
+        owner_prefix = "\n".join(owner.splitlines()[:-1]) + "\n"
+        member = discord_nickname_record(user="OrdinaryMember", frames=2)
+        role = discord_nickname_record(operation="update_groups", frames=2)
+        transient = discord_nickname_record(
+            denied="Discord HTTP 429: transient rate limit", frames=2
+        )
+        unpaired = owner_prefix
+        repeated_unpaired = owner + unpaired
+        duplicate_denied = owner + "Discord HTTP 403, code 50013: Missing Permissions\n"
+        interleaved = owner_prefix + member
+        cases = {
+            "another-member": member,
+            "role-operation": role,
+            "transient": transient,
+            "unpaired": unpaired,
+            "repeated-unpaired": repeated_unpaired,
+            "duplicate-denial": duplicate_denied,
+            "interleaved": interleaved,
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                config = make_config(Path(temporary))
+                host = DockerHost(config)
+                container = container_id(20)
+                with owner_log_environment(host, {container: text}), self.assertRaisesRegex(
+                    DeploymentError, "fatal AllianceAuth log"
+                ):
+                    host._scan_new_logs(
+                        config.auth_services, owner_transition_phase="candidate-health"
+                    )
+
+    def test_owner_transition_rejects_changed_association_container_image_and_candidate(self):
+        cases = ("association", "container", "image", "candidate")
+        for name in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                config = make_config(Path(temporary))
+                host = DockerHost(config)
+                candidate_logs = (
+                    {"candidate-slot": discord_nickname_record()}
+                    if name == "candidate"
+                    else None
+                )
+                with owner_log_environment(
+                    host,
+                    candidate_logs,
+                    changed_container=name == "container",
+                    changed_image=name == "image",
+                ):
+                    if name == "association":
+                        host.recovery_discord_owner = (
+                            "changed-guild",
+                            "318985508913020930",
+                            "Fifty5D",
+                        )
+                    requested = (
+                        (*config.auth_services, "candidate-slot")
+                        if name == "candidate"
+                        else config.auth_services
+                    )
+                    with self.assertRaises(DeploymentError):
+                        host._scan_new_logs(
+                            requested, owner_transition_phase="candidate-health"
+                        )
+
+    def test_owner_transition_ends_after_worker_replacement_and_is_retained_in_health(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            host = DockerHost(config)
+            container = container_id(20)
+            record = discord_nickname_record(frames=8)
+            host.backup_path = root / "evidence"
+            host.backup_path.mkdir()
+            bundle = make_recovery_bundle(root)
+            with owner_log_environment(host, {container: record}):
+                findings = host._scan_new_logs(
+                    config.auth_services, owner_transition_phase="worker-cutover"
+                )
+            host._retain_transition_log_findings(bundle, findings)
+            with mock.patch.object(
+                host, "_functional_health", return_value=()
+            ), mock.patch(
+                "ops.deploy.docker_host.time.monotonic", side_effect=(0, 300)
+            ):
+                evidence = host.stabilize(bundle)
+            report = json.loads((host.backup_path / "HEALTH.json").read_text())
+            self.assertEqual(evidence["allowed_log_findings"], 1)
+            self.assertEqual(report["allowed_log_findings"], list(findings))
+
+            def compose(*arguments, **_kwargs):
+                return record if arguments[-1] == config.worker_service else ""
+
+            with mock.patch.object(
+                host, "_compose", side_effect=compose
+            ), self.assertRaisesRegex(DeploymentError, "fatal AllianceAuth log"):
+                host._scan_new_logs(config.auth_services)
 
     def test_exact_discord_permission_warning_is_visible_but_near_matches_fail(self):
         with tempfile.TemporaryDirectory() as temporary:

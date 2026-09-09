@@ -1,0 +1,7 @@
+services:
+  nginx:
+    # The read-only host report resolved the live nginx:stable reference to this
+    # exact local image. Bootstrap commands use --pull never and recheck .Image.
+    image: sha256:46ccc48fbb1f5a43167f2ee2c279c122b96eec5d976e7f4e1e0780f59a51b4d6
+    volumes:
+      - ./conf/buh-platform-v2/nginx:/etc/nginx/buh-platform-v2:ro

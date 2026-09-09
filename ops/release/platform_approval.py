@@ -1245,7 +1245,14 @@ def verify_artifact(report: Mapping[str, Any], root: Path) -> None:
         attempt_report = json.loads(lines[1]) if len(lines) == 2 else None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ApprovalError("Downloaded preflight evidence is unreadable") from exc
-    if receiver != {
+    receiver_recovery = (
+        receiver.get("recovery_transition_sha256")
+        if isinstance(receiver, dict)
+        else None
+    )
+    receiver_without_recovery = dict(receiver) if isinstance(receiver, dict) else {}
+    receiver_without_recovery.pop("recovery_transition_sha256", None)
+    if receiver_without_recovery != {
         "manifest_sha256": expected["manifest_sha256"],
         "platform_version": expected["platform_version"],
         "result": "preflight-passed",
@@ -1266,6 +1273,17 @@ def verify_artifact(report: Mapping[str, Any], root: Path) -> None:
         or attempt_report.get("manifest_sha256") != expected["manifest_sha256"]
     ):
         raise ApprovalError("Observer evidence does not prove the exact preflight")
+    release_recovery = attempt_report.get("release_recovery")
+    if release_recovery is None:
+        if receiver_recovery is not None:
+            raise ApprovalError("Preflight recovery evidence is incomplete")
+    elif (
+        not isinstance(release_recovery, dict)
+        or release_recovery.get("sha256") != receiver_recovery
+        or not isinstance(receiver_recovery, str)
+        or NONCE_RE.fullmatch(receiver_recovery) is None
+    ):
+        raise ApprovalError("Preflight recovery evidence does not agree")
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:

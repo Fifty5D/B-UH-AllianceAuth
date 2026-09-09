@@ -1050,16 +1050,7 @@ jobs:
           previous = recomputed.get("previous_manifest")
           deployment_predecessor = recomputed.get("deployment_predecessor")
           expected_previous = None
-          if deployment_predecessor is not None:
-              expected_previous = {
-                  key: deployment_predecessor[key]
-                  for key in (
-                      "platform_version",
-                      "source_commit",
-                      "manifest_sha256",
-                  )
-              }
-          elif previous is not None:
+          if previous is not None:
               expected_previous = {
                   "platform_version": recomputed["previous_platform_version"],
                   "source_commit": previous["source_commit"],
@@ -1067,6 +1058,15 @@ jobs:
               }
           if manifest.get("previous_release") != expected_previous:
               raise SystemExit("Candidate previous-release identity differs from the plan")
+          expected_recovery = None
+          if deployment_predecessor is not None:
+              expected_recovery = {
+                  key: value
+                  for key, value in deployment_predecessor.items()
+                  if key != "path"
+              }
+          if manifest.get("deployment_recovery") != expected_recovery:
+              raise SystemExit("Candidate deployment recovery differs from the plan")
 
           artifacts = {item["component"]: item for item in manifest["artifacts"]}
           expected_components = {
@@ -1991,21 +1991,19 @@ jobs:
               and .previous_release == (
                 if $state.bootstrap then
                   null
-                elif $candidate.deployment_predecessor != null then
-                  {
-                    manifest_sha256:
-                      $candidate.deployment_predecessor.manifest_sha256,
-                    platform_version:
-                      $candidate.deployment_predecessor.platform_version,
-                    source_commit:
-                      $candidate.deployment_predecessor.source_commit
-                  }
                 else
                   {
                     manifest_sha256: $state.latest.manifest_sha256,
                     platform_version: $state.latest.platform_version,
                     source_commit: $state.latest.source_commit
                   }
+                end
+              )
+              and .deployment_recovery == (
+                if $candidate.deployment_predecessor == null then
+                  null
+                else
+                  ($candidate.deployment_predecessor | del(.path))
                 end
               )
               and (.artifacts | type == "array" and length > 0)

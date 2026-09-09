@@ -828,6 +828,70 @@ class PlatformApprovalTests(unittest.TestCase):
             ):
                 approval.verify_artifact(report, root)
 
+    def test_verify_artifact_requires_matching_recovery_identity(self) -> None:
+        report = {
+            "manifest_sha256": MANIFEST,
+            "platform_version": VERSION,
+            "preflight_run_attempt": 1,
+            "preflight_run_id": PREFLIGHT_RUN,
+            "preflight_artifact_id": ARTIFACT_ID,
+            "preflight_artifact_digest": ARTIFACT_DIGEST,
+            "release_commit": RELEASE,
+            "repository": REPOSITORY,
+            "schema_version": 2,
+            "source_commit": SOURCE,
+        }
+        recovery_digest = "d" * 64
+        receiver = {
+            "manifest_sha256": MANIFEST,
+            "platform_version": VERSION,
+            "recovery_transition_sha256": recovery_digest,
+            "result": "preflight-passed",
+            "schema_version": 1,
+        }
+        attempt = {
+            "attempt_id": f"gh-{PREFLIGHT_RUN}-1",
+            "manifest_sha256": MANIFEST,
+            "operation": "preflight",
+            "platform_version": VERSION,
+            "release_commit": RELEASE,
+            "release_recovery": {
+                "baseline_platform_version": "0.5.6",
+                "policy_id": "production-v0.5.6-published-gap-20260907",
+                "purpose": "production-recovery",
+                "release_count": 4,
+                "sha256": recovery_digest,
+            },
+            "repository": REPOSITORY,
+            "result": "success",
+            "schema_version": 1,
+            "source_commit": SOURCE,
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "receiver.txt").write_text(
+                json.dumps(receiver, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            (root / "attempt.txt").write_text(
+                "B-UH Platform v2 guarded attempt report\n"
+                + json.dumps(attempt, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "diagnostics.txt").write_text(
+                "bounded diagnostics\n", encoding="utf-8"
+            )
+            approval.verify_artifact(report, root)
+
+            receiver["recovery_transition_sha256"] = "e" * 64
+            (root / "receiver.txt").write_text(
+                json.dumps(receiver, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(approval.ApprovalError, "does not agree"):
+                approval.verify_artifact(report, root)
+
     def test_ready_rejects_an_unbound_artifact_without_network_access(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = approval._config(

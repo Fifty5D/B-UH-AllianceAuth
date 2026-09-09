@@ -43,6 +43,7 @@ platform_build_inputs = [
   "tests/platform/**/*",
   "tests/release/**/*",
   "tests/upgrade/**/*",
+  "setup/Prepare-BUH-PlatformV2Preflight.ps1",
 ]
 
 [[dependencies]]
