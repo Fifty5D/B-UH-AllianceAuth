@@ -54,6 +54,12 @@ RECOVERY_ARTIFACT = (
 HISTORICAL_REQUIRED_RUN = 668
 HISTORICAL_REQUIRED_CHECK = 992
 RECOVERED_REQUIRED_CHECK = 993
+HISTORICAL_REQUIRED_SUITE = 994
+RECOVERED_REQUIRED_SUITE = 995
+HISTORICAL_REQUIRED_NODE = "CR_historical_required_check"
+RECOVERED_REQUIRED_NODE = "CR_recovered_required_check"
+HISTORICAL_REQUIRED_COMPLETED_AT = "2026-09-09T01:09:38Z"
+RECOVERED_REQUIRED_COMPLETED_AT = "2026-09-09T12:05:00Z"
 
 
 def _response(value: Any) -> sync.HttpResponse:
@@ -314,13 +320,17 @@ def _recovery_ready_payload() -> dict[str, Any]:
                 "app_id": contract["required_check"]["app_id"],
                 "app_slug": contract["required_check"]["app_slug"],
                 "binding_digest": binding_digest,
+                "check_run_node_id": RECOVERED_REQUIRED_NODE,
                 "check_run_id": RECOVERED_REQUIRED_CHECK,
+                "check_suite_id": RECOVERED_REQUIRED_SUITE,
+                "completed_at": RECOVERED_REQUIRED_COMPLETED_AT,
                 "context": contract["required_check"]["context"],
                 "details_url": check_payload["details_url"],
                 "external_id": external_id,
                 "head_sha": RELEASE,
                 "historical_check_run_id": HISTORICAL_REQUIRED_CHECK,
                 "lanes": lanes,
+                "required_pull_request": PR_NUMBER,
             },
         },
         "release_commit": RELEASE,
@@ -652,6 +662,9 @@ class RecoveryTransport(ApprovalTransport):
         self.published_check_payload: dict[str, Any] | None = None
         self.required_check_published = not ready
         self.latest_required_check_id: int | None = None
+        self.post_publication_required_checks: list[dict[str, Any]] = []
+        self.non_required_check_nodes: set[str] = set()
+        self.recovered_check_overrides: dict[str, Any] = {}
         self.branch_checks = [
             {
                 "app_id": approval.validation_recovery.REQUIRED_CHECK_APP_ID,
@@ -741,6 +754,7 @@ class RecoveryTransport(ApprovalTransport):
                     "slug": approval.validation_recovery.REQUIRED_CHECK_APP_SLUG,
                 },
                 "conclusion": "failure",
+                "completed_at": HISTORICAL_REQUIRED_COMPLETED_AT,
                 "details_url": (
                     f"https://github.com/{REPOSITORY}/actions/runs/"
                     f"{HISTORICAL_REQUIRED_RUN}/job/{HISTORICAL_REQUIRED_CHECK}"
@@ -749,6 +763,8 @@ class RecoveryTransport(ApprovalTransport):
                 "head_sha": RELEASE,
                 "id": HISTORICAL_REQUIRED_CHECK,
                 "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
+                "node_id": HISTORICAL_REQUIRED_NODE,
+                "check_suite": {"id": HISTORICAL_REQUIRED_SUITE},
                 "pull_requests": [
                     {
                         "base": {"ref": "main"},
@@ -756,6 +772,7 @@ class RecoveryTransport(ApprovalTransport):
                         "number": PR_NUMBER,
                     }
                 ],
+                "started_at": "2026-09-09T01:09:34Z",
                 "status": "completed",
             }
         payload = self.published_check_payload
@@ -784,13 +801,16 @@ class RecoveryTransport(ApprovalTransport):
                 },
                 expected["lanes"],
             )
-        return {
+        value = {
             **copy.deepcopy(payload),
             "app": {
                 "id": approval.validation_recovery.REQUIRED_CHECK_APP_ID,
                 "slug": approval.validation_recovery.REQUIRED_CHECK_APP_SLUG,
             },
+            "check_suite": {"id": RECOVERED_REQUIRED_SUITE},
+            "completed_at": RECOVERED_REQUIRED_COMPLETED_AT,
             "id": RECOVERED_REQUIRED_CHECK,
+            "node_id": RECOVERED_REQUIRED_NODE,
             "pull_requests": [
                 {
                     "base": {"ref": "main"},
@@ -798,7 +818,10 @@ class RecoveryTransport(ApprovalTransport):
                     "number": PR_NUMBER,
                 }
             ],
+            "started_at": "2026-09-09T12:04:59Z",
         }
+        value.update(copy.deepcopy(self.recovered_check_overrides))
+        return value
 
     def _recovery_jobs(self) -> list[dict[str, Any]]:
         jobs = [
@@ -853,6 +876,58 @@ class RecoveryTransport(ApprovalTransport):
         parsed = urllib.parse.urlsplit(url)
         suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
         self.calls.append((method, parsed.path))
+        if parsed.path == "/graphql":
+            if method != "POST" or body is None:
+                raise AssertionError("unexpected GraphQL request")
+            request = json.loads(body)
+            if "query RequiredRecoveryCheck" not in request.get("query", ""):
+                raise AssertionError("unexpected GraphQL operation")
+            variables = request.get("variables")
+            if (
+                not isinstance(variables, dict)
+                or set(variables)
+                != {"checkRunId", "owner", "repository", "pullRequest"}
+                or variables.get("owner") != OWNER
+                or variables.get("repository") != REPOSITORY.split("/", 1)[1]
+                or variables.get("pullRequest") != PR_NUMBER
+            ):
+                raise AssertionError(f"unexpected GraphQL variables: {variables}")
+            node_id = variables["checkRunId"]
+            if node_id == HISTORICAL_REQUIRED_NODE:
+                check = self._required_check(historical=True)
+            elif node_id == RECOVERED_REQUIRED_NODE:
+                check = self._required_check(historical=False)
+            else:
+                raise AssertionError(f"unexpected check node: {node_id}")
+            return _response(
+                {
+                    "data": {
+                        "node": {
+                            "__typename": "CheckRun",
+                            "checkSuite": {
+                                "commit": {"oid": RELEASE},
+                                "databaseId": check["check_suite"]["id"],
+                            },
+                            "conclusion": check["conclusion"].upper(),
+                            "databaseId": check["id"],
+                            "detailsUrl": check["details_url"],
+                            "externalId": check["external_id"],
+                            "isRequired": node_id not in self.non_required_check_nodes,
+                            "name": check["name"],
+                            "repository": {"nameWithOwner": REPOSITORY},
+                            "status": check["status"].upper(),
+                        },
+                        "repository": {
+                            "nameWithOwner": REPOSITORY,
+                            "pullRequest": {
+                                "headRefOid": RELEASE,
+                                "number": PR_NUMBER,
+                                "state": "OPEN" if self.ready_mode else "MERGED",
+                            },
+                        },
+                    }
+                }
+            )
         if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
             pr = copy.deepcopy(_event()["pull_request"])
             pr["state"] = "open" if self.ready_mode else "closed"
@@ -1045,16 +1120,18 @@ class RecoveryTransport(ApprovalTransport):
                     else HISTORICAL_REQUIRED_CHECK
                 )
             if filter_value == "latest":
-                selected = (
-                    recovered
-                    if current_id == RECOVERED_REQUIRED_CHECK
-                    else historical
+                values = [historical]
+                if current_id == RECOVERED_REQUIRED_CHECK:
+                    values.insert(0, recovered)
+                    values = [*self.post_publication_required_checks, *values]
+                return _response(
+                    {"check_runs": values, "total_count": len(values)}
                 )
-                return _response({"check_runs": [selected], "total_count": 1})
             if filter_value == "all":
                 values = [historical]
                 if self.required_check_published:
                     values.insert(0, recovered)
+                    values = [*self.post_publication_required_checks, *values]
                 return _response(
                     {"check_runs": values, "total_count": len(values)}
                 )
@@ -1864,6 +1941,16 @@ class PlatformApprovalTests(unittest.TestCase):
             required_check["historical_check_run_id"],
             HISTORICAL_REQUIRED_CHECK,
         )
+        self.assertEqual(
+            required_check["check_run_node_id"], RECOVERED_REQUIRED_NODE
+        )
+        self.assertEqual(
+            required_check["check_suite_id"], RECOVERED_REQUIRED_SUITE
+        )
+        self.assertEqual(
+            required_check["completed_at"], RECOVERED_REQUIRED_COMPLETED_AT
+        )
+        self.assertEqual(required_check["required_pull_request"], PR_NUMBER)
         self.assertEqual(required_check["lanes"], _recovery_lane_records())
         self.assertEqual(
             transport.published_check_payload["head_sha"], RELEASE
@@ -1884,6 +1971,81 @@ class PlatformApprovalTests(unittest.TestCase):
                 approval.RECOVERY_APPROVAL_PREFIX
             )
         )
+        self.assertGreaterEqual(transport.calls.count(("POST", "/graphql")), 3)
+
+    def test_recovery_required_check_accepts_multiple_latest_suites(self):
+        transport = RecoveryTransport(ready=True)
+        report = self.recover_ready_with(transport)
+        required_check = report["ready"]["recovery_validation"]["required_check"]
+        self.assertEqual(required_check["check_run_id"], RECOVERED_REQUIRED_CHECK)
+        self.assertEqual(required_check["check_suite_id"], RECOVERED_REQUIRED_SUITE)
+        self.assertNotEqual(RECOVERED_REQUIRED_SUITE, HISTORICAL_REQUIRED_SUITE)
+        self.assertIn(
+            ("GET", f"/repos/{REPOSITORY}/check-runs/{HISTORICAL_REQUIRED_CHECK}"),
+            transport.calls,
+        )
+
+    def test_recovery_required_check_rejects_newer_conflicting_suite(self):
+        transport = RecoveryTransport(ready=True)
+        conflict = transport._required_check(historical=False)
+        conflict.update(
+            {
+                "check_suite": {"id": RECOVERED_REQUIRED_SUITE + 1},
+                "completed_at": "2026-09-09T12:06:00Z",
+                "conclusion": "failure",
+                "details_url": (
+                    f"https://github.com/{REPOSITORY}/actions/runs/669/job/994"
+                ),
+                "external_id": "conflicting-required-check",
+                "id": RECOVERED_REQUIRED_CHECK + 1,
+                "node_id": "CR_conflicting_required_check",
+                "started_at": "2026-09-09T12:05:30Z",
+            }
+        )
+        transport.post_publication_required_checks.append(conflict)
+        with self.assertRaisesRegex(
+            approval.ApprovalError, "superseding or conflicting evidence"
+        ):
+            self.recover_ready_with(transport)
+        self.assertNotIn(
+            ("POST", f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments"),
+            transport.calls,
+        )
+
+    def test_recovery_required_check_must_be_required_for_exact_pr(self):
+        transport = RecoveryTransport(ready=True)
+        transport.non_required_check_nodes.add(RECOVERED_REQUIRED_NODE)
+        with self.assertRaisesRegex(
+            approval.ApprovalError, "protected pull-request requirement"
+        ):
+            self.recover_ready_with(transport)
+        self.assertNotIn(
+            ("POST", f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments"),
+            transport.calls,
+        )
+
+    def test_recovery_required_check_rejects_wrong_app_failure_and_stale(self):
+        cases = (
+            (
+                "wrong-app",
+                {"app": {"id": 1, "slug": "other-app"}},
+            ),
+            ("failure", {"conclusion": "failure"}),
+            ("stale", {"conclusion": "stale"}),
+        )
+        for name, override in cases:
+            with self.subTest(name=name):
+                transport = RecoveryTransport(ready=True)
+                transport.recovered_check_overrides.update(override)
+                with self.assertRaisesRegex(
+                    approval.ApprovalError,
+                    "validation check identity",
+                ):
+                    self.recover_ready_with(transport)
+                self.assertNotIn(
+                    ("POST", f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments"),
+                    transport.calls,
+                )
 
     def test_recovery_activation_uses_association_then_full_pr_detail(self):
         transport = RecoveryTransport(ready=True)
@@ -2068,7 +2230,7 @@ class PlatformApprovalTests(unittest.TestCase):
             "load_contract",
             return_value=_recovery_contract(),
         ), self.assertRaisesRegex(
-            approval.ApprovalError, "not the exact current result"
+            approval.ApprovalError, "not a current suite result"
         ):
             approval.authorize(
                 _recovery_event(),

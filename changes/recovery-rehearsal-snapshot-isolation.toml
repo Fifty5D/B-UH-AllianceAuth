@@ -1,4 +1,4 @@
 schema_version = 1
 app = "platform"
 kind = "fix"
-summary = "Isolate published-snapshot fixtures and add an exact v0.6.2 validation, protected-check, and approval recovery without changing release bytes."
+summary = "Isolate published-snapshot fixtures and add an exact v0.6.2 validation and approval recovery that resolves multiple check suites against the protected PR requirement without changing release bytes."

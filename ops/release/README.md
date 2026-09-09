@@ -161,9 +161,16 @@ unchanged release commit/tree from the two-file fixture harness, links to the
 workflow run, and binds the activation, run/attempt, attestation artifact, and
 every lane. Before posting recovery readiness, the verifier requires main's
 protected context to remain bound to GitHub Actions app `15368`, confirms the
-original failed check remains historical evidence, and proves the new check is
-GitHub's exact latest result for that context and release SHA. Authorization
-repeats that resolution check; a private comment cannot substitute for it.
+original failed check remains historical evidence, and records the new check's
+exact REST ID, GraphQL node ID, check-suite ID, completion time, and evidence
+binding. GitHub's `filter=latest` check listing is latest per suite and may
+therefore retain older suites; it is not treated as one global winner. The new
+check must remain the latest row in its own suite, have no pending or newer
+conflicting matching suite, and GitHub GraphQL `CheckRun.isRequired` must report
+that exact node as required for PR #52. Authorization repeats the same query for
+the merged PR; a private comment or an arbitrary successful row cannot
+substitute for it. The recovery has not run yet, so its future suite and node
+identities are intentionally captured and verified only during activation.
 The deployment workflow stages the recovery-aware verifier from the exact PR #52
 merge before checking out v0.6.2, then uses that staged verifier at both queued
 authorization boundaries. The deployment archive and receiver still come only
@@ -210,9 +217,12 @@ routine operator to merge or deploy:
    artifact. Confirm that the new GitHub Actions check
    `Source test suite / Required source checks` is successful on exact commit
    `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, links to this recovery run, and
-   retains failed check `102298823162` as history. Then inspect the bot-authored
-   recovery-readiness comment on PR #52. If the protected check is absent,
-   superseded, or still failing, stop; do not merge with admin bypass.
+   retains failed check `102298823162` as history. Confirm the recovery record's
+   check ID, GraphQL node, suite ID, completion time, run/attempt, artifact, and
+   lane binding, and that GitHub reports that exact check node as required for
+   PR #52. Then inspect the bot-authored recovery-readiness comment on PR #52.
+   If the protected check is absent, not required, superseded, conflicting, or
+   still failing, stop; do not merge with admin bypass.
 5. Present that exact validation artifact, unchanged release/manifest, original
    preflight evidence, and generated approval marker to Anthony for the single
    production approval. Before approval, do not merge PR #52. After explicit

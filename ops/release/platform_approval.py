@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -20,15 +21,22 @@ import stat
 import sys
 import tempfile
 import time
+import urllib.error
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, TextIO
 
-from open_sync_pr import GitHubClient, SyncConfig, SyncPrError
+from open_sync_pr import (
+    GET_ATTEMPTS,
+    HTTP_TIMEOUT_SECONDS,
+    GitHubClient,
+    SyncConfig,
+    SyncPrError,
+)
 import validation_recovery
 
 
 SCHEMA_VERSION = 2
-RECOVERY_SCHEMA_VERSION = 3
+RECOVERY_SCHEMA_VERSION = 4
 FEATURE_READINESS_SCHEMA_VERSION = 1
 PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 1
 READY_PREFIX = "<!-- buh-platform-ready:v2 "
@@ -45,6 +53,40 @@ RECOVERY_CHECK_POLLS = 20
 RECOVERY_CHECK_POLL_SECONDS = 1
 RECOVERY_SOURCE_JOB_PREFIX = "Validate unchanged v0.6.2 with the reviewed harness"
 RECOVERY_WORKFLOW_NAME = "Validate Published Release Recovery"
+RECOVERY_REQUIRED_CHECK_QUERY = """
+query RequiredRecoveryCheck(
+  $checkRunId: ID!
+  $owner: String!
+  $repository: String!
+  $pullRequest: Int!
+) {
+  node(id: $checkRunId) {
+    __typename
+    ... on CheckRun {
+      databaseId
+      isRequired(pullRequestNumber: $pullRequest)
+      name
+      status
+      conclusion
+      detailsUrl
+      externalId
+      checkSuite {
+        databaseId
+        commit { oid }
+      }
+      repository { nameWithOwner }
+    }
+  }
+  repository(owner: $owner, name: $repository) {
+    nameWithOwner
+    pullRequest(number: $pullRequest) {
+      number
+      state
+      headRefOid
+    }
+  }
+}
+""".strip()
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
@@ -860,6 +902,351 @@ def _check_runs_for_release(
     return runs
 
 
+def _graphql_read(
+    client: GitHubClient,
+    query: str,
+    variables: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = (_canonical({"query": query, "variables": variables}) + "\n").encode(
+        "utf-8"
+    )
+    for attempt in range(GET_ATTEMPTS):
+        try:
+            response = client.transport.request(
+                "POST",
+                f"{client.api_url.rstrip('/')}/graphql",
+                {**client.headers, "Content-Type": "application/json"},
+                body,
+                HTTP_TIMEOUT_SECONDS,
+            )
+        except (
+            OSError,
+            TimeoutError,
+            http.client.HTTPException,
+            urllib.error.URLError,
+        ):
+            if attempt + 1 == GET_ATTEMPTS:
+                raise SyncPrError(
+                    "GitHub GraphQL read failed after bounded retries"
+                ) from None
+        else:
+            if response.status == 200:
+                try:
+                    payload = json.loads(response.body.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError):
+                    raise ApprovalError(
+                        "GitHub returned invalid required-check GraphQL data"
+                    ) from None
+                if not isinstance(payload, dict) or payload.get("errors") is not None:
+                    raise ApprovalError(
+                        "GitHub returned invalid required-check GraphQL data"
+                    )
+                return payload
+            retryable = response.status in {408, 425, 429} or (
+                500 <= response.status <= 599
+            )
+            if not retryable or attempt + 1 == GET_ATTEMPTS:
+                raise SyncPrError(
+                    f"GitHub GraphQL read failed with HTTP {response.status}"
+                )
+        client.sleeper(0.25 * (2**attempt))
+    raise SyncPrError("GitHub GraphQL read exhausted its fixed attempt limit")
+
+
+def _opaque_check_node_id(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not 4 <= len(value) <= 256
+        or any(ord(character) < 33 or ord(character) > 126 for character in value)
+    ):
+        raise ApprovalError("Required release validation check node ID is invalid")
+    return value
+
+
+def _required_check_locator(value: Mapping[str, Any]) -> dict[str, Any]:
+    suite = value.get("check_suite")
+    if not isinstance(suite, dict):
+        raise ApprovalError("Required release validation check suite is invalid")
+    return {
+        "check_run_id": _safe_int(
+            "Required release validation check ID", value.get("id")
+        ),
+        "check_run_node_id": _opaque_check_node_id(value.get("node_id")),
+        "check_suite_id": _safe_int(
+            "Required release validation check suite ID", suite.get("id")
+        ),
+        "completed_at": _timestamp(
+            "Required release validation check completion", value.get("completed_at")
+        ),
+    }
+
+
+def _listed_required_check(
+    value: Any,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    required = _required_check_contract(contract)
+    if not isinstance(value, dict):
+        raise ApprovalError("Required release validation check list is malformed")
+    app_id, app_slug = _required_check_app(value.get("app"))
+    associations = value.get("pull_requests")
+    status = value.get("status")
+    conclusion = value.get("conclusion")
+    completed_at = value.get("completed_at")
+    if (
+        value.get("name") != required["context"]
+        or value.get("head_sha") != config.release_commit
+        or app_id != required["app_id"]
+        or app_slug != required["app_slug"]
+        or (
+            associations != []
+            and not _required_check_pull_matches(
+                associations,
+                number=contract["sync"]["pull_request"],
+                release_commit=config.release_commit,
+            )
+        )
+        or status
+        not in {
+            "queued",
+            "in_progress",
+            "completed",
+            "waiting",
+            "requested",
+            "pending",
+        }
+    ):
+        raise ApprovalError("Required release validation check list is malformed")
+    if status == "completed":
+        if conclusion not in {
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "success",
+            "skipped",
+            "stale",
+            "timed_out",
+        }:
+            raise ApprovalError("Required release validation check list is malformed")
+        completion = _timestamp(
+            "Required release validation check completion", completed_at
+        )
+    else:
+        if conclusion is not None or completed_at is not None:
+            raise ApprovalError("Required release validation check list is malformed")
+        completion = None
+    external_id = value.get("external_id")
+    if external_id is not None and (
+        not isinstance(external_id, str)
+        or len(external_id) > 1000
+        or any(ord(character) < 32 for character in external_id)
+    ):
+        raise ApprovalError("Required release validation check list is malformed")
+    suite = value.get("check_suite")
+    if not isinstance(suite, dict):
+        raise ApprovalError("Required release validation check list is malformed")
+    return {
+        "check_run_id": _safe_int(
+            "Required release validation check ID", value.get("id")
+        ),
+        "check_run_node_id": _opaque_check_node_id(value.get("node_id")),
+        "check_suite_id": _safe_int(
+            "Required release validation check suite ID", suite.get("id")
+        ),
+        "completed_at": completion,
+        "conclusion": conclusion,
+        "external_id": external_id,
+        "status": status,
+        "value": value,
+    }
+
+
+def _index_required_checks(
+    runs: Sequence[Mapping[str, Any]],
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    *,
+    latest: bool,
+) -> dict[int, dict[str, Any]]:
+    indexed: dict[int, dict[str, Any]] = {}
+    suites: set[int] = set()
+    for value in runs:
+        normalized = _listed_required_check(value, config, contract)
+        check_run_id = normalized["check_run_id"]
+        check_suite_id = normalized["check_suite_id"]
+        if check_run_id in indexed or (latest and check_suite_id in suites):
+            raise ApprovalError("Required release validation check list is malformed")
+        indexed[check_run_id] = normalized
+        suites.add(check_suite_id)
+    return indexed
+
+
+def _same_required_check_locator(
+    listed: Mapping[str, Any], locator: Mapping[str, Any]
+) -> bool:
+    return all(listed.get(key) == locator.get(key) for key in locator)
+
+
+def _verify_exact_required_check_graphql(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    check: Mapping[str, Any],
+    *,
+    pull_request_state: str,
+) -> None:
+    owner, repository = config.repository.split("/", 1)
+    locator = _required_check_locator(check)
+    payload = _graphql_read(
+        client,
+        RECOVERY_REQUIRED_CHECK_QUERY,
+        {
+            "checkRunId": locator["check_run_node_id"],
+            "owner": owner,
+            "repository": repository,
+            "pullRequest": contract["sync"]["pull_request"],
+        },
+    )
+    data = payload.get("data")
+    node = data.get("node") if isinstance(data, dict) else None
+    remote_repository = data.get("repository") if isinstance(data, dict) else None
+    pull = (
+        remote_repository.get("pullRequest")
+        if isinstance(remote_repository, dict)
+        else None
+    )
+    suite = node.get("checkSuite") if isinstance(node, dict) else None
+    commit = suite.get("commit") if isinstance(suite, dict) else None
+    check_repository = node.get("repository") if isinstance(node, dict) else None
+    if (
+        not isinstance(node, dict)
+        or node.get("__typename") != "CheckRun"
+        or node.get("databaseId") != locator["check_run_id"]
+        or node.get("isRequired") is not True
+        or node.get("name") != check.get("name")
+        or node.get("status") != str(check.get("status", "")).upper()
+        or node.get("conclusion") != str(check.get("conclusion", "")).upper()
+        or node.get("detailsUrl") != check.get("details_url")
+        or node.get("externalId") != check.get("external_id")
+        or not isinstance(suite, dict)
+        or suite.get("databaseId") != locator["check_suite_id"]
+        or not isinstance(commit, dict)
+        or commit.get("oid") != config.release_commit
+        or not isinstance(check_repository, dict)
+        or check_repository.get("nameWithOwner") != config.repository
+        or not isinstance(remote_repository, dict)
+        or remote_repository.get("nameWithOwner") != config.repository
+        or not isinstance(pull, dict)
+        or pull.get("number") != contract["sync"]["pull_request"]
+        or pull.get("state") != pull_request_state
+        or pull.get("headRefOid") != config.release_commit
+    ):
+        raise ApprovalError(
+            "Exact recovery check does not satisfy the protected pull-request requirement"
+        )
+
+
+def _verify_historical_check_is_current(
+    runs: Sequence[Mapping[str, Any]],
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    historical: Mapping[str, Any],
+) -> None:
+    indexed = _index_required_checks(runs, config, contract, latest=True)
+    locator = _required_check_locator(historical)
+    listed = indexed.get(locator["check_run_id"])
+    if listed is None or not _same_required_check_locator(listed, locator):
+        raise ApprovalError("Historical failed check is not a current suite result")
+    for check_run_id, candidate in indexed.items():
+        if check_run_id == locator["check_run_id"]:
+            continue
+        if (
+            candidate["status"] != "completed"
+            or candidate["completed_at"] >= locator["completed_at"]
+        ):
+            raise ApprovalError(
+                "Historical failed check has conflicting current-suite evidence"
+            )
+
+
+def _published_check_is_current(
+    runs: Sequence[Mapping[str, Any]],
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> bool:
+    indexed = _index_required_checks(runs, config, contract, latest=True)
+    locator = _required_check_locator(current)
+    listed = indexed.get(locator["check_run_id"])
+    if listed is not None:
+        _validate_required_check_run(
+            listed["value"],
+            config,
+            contract,
+            check_run_id=locator["check_run_id"],
+            conclusion="success",
+            details_url=current["details_url"],
+            external_id=current["external_id"],
+        )
+        if not _same_required_check_locator(listed, locator):
+            raise ApprovalError("Recovered required check list identity changed")
+    for check_run_id, candidate in indexed.items():
+        if check_run_id == locator["check_run_id"]:
+            continue
+        if candidate["check_suite_id"] == locator["check_suite_id"]:
+            raise ApprovalError("Recovered required check was superseded in its suite")
+        if candidate["external_id"] == current["external_id"]:
+            raise ApprovalError("Recovered required check has conflicting evidence")
+        if (
+            candidate["status"] != "completed"
+            or candidate["completed_at"] >= locator["completed_at"]
+        ):
+            raise ApprovalError(
+                "Recovered required check has superseding or conflicting evidence"
+            )
+    return listed is not None
+
+
+def _published_check_history_is_present(
+    runs: Sequence[Mapping[str, Any]],
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    current: Mapping[str, Any],
+    historical: Mapping[str, Any],
+) -> bool:
+    indexed = _index_required_checks(runs, config, contract, latest=False)
+    current_locator = _required_check_locator(current)
+    historical_locator = _required_check_locator(historical)
+    current_listed = indexed.get(current_locator["check_run_id"])
+    historical_listed = indexed.get(historical_locator["check_run_id"])
+    if current_listed is None or historical_listed is None:
+        return False
+    _validate_required_check_run(
+        current_listed["value"],
+        config,
+        contract,
+        check_run_id=current_locator["check_run_id"],
+        conclusion="success",
+        details_url=current["details_url"],
+        external_id=current["external_id"],
+    )
+    _validate_required_check_run(
+        historical_listed["value"],
+        config,
+        contract,
+        check_run_id=historical_locator["check_run_id"],
+        conclusion="failure",
+        details_url=historical["details_url"],
+    )
+    if not _same_required_check_locator(
+        current_listed, current_locator
+    ) or not _same_required_check_locator(historical_listed, historical_locator):
+        raise ApprovalError("Required check history identity changed during recovery")
+    return True
+
+
 def _verify_published_recovery_check(
     client: GitHubClient,
     config: SyncConfig,
@@ -869,6 +1256,7 @@ def _verify_published_recovery_check(
     lane_jobs: Sequence[Mapping[str, Any]],
     recorded: Mapping[str, Any],
     *,
+    pull_request_state: str,
     work_actor: str,
 ) -> dict[str, Any]:
     required = _required_check_contract(contract)
@@ -879,17 +1267,28 @@ def _verify_published_recovery_check(
         "app_id",
         "app_slug",
         "binding_digest",
+        "check_run_node_id",
         "check_run_id",
+        "check_suite_id",
+        "completed_at",
         "context",
         "details_url",
         "external_id",
         "head_sha",
         "historical_check_run_id",
         "lanes",
+        "required_pull_request",
     }:
         raise ApprovalError("Recovery required-check evidence schema is invalid")
     check_run_id = _safe_int(
         "Recovered required check ID", recorded.get("check_run_id")
+    )
+    check_suite_id = _safe_int(
+        "Recovered required check suite ID", recorded.get("check_suite_id")
+    )
+    check_run_node_id = _opaque_check_node_id(recorded.get("check_run_node_id"))
+    completed_at = _timestamp(
+        "Recovered required check completion", recorded.get("completed_at")
     )
     if (
         recorded.get("app_id") != required["app_id"]
@@ -902,6 +1301,8 @@ def _verify_published_recovery_check(
         or recorded.get("historical_check_run_id")
         != required["historical_failure"]["check_run_id"]
         or recorded.get("lanes") != list(lane_jobs)
+        or recorded.get("required_pull_request")
+        != contract["sync"]["pull_request"]
     ):
         raise ApprovalError("Recovery required-check evidence changed")
 
@@ -920,41 +1321,44 @@ def _verify_published_recovery_check(
         external_id=external_id,
         output=expected_payload["output"],
     )
+    if _required_check_locator(checked) != {
+        "check_run_id": check_run_id,
+        "check_run_node_id": check_run_node_id,
+        "check_suite_id": check_suite_id,
+        "completed_at": completed_at,
+    }:
+        raise ApprovalError("Recovery required-check locator changed")
     latest = []
     for attempt in range(RECOVERY_CHECK_POLLS):
         latest = _check_runs_for_release(
             client, config, contract, filter_value="latest"
         )
-        if len(latest) == 1 and latest[0].get("id") == check_run_id:
+        if _published_check_is_current(latest, config, contract, checked):
             break
         if attempt + 1 < RECOVERY_CHECK_POLLS:
             client.sleeper(RECOVERY_CHECK_POLL_SECONDS)
     else:
-        raise ApprovalError("Recovered required check is not the exact current result")
-    _validate_required_check_run(
-        latest[0],
+        raise ApprovalError("Recovered required check is not a current suite result")
+    _verify_exact_required_check_graphql(
+        client,
         config,
         contract,
-        check_run_id=check_run_id,
-        conclusion="success",
-        details_url=expected_payload["details_url"],
-        external_id=external_id,
+        checked,
+        pull_request_state=pull_request_state,
     )
-    historical_id = historical["id"]
     all_runs = []
     for attempt in range(RECOVERY_CHECK_POLLS):
         all_runs = _check_runs_for_release(
             client, config, contract, filter_value="all"
         )
-        if {item.get("id") for item in all_runs} == {
-            historical_id,
-            check_run_id,
-        }:
+        if _published_check_history_is_present(
+            all_runs, config, contract, checked, historical
+        ):
             break
         if attempt + 1 < RECOVERY_CHECK_POLLS:
             client.sleeper(RECOVERY_CHECK_POLL_SECONDS)
     else:
-        raise ApprovalError("Required check history changed during recovery")
+        raise ApprovalError("Required check history is incomplete during recovery")
     return checked
 
 
@@ -976,8 +1380,14 @@ def _publish_recovery_check(
     previous = _check_runs_for_release(
         client, config, contract, filter_value="latest"
     )
-    if len(previous) != 1 or previous[0].get("id") != historical["id"]:
-        raise ApprovalError("Historical failed check is not the current required result")
+    _verify_historical_check_is_current(previous, config, contract, historical)
+    _verify_exact_required_check_graphql(
+        client,
+        config,
+        contract,
+        historical,
+        pull_request_state="OPEN",
+    )
     payload, binding_digest, external_id = _recovery_check_payload(
         config, contract, attestation, artifact, lane_jobs
     )
@@ -1000,17 +1410,22 @@ def _publish_recovery_check(
         external_id=external_id,
         output=payload["output"],
     )
+    locator = _required_check_locator(created)
     recorded = {
         "app_id": required["app_id"],
         "app_slug": required["app_slug"],
         "binding_digest": binding_digest,
+        "check_run_node_id": locator["check_run_node_id"],
         "check_run_id": check_run_id,
+        "check_suite_id": locator["check_suite_id"],
+        "completed_at": created["completed_at"],
         "context": required["context"],
         "details_url": payload["details_url"],
         "external_id": external_id,
         "head_sha": config.release_commit,
         "historical_check_run_id": historical["id"],
         "lanes": list(lane_jobs),
+        "required_pull_request": contract["sync"]["pull_request"],
     }
     _verify_published_recovery_check(
         client,
@@ -1020,6 +1435,7 @@ def _publish_recovery_check(
         artifact,
         lane_jobs,
         recorded,
+        pull_request_state="OPEN",
         work_actor=work_actor,
     )
     return recorded
@@ -1860,6 +2276,7 @@ def ready_recovery(
         validation_artifact,
         final_lane_jobs,
         required_check,
+        pull_request_state="OPEN",
         work_actor=work_actor,
     )
     if any(
@@ -2118,13 +2535,17 @@ def _validate_recovery_ready_payload(
         "app_id",
         "app_slug",
         "binding_digest",
+        "check_run_node_id",
         "check_run_id",
+        "check_suite_id",
+        "completed_at",
         "context",
         "details_url",
         "external_id",
         "head_sha",
         "historical_check_run_id",
         "lanes",
+        "required_pull_request",
     }:
         raise ApprovalError("Recovery required-check evidence schema is invalid")
     required = _required_check_contract(contract)
@@ -2162,6 +2583,13 @@ def _validate_recovery_ready_payload(
     check_run_id = _safe_int(
         "Recovered required check ID", required_evidence.get("check_run_id")
     )
+    _safe_int(
+        "Recovered required check suite ID",
+        required_evidence.get("check_suite_id"),
+    )
+    _opaque_check_node_id(required_evidence.get("check_run_node_id"))
+    completed_at = required_evidence.get("completed_at")
+    _timestamp("Recovered required check completion", completed_at)
     if (
         required_evidence.get("app_id") != required["app_id"]
         or required_evidence.get("app_slug") != required["app_slug"]
@@ -2173,6 +2601,8 @@ def _validate_recovery_ready_payload(
         or required_evidence.get("historical_check_run_id")
         != required["historical_failure"]["check_run_id"]
         or required_evidence.get("lanes") != normalized_lanes
+        or required_evidence.get("required_pull_request")
+        != contract["sync"]["pull_request"]
     ):
         raise ApprovalError("Recovery required-check evidence changed")
     if payload["approval_nonce"] != _nonce(payload):
@@ -2559,6 +2989,7 @@ def authorize(
             recovery_artifact,
             recovery_lanes,
             evidence["required_check"],
+            pull_request_state="MERGED",
             work_actor=work_actor,
         )
     else:
@@ -2681,6 +3112,7 @@ def authorize(
             recovery_artifact,
             recovery_lanes,
             evidence["required_check"],
+            pull_request_state="MERGED",
             work_actor=work_actor,
         )
     report = {
