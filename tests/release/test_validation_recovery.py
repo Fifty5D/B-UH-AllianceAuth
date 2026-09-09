@@ -136,6 +136,16 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(contract["release"]["commit"], "6074b965cbd2e6ab2630cd539ee455b8d419aef6")
         self.assertEqual(contract["activation"]["pull_request"], 53)
         self.assertEqual(
+            contract["required_check"]["context"], recovery.REQUIRED_CHECK_CONTEXT
+        )
+        self.assertEqual(
+            contract["required_check"]["app_id"], recovery.REQUIRED_CHECK_APP_ID
+        )
+        self.assertEqual(
+            contract["required_check"]["historical_failure"]["check_run_id"],
+            102298823162,
+        )
+        self.assertEqual(
             contract["activation"]["allowed_paths"],
             list(recovery.ACTIVATION_PATHS),
         )

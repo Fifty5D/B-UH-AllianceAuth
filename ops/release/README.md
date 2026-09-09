@@ -148,7 +148,22 @@ receiver, workflow-under-test, and release bytes therefore remain those of
 v0.6.2. Its last job revalidates the original feature readiness, PR #53's exact
 published readiness, activation main CI, the original failed release run's exact
 job set, and the retained successful preflight before it may place a distinct
-recovery-readiness record on PR #52. Authorization repeats those live checks.
+recovery-readiness record on PR #52. The activation commit is associated to PR
+#53 through GitHub's commit-to-PR endpoint, but merger, author, state, head,
+base, and merge identity are accepted only from a separate full PR-detail
+response. Authorization repeats those live checks.
+
+After all eight reusable-suite lanes pass, the recovery workflow records their
+exact job IDs and publishes one GitHub Actions check named
+`Source test suite / Required source checks` on immutable PR #52 head
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Its report distinguishes the
+unchanged release commit/tree from the two-file fixture harness, links to the
+workflow run, and binds the activation, run/attempt, attestation artifact, and
+every lane. Before posting recovery readiness, the verifier requires main's
+protected context to remain bound to GitHub Actions app `15368`, confirms the
+original failed check remains historical evidence, and proves the new check is
+GitHub's exact latest result for that context and release SHA. Authorization
+repeats that resolution check; a private comment cannot substitute for it.
 The deployment workflow stages the recovery-aware verifier from the exact PR #52
 merge before checking out v0.6.2, then uses that staged verifier at both queued
 authorization boundaries. The deployment archive and receiver still come only
@@ -192,7 +207,12 @@ routine operator to merge or deploy:
    Only the repository owner or the exact `BUH_CHATGPT_WORK_ACTOR` may dispatch
    it. Run attempt 1 must complete successfully; do not rerun a failed attempt.
    Inspect its `platform-validation-recovery-v0.6.2-6074b965cbd2-<run>-1`
-   artifact and the bot-authored recovery-readiness comment on PR #52.
+   artifact. Confirm that the new GitHub Actions check
+   `Source test suite / Required source checks` is successful on exact commit
+   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, links to this recovery run, and
+   retains failed check `102298823162` as history. Then inspect the bot-authored
+   recovery-readiness comment on PR #52. If the protected check is absent,
+   superseded, or still failing, stop; do not merge with admin bypass.
 5. Present that exact validation artifact, unchanged release/manifest, original
    preflight evidence, and generated approval marker to Anthony for the single
    production approval. Before approval, do not merge PR #52. After explicit

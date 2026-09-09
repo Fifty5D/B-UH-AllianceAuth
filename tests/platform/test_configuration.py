@@ -1483,7 +1483,7 @@ class PlatformConfigurationContracts(TestCase):
             workflow["jobs"]["ready"]["permissions"],
             {
                 "actions": "read",
-                "checks": "read",
+                "checks": "write",
                 "contents": "read",
                 "issues": "write",
                 "pull-requests": "write",
@@ -1503,6 +1503,7 @@ class PlatformConfigurationContracts(TestCase):
             "--pull-request 53",
             "--pull-request 51",
             "platform_approval.py recover-ready",
+            "checks: write",
         ):
             self.assertIn(required, text)
         self.assertLess(
@@ -1523,6 +1524,35 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertEqual(contract["activation"]["pull_request"], 53)
         self.assertEqual(contract["sync"]["pull_request"], 52)
+        self.assertEqual(
+            contract["required_check"],
+            {
+                "app_id": 15368,
+                "app_slug": "github-actions",
+                "branch": "main",
+                "context": "Source test suite / Required source checks",
+                "historical_failure": {
+                    "check_run_id": 102298823162,
+                    "conclusion": "failure",
+                    "details_url": (
+                        "https://github.com/Fifty5D/B-UH-AllianceAuth/actions/"
+                        "runs/34297801831/job/102298823162"
+                    ),
+                    "run_attempt": 1,
+                    "workflow_run_id": 34297801831,
+                },
+                "required_lanes": [
+                    "Test configuration",
+                    "Immutable release ledger",
+                    "Immutable Moon Tax v0.3.3 recovery artifact",
+                    "Fast source checks",
+                    "MariaDB, Redis, Celery, and fake ESI",
+                    "Legacy schema upgrade and backup restore",
+                    "Browser tables, actions, and permissions",
+                    "Required source checks",
+                ],
+            },
+        )
         self.assertEqual(
             contract["release"],
             {

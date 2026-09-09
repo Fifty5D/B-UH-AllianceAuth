@@ -46,6 +46,20 @@ HARNESS_PATHS = (
     "tests/platform/test_coordinated_recovery_rehearsal.py",
 )
 
+REQUIRED_CHECK_CONTEXT = "Source test suite / Required source checks"
+REQUIRED_CHECK_APP_ID = 15368
+REQUIRED_CHECK_APP_SLUG = "github-actions"
+RECOVERY_REQUIRED_LANES = (
+    "Test configuration",
+    "Immutable release ledger",
+    "Immutable Moon Tax v0.3.3 recovery artifact",
+    "Fast source checks",
+    "MariaDB, Redis, Celery, and fake ESI",
+    "Legacy schema upgrade and backup restore",
+    "Browser tables, actions, and permissions",
+    "Required source checks",
+)
+
 # Exact tree delta permitted between the v0.6.2 source and the recovery
 # activation merge.  Keeping this list in executable code as well as the
 # canonical contract prevents a contract edit from silently widening itself.
@@ -129,6 +143,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         "main_validation",
         "platform_version",
         "preflight",
+        "required_check",
         "recovery_id",
         "release",
         "repository",
@@ -293,6 +308,45 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         102298334241,
     }:
         raise ValidationRecoveryError("Recovery release-run jobs changed")
+
+    required_check = value.get("required_check")
+    if not isinstance(required_check, dict) or set(required_check) != {
+        "app_id",
+        "app_slug",
+        "branch",
+        "context",
+        "historical_failure",
+        "required_lanes",
+    }:
+        raise ValidationRecoveryError("Recovery required-check contract is invalid")
+    historical = required_check.get("historical_failure")
+    if not isinstance(historical, dict) or set(historical) != {
+        "check_run_id",
+        "conclusion",
+        "details_url",
+        "run_attempt",
+        "workflow_run_id",
+    }:
+        raise ValidationRecoveryError("Recovery historical check is invalid")
+    if (
+        required_check.get("app_id") != REQUIRED_CHECK_APP_ID
+        or required_check.get("app_slug") != REQUIRED_CHECK_APP_SLUG
+        or required_check.get("branch") != "main"
+        or required_check.get("context") != REQUIRED_CHECK_CONTEXT
+        or required_check.get("required_lanes") != list(RECOVERY_REQUIRED_LANES)
+        or historical
+        != {
+            "check_run_id": 102298823162,
+            "conclusion": "failure",
+            "details_url": (
+                "https://github.com/Fifty5D/B-UH-AllianceAuth/actions/runs/"
+                "34297801831/job/102298823162"
+            ),
+            "run_attempt": 1,
+            "workflow_run_id": 34297801831,
+        }
+    ):
+        raise ValidationRecoveryError("Recovery required-check identity changed")
     return value
 
 
