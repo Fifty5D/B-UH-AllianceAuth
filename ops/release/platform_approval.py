@@ -36,7 +36,7 @@ import validation_recovery
 
 
 SCHEMA_VERSION = 2
-RECOVERY_SCHEMA_VERSION = 4
+RECOVERY_SCHEMA_VERSION = 5
 FEATURE_READINESS_SCHEMA_VERSION = 1
 PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 1
 READY_PREFIX = "<!-- buh-platform-ready:v2 "
@@ -48,7 +48,7 @@ BOT_LOGIN = "github-actions[bot]"
 MAX_PAGES = 100
 SOURCE_CI_POLL_SECONDS = 15
 SOURCE_CI_POLLS = 160
-RECOVERY_CHECK_BINDING_SCHEMA_VERSION = 1
+RECOVERY_CHECK_BINDING_SCHEMA_VERSION = 2
 RECOVERY_CHECK_POLLS = 20
 RECOVERY_CHECK_POLL_SECONDS = 1
 RECOVERY_SOURCE_JOB_PREFIX = "Validate unchanged v0.6.2 with the reviewed harness"
@@ -470,60 +470,62 @@ def _verify_main_run_for_commit(
         raise ApprovalError("Recorded activation Validate PR evidence is invalid")
 
 
-def _verify_activation_remote(
+def _verify_review_merge_remote(
     client: GitHubClient,
     config: SyncConfig,
-    attestation: Mapping[str, Any],
+    identity: Mapping[str, Any],
     *,
+    commit_field: str,
+    tree_field: str,
+    first_parent: str,
+    label: str,
     state: str,
     work_actor: str,
 ) -> dict[str, Any]:
-    activation = attestation["activation"]
-    activation_commit = activation["activation_commit"]
-    feature_head = activation["feature_head"]
-    commit = _read_commit(client, config, activation_commit)
+    merge_commit = identity[commit_field]
+    feature_head = identity["feature_head"]
+    merge_tree = identity[tree_field]
+    pull_request = identity["pull_request"]
+    commit = _read_commit(client, config, merge_commit)
     parents = commit.get("parents")
     if (
         not isinstance(parents, list)
         or len(parents) != 2
         or not all(isinstance(parent, dict) for parent in parents)
-        or parents[0].get("sha") != config.source_sha
+        or parents[0].get("sha") != first_parent
         or parents[1].get("sha") != feature_head
-        or _commit_tree(commit, context="Recovery activation")
-        != activation["activation_tree"]
+        or _commit_tree(commit, context=f"Recovery {label}") != merge_tree
     ):
-        raise ApprovalError("Recovery activation merge identity is invalid")
+        raise ApprovalError(f"Recovery {label} merge identity is invalid")
     feature = _read_commit(client, config, feature_head)
-    if _commit_tree(feature, context="Recovery activation feature") != activation[
-        "activation_tree"
-    ]:
-        raise ApprovalError("Recovery activation tree differs from its feature head")
+    if _commit_tree(feature, context=f"Recovery {label} feature") != merge_tree:
+        raise ApprovalError(f"Recovery {label} tree differs from its feature head")
     pulls = _pages(
         client,
-        _path(config.repository, f"commits/{activation_commit}/pulls"),
+        _path(config.repository, f"commits/{merge_commit}/pulls"),
     )
     matches = [
         pull
         for pull in pulls
         if isinstance(pull, dict)
-        and pull.get("number") == activation["pull_request"]
+        and pull.get("number") == pull_request
     ]
     if len(matches) != 1:
-        raise ApprovalError("Recovery activation lacks one exact pull request")
+        raise ApprovalError(f"Recovery {label} lacks one exact pull request")
     # GitHub's commit-to-PR association response is intentionally abbreviated
     # and does not include `merged_by`.  Use it only to bind the commit to one
     # exact PR, then obtain the complete PR before evaluating any identity.
     pull = client.get(
-        _path(config.repository, f"pulls/{activation['pull_request']}")
+        _path(config.repository, f"pulls/{pull_request}")
     )
     if not isinstance(pull, dict):
-        raise ApprovalError("Recovery activation pull-request detail is malformed")
+        raise ApprovalError(f"Recovery {label} pull-request detail is malformed")
     head = pull.get("head")
     base = pull.get("base")
     if (
         pull.get("state") != state
         or pull.get("draft") is not False
-        or pull.get("merge_commit_sha") != activation_commit
+        or pull.get("merge_commit_sha") != merge_commit
         or pull.get("merged_at") is None
         or not _allowed_operator(_login(pull.get("merged_by")), config, work_actor)
         or not _allowed_operator(_login(pull.get("user")), config, work_actor)
@@ -534,9 +536,51 @@ def _verify_activation_remote(
         or base.get("ref") != "main"
         or _repo_name(base.get("repo")) != config.repository
     ):
-        raise ApprovalError("Recovery activation pull-request identity is invalid")
-    _timestamp("Recovery activation merge timestamp", pull.get("merged_at"))
+        raise ApprovalError(f"Recovery {label} pull-request identity is invalid")
+    _timestamp(f"Recovery {label} merge timestamp", pull.get("merged_at"))
     return pull
+
+
+def _verify_activation_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    attestation: Mapping[str, Any],
+    *,
+    state: str,
+    work_actor: str,
+) -> dict[str, Any]:
+    return _verify_review_merge_remote(
+        client,
+        config,
+        attestation["activation"],
+        commit_field="activation_commit",
+        tree_field="activation_tree",
+        first_parent=config.source_sha,
+        label="activation",
+        state=state,
+        work_actor=work_actor,
+    )
+
+
+def _verify_continuation_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    attestation: Mapping[str, Any],
+    *,
+    state: str,
+    work_actor: str,
+) -> dict[str, Any]:
+    return _verify_review_merge_remote(
+        client,
+        config,
+        attestation["continuation"],
+        commit_field="continuation_commit",
+        tree_field="continuation_tree",
+        first_parent=attestation["activation"]["activation_commit"],
+        label="continuation",
+        state=state,
+        work_actor=work_actor,
+    )
 
 
 def _required_check_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -779,7 +823,6 @@ def _recovery_lane_jobs(
             or job.get("run_id") != run_id
             or job.get("run_attempt") != run_attempt
             or job.get("head_sha") != activation_commit
-            or job.get("workflow_name") != RECOVERY_WORKFLOW_NAME
         ):
             raise ApprovalError("Recovery validation required lane did not pass")
         normalized.append(
@@ -810,6 +853,7 @@ def _recovery_check_binding(
         + hashlib.sha256(
             validation_recovery.canonical_json_bytes(attestation)
         ).hexdigest(),
+        "continuation": attestation["continuation"],
         "harness": attestation["harness"],
         "lanes": list(lane_jobs),
         "recovery_id": contract["recovery_id"],
@@ -1656,10 +1700,88 @@ def _artifact(
     return artifact
 
 
+def _verify_failed_recovery_validation(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    *,
+    work_actor: str,
+) -> dict[str, Any]:
+    """Preserve the exact failed attempt without trusting its display title."""
+
+    expected = contract["failed_validation"]
+    run_id = expected["run_id"]
+    attempt = expected["run_attempt"]
+    activation_commit = contract["activation"]["commit"]
+    run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
+    if (
+        not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("run_attempt") != attempt
+        or run.get("status") != "completed"
+        or run.get("conclusion") != "failure"
+        or run.get("event") != "workflow_dispatch"
+        or run.get("head_sha") != activation_commit
+        or run.get("head_branch") != "main"
+        or _workflow_path(run) != validation_recovery.WORKFLOW_PATH
+        or _repo_name(run.get("repository")) != config.repository
+        or _repo_name(run.get("head_repository")) != config.repository
+        or not _allowed_operator(_login(run.get("actor")), config, work_actor)
+        or not _allowed_operator(
+            _login(run.get("triggering_actor")), config, work_actor
+        )
+    ):
+        raise ApprovalError("Failed recovery validation provenance changed")
+    payload = client.get(
+        _path(config.repository, f"actions/runs/{run_id}/jobs"),
+        {"filter": "latest", "per_page": "100"},
+    )
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    if not isinstance(jobs, list) or total != len(jobs) or len(jobs) > 100:
+        raise ApprovalError("Failed recovery validation job list is malformed")
+    normalized = []
+    for job in jobs:
+        if (
+            not isinstance(job, dict)
+            or job.get("run_id") != run_id
+            or job.get("run_attempt") != attempt
+            or job.get("head_sha") != activation_commit
+            or job.get("status") != "completed"
+        ):
+            raise ApprovalError("Failed recovery validation job identity changed")
+        normalized.append(
+            {
+                "conclusion": job.get("conclusion"),
+                "id": _safe_int(
+                    "Failed recovery validation job ID", job.get("id")
+                ),
+                "name": job.get("name"),
+            }
+        )
+    if normalized != expected["jobs"]:
+        raise ApprovalError("Failed recovery validation job evidence changed")
+    artifact = expected["artifact"]
+    return _artifact(
+        client,
+        config,
+        run_id,
+        artifact["name"],
+        head_sha=activation_commit,
+        expected_id=artifact["id"],
+        expected_digest=artifact["digest"],
+    )
+
+
 def _feature_readiness(
     value: Any,
     config: SyncConfig,
+    *,
+    merge_source_commit: str | None = None,
+    expected_pull_request: int | None = None,
+    expected_feature_head: str | None = None,
 ) -> dict[str, Any]:
+    expected_merge = merge_source_commit or config.source_sha
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
         "repository",
@@ -1677,7 +1799,7 @@ def _feature_readiness(
     if (
         value.get("schema_version") != FEATURE_READINESS_SCHEMA_VERSION
         or value.get("repository") != config.repository
-        or value.get("merge_source_commit") != config.source_sha
+        or value.get("merge_source_commit") != expected_merge
     ):
         raise ApprovalError("Feature-readiness evidence does not match the release")
     mode = value.get("attestation_mode")
@@ -1692,13 +1814,17 @@ def _feature_readiness(
     feature_number = _safe_int(
         "Feature pull request number", feature_pr.get("number"), maximum=10**9
     )
+    if expected_pull_request is not None and feature_number != expected_pull_request:
+        raise ApprovalError("Feature-readiness pull request changed")
     if mode == "first-introduction-postmerge" and feature_number != 44:
         raise ApprovalError("First-introduction readiness is restricted to pull request 44")
     feature_head = feature_pr.get("head_sha")
     if (
         not isinstance(feature_head, str)
         or COMMIT_RE.fullmatch(feature_head) is None
-        or feature_head == config.source_sha
+        or feature_head == expected_merge
+        or expected_feature_head is not None
+        and feature_head != expected_feature_head
     ):
         raise ApprovalError("Feature-readiness pull-request head is invalid")
     validation = value.get("feature_validation")
@@ -1819,7 +1945,7 @@ def _feature_readiness(
         "attestation_mode": mode,
         "merger": merger,
         "feature_pr": {"number": feature_number, "head_sha": feature_head},
-        "merge_source_commit": config.source_sha,
+        "merge_source_commit": expected_merge,
         "feature_validation": normalized_validation,
         "review_digest": review_digest,
         "readiness": normalized_readiness,
@@ -2053,6 +2179,8 @@ def ready_recovery(
     server_url: str,
     output: Path,
     feature_readiness: Mapping[str, Any],
+    activation_readiness: Mapping[str, Any],
+    continuation_readiness: Mapping[str, Any],
     validation_attestation: Mapping[str, Any],
     validation_artifact_id: int,
     validation_artifact_name: str,
@@ -2083,6 +2211,24 @@ def ready_recovery(
         validation_attestation,
         contract=contract,
     )
+    activation = attestation["activation"]
+    continuation = attestation["continuation"]
+    activation_commit = activation["activation_commit"]
+    continuation_commit = continuation["continuation_commit"]
+    published_activation = _feature_readiness(
+        activation_readiness,
+        config,
+        merge_source_commit=activation_commit,
+        expected_pull_request=activation["pull_request"],
+        expected_feature_head=activation["feature_head"],
+    )
+    published_continuation = _feature_readiness(
+        continuation_readiness,
+        config,
+        merge_source_commit=continuation_commit,
+        expected_pull_request=continuation["pull_request"],
+        expected_feature_head=continuation["feature_head"],
+    )
     validation = attestation["validation"]
     validation_run_id = _safe_int(
         "Recovery validation run ID", validation.get("run_id")
@@ -2092,7 +2238,6 @@ def ready_recovery(
         validation.get("run_attempt"),
         maximum=10**6,
     )
-    activation_commit = attestation["activation"]["activation_commit"]
     expected_validation_artifact = (
         f"platform-validation-recovery-v{contract['platform_version']}-"
         f"{release['commit'][:12]}-{validation_run_id}-{validation_attempt}"
@@ -2109,8 +2254,8 @@ def ready_recovery(
         config.api_url, token, transport=transport, sleeper=sleeper
     )
     _get_pr(client, config, sync["pull_request"], "open")
-    if _read_ref(client, config, "main") != activation_commit:
-        raise ApprovalError("Recovery activation is not the current main tip")
+    if _read_ref(client, config, "main") != continuation_commit:
+        raise ApprovalError("Recovery continuation is not the current main tip")
     _verify_release(client, config, sync=True)
     _verify_activation_remote(
         client,
@@ -2119,7 +2264,22 @@ def ready_recovery(
         state="closed",
         work_actor=work_actor,
     )
-    activation_run = _main_ci_run(client, config, activation_commit)
+    _verify_continuation_remote(
+        client,
+        config,
+        attestation,
+        state="closed",
+        work_actor=work_actor,
+    )
+    activation_validation = contract["activation"]["validation"]
+    _verify_main_run_for_commit(
+        client,
+        config,
+        activation_commit,
+        activation_validation["run_id"],
+        activation_validation["run_attempt"],
+    )
+    continuation_run = _main_ci_run(client, config, continuation_commit)
     _verify_main_run(
         client,
         config,
@@ -2127,6 +2287,9 @@ def ready_recovery(
         contract["main_validation"]["run_attempt"],
     )
     _verify_recovery_preflight(
+        client, config, contract, work_actor=work_actor
+    )
+    failed_validation_artifact = _verify_failed_recovery_validation(
         client, config, contract, work_actor=work_actor
     )
     preflight_artifact = _artifact(
@@ -2142,14 +2305,14 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_attempt,
-        activation_commit,
+        continuation_commit,
         completed=False,
         work_actor=work_actor,
     )
     _verify_newest_recovery_run(
         client,
         config,
-        activation_commit,
+        continuation_commit,
         validation_run_id,
         validation_attempt,
         completed=False,
@@ -2160,7 +2323,7 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_artifact_name,
-        head_sha=activation_commit,
+        head_sha=continuation_commit,
         expected_id=artifact_id,
         expected_digest=validation_artifact_digest,
     )
@@ -2170,7 +2333,7 @@ def ready_recovery(
         contract,
         run_id=validation_run_id,
         run_attempt=validation_attempt,
-        activation_commit=activation_commit,
+        activation_commit=continuation_commit,
     )
     _verify_required_check_protection(client, config, contract)
     _verify_historical_required_check(
@@ -2179,17 +2342,20 @@ def ready_recovery(
 
     # Repeat every mutable boundary immediately before posting the one approval
     # request. The original failed run is accepted only through its exact job set.
-    if _read_ref(client, config, "main") != activation_commit:
-        raise ApprovalError("Recovery activation moved before readiness publication")
+    if _read_ref(client, config, "main") != continuation_commit:
+        raise ApprovalError("Recovery continuation moved before readiness publication")
     _verify_release(client, config, sync=True)
     _verify_main_run_for_commit(
         client,
         config,
-        activation_commit,
-        activation_run["id"],
-        activation_run["run_attempt"],
+        continuation_commit,
+        continuation_run["id"],
+        continuation_run["run_attempt"],
     )
     _verify_recovery_preflight(
+        client, config, contract, work_actor=work_actor
+    )
+    failed_validation_artifact = _verify_failed_recovery_validation(
         client, config, contract, work_actor=work_actor
     )
     preflight_artifact = _artifact(
@@ -2205,7 +2371,7 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_attempt,
-        activation_commit,
+        continuation_commit,
         completed=False,
         work_actor=work_actor,
     )
@@ -2214,7 +2380,7 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_artifact_name,
-        head_sha=activation_commit,
+        head_sha=continuation_commit,
         expected_id=validation_artifact["id"],
         expected_digest=validation_artifact["digest"],
     )
@@ -2224,7 +2390,7 @@ def ready_recovery(
         contract,
         run_id=validation_run_id,
         run_attempt=validation_attempt,
-        activation_commit=activation_commit,
+        activation_commit=continuation_commit,
     )
     if final_lane_jobs != lane_jobs:
         raise ApprovalError("Recovery validation lanes changed before publication")
@@ -2246,8 +2412,8 @@ def ready_recovery(
         final_lane_jobs,
         work_actor=work_actor,
     )
-    if _read_ref(client, config, "main") != activation_commit:
-        raise ApprovalError("Recovery activation moved after check publication")
+    if _read_ref(client, config, "main") != continuation_commit:
+        raise ApprovalError("Recovery continuation moved after check publication")
     _verify_release(client, config, sync=True)
     _get_pr(client, config, sync["pull_request"], "open")
     _recovery_workflow_run(
@@ -2255,7 +2421,7 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_attempt,
-        activation_commit,
+        continuation_commit,
         completed=False,
         work_actor=work_actor,
     )
@@ -2264,7 +2430,7 @@ def ready_recovery(
         config,
         validation_run_id,
         validation_artifact_name,
-        head_sha=activation_commit,
+        head_sha=continuation_commit,
         expected_id=validation_artifact["id"],
         expected_digest=validation_artifact["digest"],
     )
@@ -2299,12 +2465,23 @@ def ready_recovery(
         "preflight_run_id": preflight["run_id"],
         "pull_request": sync["pull_request"],
         "recovery_validation": {
-            "activation_validation_run_attempt": activation_run["run_attempt"],
-            "activation_validation_run_id": activation_run["id"],
+            "activation_readiness": published_activation,
+            "activation_validation_run_attempt": activation_validation["run_attempt"],
+            "activation_validation_run_id": activation_validation["run_id"],
             "artifact_digest": validation_artifact["digest"],
             "artifact_id": validation_artifact["id"],
             "artifact_name": validation_artifact_name,
             "attestation": attestation,
+            "continuation_readiness": published_continuation,
+            "continuation_validation_run_attempt": continuation_run["run_attempt"],
+            "continuation_validation_run_id": continuation_run["id"],
+            "failed_validation": {
+                "artifact_digest": failed_validation_artifact["digest"],
+                "artifact_id": failed_validation_artifact["id"],
+                "artifact_name": failed_validation_artifact["name"],
+                "run_attempt": contract["failed_validation"]["run_attempt"],
+                "run_id": contract["failed_validation"]["run_id"],
+            },
             "mode": "published-release-recovery",
             "required_check": required_check,
         },
@@ -2479,12 +2656,17 @@ def _validate_recovery_ready_payload(
         raise ApprovalError("Recovery preflight evidence changed")
     recovery = payload.get("recovery_validation")
     if not isinstance(recovery, dict) or set(recovery) != {
+        "activation_readiness",
         "activation_validation_run_attempt",
         "activation_validation_run_id",
         "artifact_digest",
         "artifact_id",
         "artifact_name",
         "attestation",
+        "continuation_readiness",
+        "continuation_validation_run_attempt",
+        "continuation_validation_run_id",
+        "failed_validation",
         "mode",
         "required_check",
     }:
@@ -2493,6 +2675,22 @@ def _validate_recovery_ready_payload(
         raise ApprovalError("Recovery validation mode is invalid")
     attestation = validation_recovery.validate_attestation_data(
         recovery.get("attestation"), contract=contract
+    )
+    activation = attestation["activation"]
+    continuation = attestation["continuation"]
+    activation_readiness = _feature_readiness(
+        recovery.get("activation_readiness"),
+        config,
+        merge_source_commit=activation["activation_commit"],
+        expected_pull_request=activation["pull_request"],
+        expected_feature_head=activation["feature_head"],
+    )
+    continuation_readiness = _feature_readiness(
+        recovery.get("continuation_readiness"),
+        config,
+        merge_source_commit=continuation["continuation_commit"],
+        expected_pull_request=continuation["pull_request"],
+        expected_feature_head=continuation["feature_head"],
     )
     validation_run_id = _safe_int(
         "Recovery validation run ID", payload.get("sync_validation_run_id")
@@ -2530,6 +2728,31 @@ def _validate_recovery_ready_payload(
         recovery.get("activation_validation_run_attempt"),
         maximum=10**6,
     )
+    if (
+        activation_run_id != contract["activation"]["validation"]["run_id"]
+        or activation_attempt
+        != contract["activation"]["validation"]["run_attempt"]
+    ):
+        raise ApprovalError("Recovery activation validation evidence changed")
+    continuation_run_id = _safe_int(
+        "Continuation Validate PR run ID",
+        recovery.get("continuation_validation_run_id"),
+    )
+    continuation_attempt = _safe_int(
+        "Continuation Validate PR run attempt",
+        recovery.get("continuation_validation_run_attempt"),
+        maximum=10**6,
+    )
+    failed_validation = recovery.get("failed_validation")
+    expected_failed = contract["failed_validation"]
+    if not isinstance(failed_validation, dict) or failed_validation != {
+        "artifact_digest": expected_failed["artifact"]["digest"],
+        "artifact_id": expected_failed["artifact"]["id"],
+        "artifact_name": expected_failed["artifact"]["name"],
+        "run_attempt": expected_failed["run_attempt"],
+        "run_id": expected_failed["run_id"],
+    }:
+        raise ApprovalError("Failed recovery validation evidence changed")
     required_evidence = recovery.get("required_check")
     if not isinstance(required_evidence, dict) or set(required_evidence) != {
         "app_id",
@@ -2609,12 +2832,18 @@ def _validate_recovery_ready_payload(
         raise ApprovalError("Recovery readiness marker nonce is invalid")
     return {
         "activation_attempt": activation_attempt,
-        "activation_commit": attestation["activation"]["activation_commit"],
+        "activation_commit": activation["activation_commit"],
+        "activation_readiness": activation_readiness,
         "activation_run_id": activation_run_id,
         "artifact_digest": artifact_digest,
         "artifact_id": artifact_id,
         "artifact_name": expected_name,
         "attestation": attestation,
+        "continuation_attempt": continuation_attempt,
+        "continuation_commit": continuation["continuation_commit"],
+        "continuation_readiness": continuation_readiness,
+        "continuation_run_id": continuation_run_id,
+        "failed_validation": dict(failed_validation),
         "feature_readiness": feature_readiness,
         "main_attempt": main_attempt,
         "main_run_id": main_run_id,
@@ -2888,7 +3117,7 @@ def authorize(
     if recovered != (evidence["mode"] == "published-release-recovery"):
         raise ApprovalError("Readiness marker prefix and evidence mode disagree")
     first_parent = (
-        evidence["activation_commit"] if recovered else config.source_sha
+        evidence["continuation_commit"] if recovered else config.source_sha
     )
     merge = _verify_merge_commit(
         client,
@@ -2930,9 +3159,24 @@ def authorize(
         activation_merged_at = _timestamp(
             "Recovery activation merge timestamp", activation_pull.get("merged_at")
         )
-        if activation_merged_at >= merged_at:
+        continuation_pull = _verify_continuation_remote(
+            client,
+            config,
+            evidence["attestation"],
+            state="closed",
+            work_actor=work_actor,
+        )
+        continuation_merged_at = _timestamp(
+            "Recovery continuation merge timestamp",
+            continuation_pull.get("merged_at"),
+        )
+        if activation_merged_at >= continuation_merged_at:
             raise ApprovalError(
-                "Synchronization PR did not merge after recovery activation"
+                "Recovery continuation did not merge after its activation"
+            )
+        if continuation_merged_at >= merged_at:
+            raise ApprovalError(
+                "Synchronization PR did not merge after recovery continuation"
             )
         _verify_main_run_for_commit(
             client,
@@ -2941,7 +3185,17 @@ def authorize(
             evidence["activation_run_id"],
             evidence["activation_attempt"],
         )
+        _verify_main_run_for_commit(
+            client,
+            config,
+            evidence["continuation_commit"],
+            evidence["continuation_run_id"],
+            evidence["continuation_attempt"],
+        )
         _verify_recovery_preflight(
+            client, config, contract, work_actor=work_actor
+        )
+        _verify_failed_recovery_validation(
             client, config, contract, work_actor=work_actor
         )
         _recovery_workflow_run(
@@ -2949,14 +3203,14 @@ def authorize(
             config,
             evidence["sync_run_id"],
             evidence["sync_attempt"],
-            evidence["activation_commit"],
+            evidence["continuation_commit"],
             completed=True,
             work_actor=work_actor,
         )
         _verify_newest_recovery_run(
             client,
             config,
-            evidence["activation_commit"],
+            evidence["continuation_commit"],
             evidence["sync_run_id"],
             evidence["sync_attempt"],
             completed=True,
@@ -2967,7 +3221,7 @@ def authorize(
             config,
             evidence["sync_run_id"],
             evidence["artifact_name"],
-            head_sha=evidence["activation_commit"],
+            head_sha=evidence["continuation_commit"],
             expected_id=evidence["artifact_id"],
             expected_digest=evidence["artifact_digest"],
         )
@@ -2977,7 +3231,7 @@ def authorize(
             contract,
             run_id=evidence["sync_run_id"],
             run_attempt=evidence["sync_attempt"],
-            activation_commit=evidence["activation_commit"],
+            activation_commit=evidence["continuation_commit"],
         )
         if recovery_lanes != evidence["required_lanes"]:
             raise ApprovalError("Recovery validation lane evidence changed")
@@ -3069,6 +3323,9 @@ def authorize(
         _verify_recovery_preflight(
             client, config, contract, work_actor=work_actor
         )
+        _verify_failed_recovery_validation(
+            client, config, contract, work_actor=work_actor
+        )
         _verify_main_run_for_commit(
             client,
             config,
@@ -3076,12 +3333,19 @@ def authorize(
             evidence["activation_run_id"],
             evidence["activation_attempt"],
         )
+        _verify_main_run_for_commit(
+            client,
+            config,
+            evidence["continuation_commit"],
+            evidence["continuation_run_id"],
+            evidence["continuation_attempt"],
+        )
         _recovery_workflow_run(
             client,
             config,
             evidence["sync_run_id"],
             evidence["sync_attempt"],
-            evidence["activation_commit"],
+            evidence["continuation_commit"],
             completed=True,
             work_actor=work_actor,
         )
@@ -3090,7 +3354,7 @@ def authorize(
             config,
             evidence["sync_run_id"],
             evidence["artifact_name"],
-            head_sha=evidence["activation_commit"],
+            head_sha=evidence["continuation_commit"],
             expected_id=recovery_artifact["id"],
             expected_digest=recovery_artifact["digest"],
         )
@@ -3100,7 +3364,7 @@ def authorize(
             contract,
             run_id=evidence["sync_run_id"],
             run_attempt=evidence["sync_attempt"],
-            activation_commit=evidence["activation_commit"],
+            activation_commit=evidence["continuation_commit"],
         )
         if recovery_lanes != evidence["required_lanes"]:
             raise ApprovalError("Recovery validation lane evidence changed")
@@ -3311,6 +3575,8 @@ def _parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--preflight-artifact", required=True)
     recovery_parser.add_argument("--recovery-contract", type=Path, required=True)
     recovery_parser.add_argument("--feature-readiness", type=Path, required=True)
+    recovery_parser.add_argument("--activation-readiness", type=Path, required=True)
+    recovery_parser.add_argument("--continuation-readiness", type=Path, required=True)
     recovery_parser.add_argument(
         "--validation-attestation", type=Path, required=True
     )
@@ -3377,6 +3643,18 @@ def main(
             feature_readiness = json.loads(feature_readiness_raw)
             if feature_readiness_raw != _canonical(feature_readiness) + "\n":
                 raise ApprovalError("Feature-readiness evidence is not canonical")
+            activation_readiness_raw = args.activation_readiness.read_text(
+                encoding="ascii"
+            )
+            activation_readiness = json.loads(activation_readiness_raw)
+            if activation_readiness_raw != _canonical(activation_readiness) + "\n":
+                raise ApprovalError("Activation readiness evidence is not canonical")
+            continuation_readiness_raw = args.continuation_readiness.read_text(
+                encoding="ascii"
+            )
+            continuation_readiness = json.loads(continuation_readiness_raw)
+            if continuation_readiness_raw != _canonical(continuation_readiness) + "\n":
+                raise ApprovalError("Continuation readiness evidence is not canonical")
             attestation_raw = args.validation_attestation.read_text(encoding="ascii")
             validation_attestation = json.loads(attestation_raw)
             if attestation_raw != _canonical(validation_attestation) + "\n":
@@ -3390,6 +3668,8 @@ def main(
                 server_url=args.server_url,
                 output=args.output,
                 feature_readiness=feature_readiness,
+                activation_readiness=activation_readiness,
+                continuation_readiness=continuation_readiness,
                 validation_attestation=validation_attestation,
                 validation_artifact_id=args.validation_artifact_id,
                 validation_artifact_name=args.validation_artifact_name,

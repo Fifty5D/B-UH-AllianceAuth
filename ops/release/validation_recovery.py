@@ -3,8 +3,8 @@
 
 This module does not publish, rebuild, approve, merge, or deploy a release.  It
 validates the one reviewed recovery contract, materializes a disposable future
-ledger shape, applies the two-file test-only harness overlay, and emits canonical
-evidence for the trusted approval verifier.
+ledger shape, applies the two-file test-only harness plus its isolated approval
+support, and emits canonical evidence for the trusted approval verifier.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ except ImportError:  # pragma: no cover - exercised by the CLI tests.
     import ledger  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 1
-ATTESTATION_SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+ATTESTATION_SCHEMA_VERSION = 2
 RECOVERY_ID = "published-platform-v0.6.2-validation-20260909"
 WORKFLOW_PATH = ".github/workflows/source-published-release-recovery.yml"
 DEFAULT_CONTRACT = Path(__file__).with_name(
@@ -44,6 +44,17 @@ LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 HARNESS_PATHS = (
     "tests/deploy/test_request_archive.py",
     "tests/platform/test_coordinated_recovery_rehearsal.py",
+)
+TEST_SUPPORT_ROOT = ".buh-recovery-test-support"
+TEST_SUPPORT_PATHS = (
+    "ops/release/buh_release.py",
+    "ops/release/ledger.py",
+    "ops/release/open_sync_pr.py",
+    "ops/release/platform_approval.py",
+    "ops/release/published-release-recovery-v0.6.2.json",
+    "ops/release/recovery_policy.py",
+    "ops/release/validation_recovery.py",
+    "tests/release/test_platform_approval.py",
 )
 
 REQUIRED_CHECK_CONTEXT = "Source test suite / Required source checks"
@@ -75,6 +86,24 @@ ACTIVATION_PATHS = (
     "ops/release/published-release-recovery-v0.6.2.json",
     "ops/release/validation_recovery.py",
     "tests/deploy/test_request_archive.py",
+    "tests/platform/test_configuration.py",
+    "tests/platform/test_coordinated_recovery_rehearsal.py",
+    "tests/platform/test_release_workflow_execution.py",
+    "tests/release/test_platform_approval.py",
+    "tests/release/test_validation_recovery.py",
+)
+
+# Exact tree delta permitted for the one follow-up after activation PR #53.
+# This list is intentionally separate from ACTIVATION_PATHS: the original merge
+# remains immutable evidence and cannot be reinterpreted as the repair harness.
+CONTINUATION_PATHS = (
+    ".github/workflows/reusable-source-tests.yml",
+    ".github/workflows/source-published-release-recovery.yml",
+    "changes/recovery-rehearsal-snapshot-isolation.toml",
+    "ops/release/README.md",
+    "ops/release/platform_approval.py",
+    "ops/release/published-release-recovery-v0.6.2.json",
+    "ops/release/validation_recovery.py",
     "tests/platform/test_configuration.py",
     "tests/platform/test_coordinated_recovery_rehearsal.py",
     "tests/platform/test_release_workflow_execution.py",
@@ -139,6 +168,8 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         raise ValidationRecoveryError("Validation recovery contract is not canonical")
     if not isinstance(value, dict) or set(value) != {
         "activation",
+        "continuation",
+        "failed_validation",
         "feature",
         "main_validation",
         "platform_version",
@@ -163,18 +194,113 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
     if not isinstance(activation, dict) or set(activation) != {
         "allowed_paths",
         "base_commit",
-        "harness_paths",
+        "commit",
+        "feature_head",
         "pull_request",
+        "tree",
+        "validation",
     }:
         raise ValidationRecoveryError("Recovery activation contract is invalid")
+    activation_validation = activation.get("validation")
+    if not isinstance(activation_validation, dict) or set(activation_validation) != {
+        "run_attempt",
+        "run_id",
+    }:
+        raise ValidationRecoveryError("Recovery activation validation is invalid")
     if (
         _positive_int(activation.get("pull_request"), context="Activation PR") != 53
         or _commit(activation.get("base_commit"), context="Activation base")
         != "4f98e7cb559ee1a9b269ea1f94938678d2dac4df"
+        or _commit(activation.get("commit"), context="Activation commit")
+        != "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48"
+        or _commit(activation.get("feature_head"), context="Activation feature head")
+        != "a8aaf10e03c35a5510f0a7e03a92d4f19e8be0e8"
+        or _commit(activation.get("tree"), context="Activation tree")
+        != "1876038432e135721b4c3cd8117f37a0bcf013b6"
         or activation.get("allowed_paths") != list(ACTIVATION_PATHS)
-        or activation.get("harness_paths") != list(HARNESS_PATHS)
+        or activation_validation != {"run_attempt": 1, "run_id": 34427799821}
     ):
         raise ValidationRecoveryError("Recovery activation scope changed")
+
+    continuation = value.get("continuation")
+    if not isinstance(continuation, dict) or set(continuation) != {
+        "allowed_paths",
+        "base_commit",
+        "harness_paths",
+        "pull_request",
+        "test_support_paths",
+        "test_support_root",
+    }:
+        raise ValidationRecoveryError("Recovery continuation contract is invalid")
+    if (
+        _positive_int(continuation.get("pull_request"), context="Continuation PR")
+        != 54
+        or _commit(continuation.get("base_commit"), context="Continuation base")
+        != activation["commit"]
+        or continuation.get("allowed_paths") != list(CONTINUATION_PATHS)
+        or continuation.get("harness_paths") != list(HARNESS_PATHS)
+        or continuation.get("test_support_paths") != list(TEST_SUPPORT_PATHS)
+        or continuation.get("test_support_root") != TEST_SUPPORT_ROOT
+    ):
+        raise ValidationRecoveryError("Recovery continuation scope changed")
+
+    failed_validation = value.get("failed_validation")
+    if not isinstance(failed_validation, dict) or set(failed_validation) != {
+        "artifact",
+        "jobs",
+        "run_attempt",
+        "run_id",
+    }:
+        raise ValidationRecoveryError("Failed recovery validation evidence is invalid")
+    failed_artifact = failed_validation.get("artifact")
+    if (
+        _positive_int(failed_validation.get("run_id"), context="Failed recovery run ID")
+        != 34428188769
+        or _positive_int(
+            failed_validation.get("run_attempt"),
+            context="Failed recovery run attempt",
+        )
+        != 1
+        or failed_artifact
+        != {
+            "digest": "sha256:a7f399562d0c4ddc4be025b17acc4a448ec518561537cffcb7be2d61016fbd4b",
+            "id": 10133470248,
+            "name": "source-fast-failure-34428188769-1",
+        }
+    ):
+        raise ValidationRecoveryError("Failed recovery validation identity changed")
+    failed_jobs = failed_validation.get("jobs")
+    if not isinstance(failed_jobs, list) or len(failed_jobs) != 11:
+        raise ValidationRecoveryError("Failed recovery validation job set is invalid")
+    for item in failed_jobs:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"conclusion", "id", "name"}
+            or item.get("conclusion") not in {"failure", "skipped", "success"}
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+        ):
+            raise ValidationRecoveryError("Failed recovery validation job is invalid")
+        _positive_int(item.get("id"), context="Failed recovery job ID")
+    if {item["id"] for item in failed_jobs} != {
+        102717801188,
+        102717830025,
+        102717830061,
+        102717830063,
+        102717855709,
+        102717855713,
+        102717855748,
+        102717855764,
+        102718509763,
+        102718527684,
+        102718528156,
+    }:
+        raise ValidationRecoveryError("Failed recovery validation jobs changed")
+    if [item["id"] for item in failed_jobs if item["conclusion"] == "failure"] != [
+        102717855709,
+        102718509763,
+    ]:
+        raise ValidationRecoveryError("Failed recovery validation failure set changed")
 
     feature = value.get("feature")
     if not isinstance(feature, dict) or set(feature) != {
@@ -503,7 +629,51 @@ def _verify_release_identity(root: Path, contract: Mapping[str, Any]) -> None:
         raise ValidationRecoveryError("Published release manifest identity changed")
 
 
-def validate_activation(
+def _blob_records(
+    root: Path, commit: str, paths: Sequence[str]
+) -> list[dict[str, str]]:
+    records = []
+    for path in paths:
+        object_id, content = _blob(root, commit, path)
+        records.append(
+            {
+                "git_blob_sha": object_id,
+                "path": path,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    return records
+
+
+def verify_activation(
+    root: Path, *, contract: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Verify the already-merged PR #53 activation as immutable evidence."""
+
+    root = root.resolve()
+    activation = contract["activation"]
+    base = _resolve(root, activation["base_commit"])
+    commit = _resolve(root, activation["commit"])
+    feature_head = _resolve(root, activation["feature_head"])
+    if (
+        _parents(root, commit) != [base, feature_head]
+        or _tree(root, commit) != activation["tree"]
+        or _tree(root, feature_head) != activation["tree"]
+        or _changed_paths(root, base, feature_head) != ACTIVATION_PATHS
+        or _changed_paths(root, base, commit) != ACTIVATION_PATHS
+    ):
+        raise ValidationRecoveryError("Original recovery activation identity changed")
+    return {
+        "activation_commit": commit,
+        "activation_tree": activation["tree"],
+        "base_commit": base,
+        "feature_head": feature_head,
+        "paths": _blob_records(root, commit, ACTIVATION_PATHS),
+        "pull_request": activation["pull_request"],
+    }
+
+
+def validate_continuation(
     root: Path,
     current_commit: str,
     *,
@@ -511,75 +681,73 @@ def validate_activation(
     pull_request: int | None,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Validate the exact review branch or its one merge-commit activation."""
+    """Validate the exact follow-up branch or its one merge commit."""
 
     root = root.resolve()
     current = _resolve(root, current_commit)
-    base = contract["activation"]["base_commit"]
+    activation = verify_activation(root, contract=contract)
+    continuation = contract["continuation"]
+    base = activation["activation_commit"]
     release = contract["release"]["commit"]
     _verify_release_identity(root, contract)
+    if continuation["base_commit"] != base:
+        raise ValidationRecoveryError("Recovery continuation base changed")
     if _git(
         root,
         ["merge-base", "--is-ancestor", base, current],
-        operation="activation ancestry inspection",
+        operation="continuation ancestry inspection",
         check=False,
     ).returncode != 0:
-        raise ValidationRecoveryError("Activation is not based on the reviewed source")
+        raise ValidationRecoveryError("Continuation is not based on the activation")
     if _git(
         root,
         ["merge-base", "--is-ancestor", release, current],
         operation="unsynchronized release inspection",
         check=False,
     ).returncode == 0:
-        raise ValidationRecoveryError("Activation unexpectedly contains the release ledger")
+        raise ValidationRecoveryError("Continuation unexpectedly contains the release ledger")
 
     if event_name == "pull_request":
-        if pull_request != contract["activation"]["pull_request"]:
-            raise ValidationRecoveryError("Recovery is restricted to activation PR #53")
+        if pull_request != continuation["pull_request"]:
+            raise ValidationRecoveryError("Recovery is restricted to continuation PR #54")
         feature_head = current
-        activation_commit = None
+        continuation_commit = None
     elif event_name in {"push", "workflow_dispatch"}:
         parents = _parents(root, current)
         if len(parents) != 2 or parents[0] != base:
             raise ValidationRecoveryError(
-                "Recovery activation is not a direct two-parent merge onto its source"
+                "Recovery continuation is not a direct two-parent merge onto its activation"
             )
         feature_head = parents[1]
         if _tree(root, feature_head) != _tree(root, current):
-            raise ValidationRecoveryError("Activation merge tree differs from its reviewed head")
-        activation_commit = current
+            raise ValidationRecoveryError(
+                "Continuation merge tree differs from its reviewed head"
+            )
+        continuation_commit = current
     else:
-        raise ValidationRecoveryError("Event cannot activate published-release recovery")
+        raise ValidationRecoveryError("Event cannot continue published-release recovery")
 
     if _git(
         root,
         ["merge-base", "--is-ancestor", base, feature_head],
-        operation="feature ancestry inspection",
+        operation="continuation feature ancestry inspection",
         check=False,
     ).returncode != 0:
-        raise ValidationRecoveryError("Activation feature head has invalid ancestry")
+        raise ValidationRecoveryError("Continuation feature head has invalid ancestry")
     changed = _changed_paths(root, base, feature_head)
-    if changed != ACTIVATION_PATHS:
-        raise ValidationRecoveryError("Activation tree delta is outside the reviewed scope")
-    if _changed_paths(root, base, current) != ACTIVATION_PATHS:
-        raise ValidationRecoveryError("Current activation tree delta changed")
-    blobs = []
-    for path in ACTIVATION_PATHS:
-        object_id, content = _blob(root, current, path)
-        blobs.append(
-            {
-                "git_blob_sha": object_id,
-                "path": path,
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
+    if changed != CONTINUATION_PATHS:
+        raise ValidationRecoveryError(
+            "Continuation tree delta is outside the reviewed scope"
         )
+    if _changed_paths(root, base, current) != CONTINUATION_PATHS:
+        raise ValidationRecoveryError("Current continuation tree delta changed")
     return {
-        "activation_commit": activation_commit,
-        "activation_tree": _tree(root, current),
+        "continuation_commit": continuation_commit,
+        "continuation_tree": _tree(root, current),
         "base_commit": base,
         "feature_head": feature_head,
-        "paths": blobs,
-        "pull_request": contract["activation"]["pull_request"],
+        "paths": _blob_records(root, current, CONTINUATION_PATHS),
+        "pull_request": continuation["pull_request"],
     }
 
 
@@ -660,7 +828,7 @@ def verify_pending_ledger(
     else:
         raise ValidationRecoveryError("Published-release recovery is no longer pending")
 
-    activation = validate_activation(
+    continuation = validate_continuation(
         root,
         current_commit,
         event_name=event_name,
@@ -709,7 +877,8 @@ def verify_pending_ledger(
     ):
         raise ValidationRecoveryError("Post-synchronization release plan is invalid")
     return {
-        "activation": activation,
+        "activation": verify_activation(root, contract=contract),
+        "continuation": continuation,
         "latest_release": {
             key: state["latest"][key]
             for key in ("manifest_sha256", "platform_version", "release_commit")
@@ -734,38 +903,39 @@ def validate_hold(
     *,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Hold automatic new-release creation across activation and sync merge."""
+    """Hold new-release creation across the reviewed continuation and sync."""
 
     current = _resolve(root, current_commit)
     try:
-        activation = validate_activation(
+        continuation = validate_continuation(
             root,
             current,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        state = "activation-pending-sync"
-        activation_commit = current
+        state = "continuation-pending-sync"
+        continuation_commit = current
     except ValidationRecoveryError:
         parents = _parents(root, current)
         release = contract["release"]["commit"]
         if len(parents) != 2 or parents[1] != release:
             raise ValidationRecoveryError("Current main is outside the recovery hold")
-        activation_commit = parents[0]
-        activation = validate_activation(
+        continuation_commit = parents[0]
+        continuation = validate_continuation(
             root,
-            activation_commit,
+            continuation_commit,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        if _tree(root, current) != _merge_tree(root, activation_commit, release):
+        if _tree(root, current) != _merge_tree(root, continuation_commit, release):
             raise ValidationRecoveryError("Synchronization merge tree changed")
         state = "synchronized-awaiting-retirement"
     return {
-        "activation": activation,
-        "activation_commit": activation_commit,
+        "activation": verify_activation(root, contract=contract),
+        "continuation": continuation,
+        "continuation_commit": continuation_commit,
         "current_commit": current,
         "recovery_id": contract["recovery_id"],
         "schema_version": SCHEMA_VERSION,
@@ -779,7 +949,7 @@ def apply_harness(
     *,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Overlay only the reviewed fixture corrections onto exact v0.6.2."""
+    """Overlay reviewed fixtures and isolated support onto exact v0.6.2."""
 
     root = root.resolve()
     release = contract["release"]["commit"]
@@ -791,7 +961,7 @@ def apply_harness(
         operation="harness worktree inspection",
     ).stdout:
         raise ValidationRecoveryError("Harness target worktree is not clean")
-    activation = validate_activation(
+    continuation = validate_continuation(
         root,
         harness_commit,
         event_name="workflow_dispatch",
@@ -821,6 +991,35 @@ def apply_harness(
                 "sha256": hashlib.sha256(content).hexdigest(),
             }
         )
+    support_root = root / TEST_SUPPORT_ROOT
+    if support_root.exists() or support_root.is_symlink():
+        raise ValidationRecoveryError("Recovery test-support root already exists")
+    support_files = []
+    try:
+        support_root.mkdir(mode=0o755)
+        for path in TEST_SUPPORT_PATHS:
+            object_id, content = _blob(root, harness_commit, path)
+            staged_path = f"{TEST_SUPPORT_ROOT}/{path}"
+            destination = root.joinpath(*PurePosixPath(staged_path).parts)
+            destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                raise ValidationRecoveryError("Recovery test-support path is unsafe")
+            destination.write_bytes(content)
+            destination.chmod(
+                stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+            )
+            support_files.append(
+                {
+                    "git_blob_sha": object_id,
+                    "path": path,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "staged_path": staged_path,
+                }
+            )
+    except (OSError, ValidationRecoveryError) as exc:
+        if isinstance(exc, ValidationRecoveryError):
+            raise
+        raise ValidationRecoveryError("Could not stage recovery test support") from exc
     changed = _changed_paths(root, release, "HEAD")
     # `git diff <commit> HEAD` cannot see worktree edits; inspect the index/worktree.
     status = _git_bytes(
@@ -831,22 +1030,38 @@ def apply_harness(
     actual = tuple(
         sorted(item.decode("utf-8") for item in status.split(b"\0") if item)
     )
-    if changed or actual != HARNESS_PATHS:
+    untracked = _git_bytes(
+        root,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        operation="staged recovery support inspection",
+    )
+    actual_support = tuple(
+        sorted(item.decode("utf-8") for item in untracked.split(b"\0") if item)
+    )
+    expected_support = tuple(
+        f"{TEST_SUPPORT_ROOT}/{path}" for path in TEST_SUPPORT_PATHS
+    )
+    if changed or actual != HARNESS_PATHS or actual_support != expected_support:
         raise ValidationRecoveryError("Harness changed files outside its reviewed scope")
     return {
-        "activation": activation,
+        "activation": verify_activation(root, contract=contract),
+        "continuation": continuation,
         "files": files,
         "harness_commit": harness_commit,
         "recovery_id": contract["recovery_id"],
         "release_commit": release,
         "release_tree": contract["release"]["tree"],
         "schema_version": SCHEMA_VERSION,
+        "test_support": {
+            "files": support_files,
+            "root": TEST_SUPPORT_ROOT,
+        },
     }
 
 
 def create_attestation(
     root: Path,
-    activation_commit: str,
+    continuation_commit: str,
     *,
     repository: str,
     run_id: int,
@@ -861,29 +1076,33 @@ def create_attestation(
         raise ValidationRecoveryError("Recovery workflow reruns are forbidden")
     if LOGIN_RE.fullmatch(actor) is None:
         raise ValidationRecoveryError("Recovery workflow actor is invalid")
-    activation = validate_activation(
+    continuation = validate_continuation(
         root,
-        activation_commit,
+        continuation_commit,
         event_name="workflow_dispatch",
         pull_request=None,
         contract=contract,
     )
-    files = []
-    for path in HARNESS_PATHS:
-        object_id, content = _blob(root, activation_commit, path)
-        files.append(
+    files = _blob_records(root, continuation_commit, HARNESS_PATHS)
+    support_files = []
+    for item in _blob_records(root, continuation_commit, TEST_SUPPORT_PATHS):
+        support_files.append(
             {
-                "git_blob_sha": object_id,
-                "path": path,
-                "sha256": hashlib.sha256(content).hexdigest(),
+                **item,
+                "staged_path": f"{TEST_SUPPORT_ROOT}/{item['path']}",
             }
         )
     return {
-        "activation": activation,
+        "activation": verify_activation(root, contract=contract),
+        "continuation": continuation,
         "harness": {
-            "commit": activation_commit,
+            "commit": continuation_commit,
             "files": files,
-            "tree": activation["activation_tree"],
+            "test_support": {
+                "files": support_files,
+                "root": TEST_SUPPORT_ROOT,
+            },
+            "tree": continuation["continuation_tree"],
         },
         "recovery_id": contract["recovery_id"],
         "release": dict(contract["release"]),
@@ -893,7 +1112,7 @@ def create_attestation(
             "actor": actor,
             "event": "workflow_dispatch",
             "head_branch": "main",
-            "head_sha": activation_commit,
+            "head_sha": continuation_commit,
             "result": "success",
             "run_attempt": run_attempt,
             "run_id": run_id,
@@ -908,10 +1127,11 @@ def validate_attestation_data(
     contract: Mapping[str, Any],
     expected_run_id: int | None = None,
     expected_run_attempt: int | None = None,
-    expected_activation: str | None = None,
+    expected_continuation: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "activation",
+        "continuation",
         "harness",
         "recovery_id",
         "release",
@@ -941,12 +1161,11 @@ def validate_attestation_data(
         activation.get("activation_commit"), context="Attested activation commit"
     )
     if (
-        activation.get("base_commit") != contract["activation"]["base_commit"]
+        activation_commit != contract["activation"]["commit"]
+        or activation.get("activation_tree") != contract["activation"]["tree"]
+        or activation.get("base_commit") != contract["activation"]["base_commit"]
+        or activation.get("feature_head") != contract["activation"]["feature_head"]
         or activation.get("pull_request") != contract["activation"]["pull_request"]
-        or COMMIT_RE.fullmatch(str(activation.get("activation_tree"))) is None
-        or COMMIT_RE.fullmatch(str(activation.get("feature_head"))) is None
-        or expected_activation is not None
-        and activation_commit != expected_activation
     ):
         raise ValidationRecoveryError("Validation recovery activation identity changed")
     paths = activation.get("paths")
@@ -964,12 +1183,56 @@ def validate_attestation_data(
         _commit(item.get("git_blob_sha"), context="Activation blob")
         _sha256(item.get("sha256"), context="Activation blob digest")
 
+    continuation = value.get("continuation")
+    if not isinstance(continuation, dict) or set(continuation) != {
+        "base_commit",
+        "continuation_commit",
+        "continuation_tree",
+        "feature_head",
+        "paths",
+        "pull_request",
+    }:
+        raise ValidationRecoveryError("Validation recovery continuation is invalid")
+    continuation_commit = _commit(
+        continuation.get("continuation_commit"),
+        context="Attested continuation commit",
+    )
+    if (
+        continuation.get("base_commit") != activation_commit
+        or continuation.get("pull_request")
+        != contract["continuation"]["pull_request"]
+        or COMMIT_RE.fullmatch(str(continuation.get("continuation_tree"))) is None
+        or COMMIT_RE.fullmatch(str(continuation.get("feature_head"))) is None
+        or expected_continuation is not None
+        and continuation_commit != expected_continuation
+    ):
+        raise ValidationRecoveryError("Validation recovery continuation identity changed")
+    continuation_paths = continuation.get("paths")
+    if not isinstance(continuation_paths, list) or [
+        item.get("path") for item in continuation_paths
+    ] != list(CONTINUATION_PATHS):
+        raise ValidationRecoveryError("Attested continuation path scope changed")
+    for item in continuation_paths:
+        if not isinstance(item, dict) or set(item) != {
+            "git_blob_sha",
+            "path",
+            "sha256",
+        }:
+            raise ValidationRecoveryError("Attested continuation blob is invalid")
+        _commit(item.get("git_blob_sha"), context="Continuation blob")
+        _sha256(item.get("sha256"), context="Continuation blob digest")
+
     harness = value.get("harness")
-    if not isinstance(harness, dict) or set(harness) != {"commit", "files", "tree"}:
+    if not isinstance(harness, dict) or set(harness) != {
+        "commit",
+        "files",
+        "test_support",
+        "tree",
+    }:
         raise ValidationRecoveryError("Validation recovery harness is invalid")
     if (
-        harness.get("commit") != activation_commit
-        or harness.get("tree") != activation.get("activation_tree")
+        harness.get("commit") != continuation_commit
+        or harness.get("tree") != continuation.get("continuation_tree")
     ):
         raise ValidationRecoveryError("Validation recovery harness identity changed")
     files = harness.get("files")
@@ -986,9 +1249,32 @@ def validate_attestation_data(
             raise ValidationRecoveryError("Validation recovery harness blob is invalid")
         _commit(item.get("git_blob_sha"), context="Harness blob")
         _sha256(item.get("sha256"), context="Harness blob digest")
-    activation_by_path = {item["path"]: item for item in paths}
-    if any(activation_by_path[item["path"]] != item for item in files):
-        raise ValidationRecoveryError("Harness bytes differ from the activation commit")
+    reviewed_by_path = {item["path"]: item for item in paths}
+    reviewed_by_path.update({item["path"]: item for item in continuation_paths})
+    if any(reviewed_by_path.get(item["path"]) != item for item in files):
+        raise ValidationRecoveryError("Harness bytes differ from the continuation commit")
+    test_support = harness.get("test_support")
+    if not isinstance(test_support, dict) or set(test_support) != {"files", "root"}:
+        raise ValidationRecoveryError("Validation recovery test support is invalid")
+    if test_support.get("root") != TEST_SUPPORT_ROOT:
+        raise ValidationRecoveryError("Validation recovery test-support root changed")
+    support_files = test_support.get("files")
+    if not isinstance(support_files, list) or [
+        item.get("path") for item in support_files
+    ] != list(TEST_SUPPORT_PATHS):
+        raise ValidationRecoveryError("Validation recovery test-support scope changed")
+    for path, item in zip(TEST_SUPPORT_PATHS, support_files, strict=True):
+        if not isinstance(item, dict) or set(item) != {
+            "git_blob_sha",
+            "path",
+            "sha256",
+            "staged_path",
+        }:
+            raise ValidationRecoveryError("Validation recovery support blob is invalid")
+        if item.get("staged_path") != f"{TEST_SUPPORT_ROOT}/{path}":
+            raise ValidationRecoveryError("Validation recovery support path changed")
+        _commit(item.get("git_blob_sha"), context="Test-support blob")
+        _sha256(item.get("sha256"), context="Test-support blob digest")
 
     validation = value.get("validation")
     if not isinstance(validation, dict) or set(validation) != {
@@ -1010,7 +1296,7 @@ def validate_attestation_data(
         attempt != 1
         or validation.get("event") != "workflow_dispatch"
         or validation.get("head_branch") != "main"
-        or validation.get("head_sha") != activation_commit
+        or validation.get("head_sha") != continuation_commit
         or validation.get("result") != "success"
         or validation.get("workflow_path") != WORKFLOW_PATH
         or not isinstance(validation.get("actor"), str)
@@ -1030,7 +1316,7 @@ def load_attestation(
     contract: Mapping[str, Any],
     expected_run_id: int | None = None,
     expected_run_attempt: int | None = None,
-    expected_activation: str | None = None,
+    expected_continuation: str | None = None,
 ) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
@@ -1049,7 +1335,7 @@ def load_attestation(
         contract=contract,
         expected_run_id=expected_run_id,
         expected_run_attempt=expected_run_attempt,
-        expected_activation=expected_activation,
+        expected_continuation=expected_continuation,
     )
 
 
@@ -1081,12 +1367,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("activation", "ledger", "hold"):
+    for name in ("continuation", "ledger", "hold"):
         command = subparsers.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--source-commit", required=True)
         command.add_argument("--output", type=Path, required=True)
-        if name in {"activation", "ledger"}:
+        if name in {"continuation", "ledger"}:
             command.add_argument(
                 "--event-name",
                 choices=("pull_request", "push", "workflow_dispatch"),
@@ -1099,7 +1385,7 @@ def _parser() -> argparse.ArgumentParser:
     overlay.add_argument("--output", type=Path, required=True)
     attest = subparsers.add_parser("attest")
     attest.add_argument("--root", type=Path, required=True)
-    attest.add_argument("--activation-commit", required=True)
+    attest.add_argument("--continuation-commit", required=True)
     attest.add_argument("--repository", required=True)
     attest.add_argument("--run-id", type=int, required=True)
     attest.add_argument("--run-attempt", type=int, required=True)
@@ -1109,7 +1395,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--attestation", type=Path, required=True)
     verify.add_argument("--run-id", type=int, required=True)
     verify.add_argument("--run-attempt", type=int, required=True)
-    verify.add_argument("--activation-commit", required=True)
+    verify.add_argument("--continuation-commit", required=True)
     return parser
 
 
@@ -1117,19 +1403,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         contract = load_contract(arguments.contract)
-        if arguments.command == "activation":
-            report = validate_activation(
+        if arguments.command == "continuation":
+            continuation = validate_continuation(
                 arguments.root,
                 arguments.source_commit,
                 event_name=arguments.event_name,
                 pull_request=arguments.pull_request,
                 contract=contract,
             )
+            report = {
+                "activation": verify_activation(arguments.root, contract=contract),
+                "continuation": continuation,
+                "recovery_id": contract["recovery_id"],
+                "schema_version": SCHEMA_VERSION,
+            }
             _write(arguments.output, report)
             _append_outputs(
                 {
-                    "activation_commit": report["activation_commit"] or "feature",
-                    "feature_head": report["feature_head"],
+                    "activation_commit": report["activation"]["activation_commit"],
+                    "activation_feature_head": report["activation"]["feature_head"],
+                    "continuation_commit": (
+                        continuation["continuation_commit"] or "feature"
+                    ),
+                    "continuation_feature_head": continuation["feature_head"],
                     "release_commit": contract["release"]["commit"],
                     "source_commit": contract["release"]["source_commit"],
                 }
@@ -1169,7 +1465,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "attest":
             report = create_attestation(
                 arguments.root,
-                arguments.activation_commit,
+                arguments.continuation_commit,
                 repository=arguments.repository,
                 run_id=arguments.run_id,
                 run_attempt=arguments.run_attempt,
@@ -1179,7 +1475,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(arguments.output, report)
             _append_outputs(
                 {
-                    "activation_commit": arguments.activation_commit,
+                    "activation_commit": contract["activation"]["commit"],
+                    "continuation_commit": arguments.continuation_commit,
                     "release_commit": contract["release"]["commit"],
                     "source_commit": contract["release"]["source_commit"],
                 }
@@ -1190,7 +1487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contract=contract,
                 expected_run_id=arguments.run_id,
                 expected_run_attempt=arguments.run_attempt,
-                expected_activation=arguments.activation_commit,
+                expected_continuation=arguments.continuation_commit,
             )
             report = {
                 "recovery_id": contract["recovery_id"],
