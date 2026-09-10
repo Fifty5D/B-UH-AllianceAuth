@@ -293,6 +293,45 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Stage the merge-owned approval verifier
+        id: approval_source
+        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        env:
+          APPROVAL_SOURCE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${APPROVAL_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"
+          [[ "$(git rev-parse FETCH_HEAD)" == "${APPROVAL_SOURCE_COMMIT}" ]]
+          read -r -a parents <<<"$(git show -s --format='%P' "${APPROVAL_SOURCE_COMMIT}")"
+          [[ "${#parents[@]}" -eq 2 ]]
+          [[ "${parents[1]}" == "${RELEASE_COMMIT}" ]]
+
+          stage="${RUNNER_TEMP}/buh-platform-approval-source"
+          [[ ! -e "${stage}" ]]
+          mkdir "${stage}"
+          required=(
+            ops/release/buh_release.py
+            ops/release/ledger.py
+            ops/release/open_sync_pr.py
+            ops/release/platform_approval.py
+            ops/release/published-release-recovery-v0.6.2.json
+            ops/release/recovery_policy.py
+            ops/release/validation_recovery.py
+          )
+          git archive --format=tar "${APPROVAL_SOURCE_COMMIT}" -- "${required[@]}" |
+            tar -xf - -C "${stage}"
+          [[ "$(find "${stage}" -type f | wc -l)" -eq "${#required[@]}" ]]
+          [[ -z "$(find "${stage}" -type l -print -quit)" ]]
+          for path in "${required[@]}"; do
+            [[ -f "${stage}/${path}" && ! -L "${stage}/${path}" ]]
+            [[ "$(git hash-object "${stage}/${path}")" == \
+               "$(git rev-parse "${APPROVAL_SOURCE_COMMIT}:${path}")" ]]
+          done
+          echo "tool=${stage}/ops/release/platform_approval.py" >>"${GITHUB_OUTPUT}"
+
       - name: Verify release lineage, bundle, and production compatibility
         id: release
         env:
@@ -428,20 +467,23 @@ jobs:
       - name: Reauthorize the queued production operation
         if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
         env:
+          APPROVAL_TOOL: ${{ steps.approval_source.outputs.tool }}
           GITHUB_TOKEN: ${{ github.token }}
           PREFLIGHT_ARTIFACT: ${{ inputs.preflight_artifact }}
           PREFLIGHT_ARTIFACT_DIGEST: ${{ inputs.preflight_artifact_digest }}
           PREFLIGHT_ARTIFACT_ID: ${{ inputs.preflight_artifact_id }}
           PREFLIGHT_RUN_ATTEMPT: ${{ inputs.preflight_run_attempt }}
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+          WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
-          python3 ops/release/platform_approval.py authorize \
+          python3 "${APPROVAL_TOOL}" authorize \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
             --triggering-actor "${{ github.triggering_actor }}" \
             --run-attempt "${{ github.run_attempt }}" \
+            --work-actor "${WORK_ACTOR}" \
             --event "${GITHUB_EVENT_PATH}" \
             --api-url "${{ github.api_url }}" \
             --server-url "${{ github.server_url }}" \
@@ -473,6 +515,7 @@ jobs:
       - name: Reverify live feature readiness at the production boundary
         if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
         env:
+          APPROVAL_TOOL: ${{ steps.approval_source.outputs.tool }}
           EXPECTED_FEATURE_READINESS: ${{ inputs.feature_readiness }}
           FEATURE_HEAD_SHA: ${{ inputs.feature_head_sha }}
           FEATURE_PR_NUMBER: ${{ inputs.feature_pr_number }}
@@ -496,7 +539,7 @@ jobs:
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
-          python3 ops/release/platform_approval.py verify-artifact \
+          python3 "${APPROVAL_TOOL}" verify-artifact \
             --report build/platform-deploy-boundary-initial.json \
             --artifact-dir build/production-boundary-preflight >/dev/null
           [[ "$(git rev-parse HEAD^)" == "${SOURCE_COMMIT}" ]]
@@ -539,12 +582,13 @@ jobs:
           # This is deliberately the final remote read before SSH materialization.
           # It closes concurrency-queue, artifact deletion/expiry, and approval
           # replacement races after the potentially slower readiness verification.
-          python3 ops/release/platform_approval.py authorize \
+          python3 "${APPROVAL_TOOL}" authorize \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
             --triggering-actor "${{ github.triggering_actor }}" \
             --run-attempt "${{ github.run_attempt }}" \
+            --work-actor "${WORK_ACTOR}" \
             --event "${GITHUB_EVENT_PATH}" \
             --api-url "${{ github.api_url }}" \
             --server-url "${{ github.server_url }}" \

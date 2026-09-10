@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ steps.event.outputs.source_commit }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Detect unconsumed release intent
@@ -91,6 +91,18 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${SOURCE_COMMIT}" ]]
+          if [[ -f ops/release/published-release-recovery-v0.6.2.json ]]; then
+            python3 ops/release/validation_recovery.py \
+              --contract ops/release/published-release-recovery-v0.6.2.json \
+              hold \
+              --root . \
+              --source-commit "${SOURCE_COMMIT}" \
+              --output build/published-release-recovery-hold.json >/dev/null
+            echo "release_needed=false" >>"${GITHUB_OUTPUT}"
+            echo "The reviewed v0.6.2 recovery lock holds new release creation." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           mapfile -d '' fragments < <(git ls-files -z -- 'changes/*.toml')
           for fragment in "${fragments[@]}"; do
             [[ "${fragment}" =~ ^changes/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.toml$ ]]

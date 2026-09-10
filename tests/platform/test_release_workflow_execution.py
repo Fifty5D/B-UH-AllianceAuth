@@ -16,6 +16,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+RECOVERY_BASE = "4f98e7cb559ee1a9b269ea1f94938678d2dac4df"
+PUBLISHED_V062 = "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
+RECOVERY_HARNESS_PATHS = (
+    "tests/deploy/test_request_archive.py",
+    "tests/platform/test_coordinated_recovery_rehearsal.py",
+)
 _OUTPUT_STUB = """\
 from pathlib import Path
 import sys
@@ -67,6 +73,22 @@ def _execute_step(script: str, root: Path, environment: dict[str, str]):
         capture_output=True,
         text=True,
     )
+
+
+def _git(root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(arguments)} failed: {completed.stderr[-1200:]}"
+        )
+    return completed.stdout.strip()
 
 
 class ReleaseWorkflowWorkspaceTests(TestCase):
@@ -156,3 +178,162 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     (root / "build" / name).read_text(encoding="ascii"),
                     expected,
                 )
+
+    def test_deploy_stages_approval_code_from_the_exact_sync_merge(self):
+        script = _step_script(
+            "deploy-platform-v2.yml",
+            "deploy",
+            "Stage the merge-owned approval verifier",
+        )
+        required = (
+            "buh_release.py",
+            "ledger.py",
+            "open_sync_pr.py",
+            "platform_approval.py",
+            "published-release-recovery-v0.6.2.json",
+            "recovery_policy.py",
+            "validation_recovery.py",
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            origin = base / "origin"
+            origin.mkdir()
+            _git(origin, "init", "--quiet", "--initial-branch=main")
+            _git(origin, "config", "user.name", "Workflow Fixture")
+            _git(
+                origin,
+                "config",
+                "user.email",
+                "workflow-fixture@example.invalid",
+            )
+            release_dir = origin / "ops/release"
+            release_dir.mkdir(parents=True)
+            for name in required:
+                (release_dir / name).write_text(
+                    f"source:{name}\n", encoding="utf-8"
+                )
+            _git(origin, "add", "--all")
+            _git(origin, "commit", "--quiet", "-m", "source")
+            source = _git(origin, "rev-parse", "HEAD")
+
+            _git(origin, "checkout", "--quiet", "-b", "published", source)
+            (origin / "published.txt").write_text("immutable\n", encoding="utf-8")
+            _git(origin, "add", "--all")
+            _git(origin, "commit", "--quiet", "-m", "release")
+            published = _git(origin, "rev-parse", "HEAD")
+
+            _git(origin, "checkout", "--quiet", "main")
+            (release_dir / "platform_approval.py").write_text(
+                "activation-verifier\n", encoding="utf-8"
+            )
+            _git(origin, "add", "--all")
+            _git(origin, "commit", "--quiet", "-m", "activation")
+            _git(origin, "merge", "--quiet", "--no-ff", "published", "-m", "sync")
+            merge = _git(origin, "rev-parse", "HEAD")
+
+            checkout = base / "checkout"
+            _git(base, "clone", "--quiet", str(origin), str(checkout))
+            _git(checkout, "checkout", "--quiet", "--detach", published)
+            runner_temp = base / "runner-temp"
+            runner_temp.mkdir()
+            output = base / "github-output.txt"
+            completed = _execute_step(
+                script,
+                checkout,
+                {
+                    "APPROVAL_SOURCE_COMMIT": merge,
+                    "GITHUB_OUTPUT": "../github-output.txt",
+                    "RELEASE_COMMIT": published,
+                    "RUNNER_TEMP": "../runner-temp",
+                },
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                msg=(completed.stdout + completed.stderr)[-4000:],
+            )
+            staged = (
+                runner_temp
+                / "buh-platform-approval-source/ops/release/platform_approval.py"
+            )
+            self.assertEqual(
+                staged.read_text(encoding="utf-8"), "activation-verifier\n"
+            )
+            output_value = output.read_text(encoding="utf-8").strip()
+            self.assertTrue(output_value.startswith("tool="))
+            self.assertTrue(output_value.endswith("/ops/release/platform_approval.py"))
+
+    def test_reusable_fast_step_applies_actual_harness_to_exact_v062(self):
+        script = _step_script(
+            "reusable-source-tests.yml",
+            "fast",
+            "Apply the bounded published-release test harness",
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            origin = base / "origin"
+            _git(base, "clone", "--quiet", "--no-checkout", str(ROOT), str(origin))
+            _git(origin, "config", "user.name", "Recovery Workflow Fixture")
+            _git(
+                origin,
+                "config",
+                "user.email",
+                "recovery-workflow@example.invalid",
+            )
+            feature = _git(ROOT, "rev-parse", "HEAD")
+            _git(origin, "fetch", "--no-tags", str(ROOT), PUBLISHED_V062)
+            _git(origin, "branch", "published-v0.6.2", PUBLISHED_V062)
+            feature_tree = _git(origin, "rev-parse", f"{feature}^{{tree}}")
+            activation = _git(
+                origin,
+                "commit-tree",
+                feature_tree,
+                "-p",
+                RECOVERY_BASE,
+                "-p",
+                feature,
+                "-m",
+                "synthetic reviewed activation",
+            )
+            _git(origin, "branch", "reviewed-activation", activation)
+
+            checkout = base / "checkout"
+            _git(base, "clone", "--quiet", str(origin), str(checkout))
+            _git(checkout, "checkout", "--quiet", "--detach", PUBLISHED_V062)
+            runner_temp = base / "runner-temp"
+            runner_temp.mkdir()
+            original_manifest = (
+                checkout / "releases/platform/v0.6.2/RELEASE.json"
+            ).read_bytes()
+            completed = _execute_step(
+                script,
+                checkout,
+                {
+                    "HARNESS_SHA": activation,
+                    "RUNNER_TEMP": "../runner-temp",
+                    "SOURCE_SHA": PUBLISHED_V062,
+                },
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                msg=(completed.stdout + completed.stderr)[-4000:],
+            )
+            self.assertEqual(
+                _git(checkout, "diff", "--name-only").splitlines(),
+                list(RECOVERY_HARNESS_PATHS),
+            )
+            for relative in RECOVERY_HARNESS_PATHS:
+                self.assertEqual(
+                    (checkout / relative).read_bytes(),
+                    subprocess.run(
+                        ["git", "show", f"{feature}:{relative}"],
+                        cwd=origin,
+                        check=True,
+                        capture_output=True,
+                    ).stdout,
+                )
+            self.assertEqual(
+                (checkout / "releases/platform/v0.6.2/RELEASE.json").read_bytes(),
+                original_manifest,
+            )
