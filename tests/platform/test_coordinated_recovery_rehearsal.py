@@ -1,12 +1,14 @@
-"""Execution rehearsal for the one bounded v0.5.6 release-gap recovery."""
+"""Execution rehearsal for the bounded immutable-v0.6.2 validation recovery."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
@@ -35,10 +37,51 @@ from tests.deploy.test_docker_host import (
     owner_log_environment,
     write_host_files,
 )
-from tests.release import test_platform_approval as approval_fixture
-
-
 ROOT = Path(__file__).resolve().parents[2]
+TEST_SUPPORT_ROOT = ROOT / ".buh-recovery-test-support"
+
+
+def load_approval_fixture():
+    """Load activation-side approval support without replacing release code."""
+
+    fixture_path = TEST_SUPPORT_ROOT / "tests/release/test_platform_approval.py"
+    if not fixture_path.is_file():
+        from tests.release import test_platform_approval
+
+        return test_platform_approval
+
+    support_modules = (
+        "buh_release",
+        "ledger",
+        "open_sync_pr",
+        "platform_approval",
+        "recovery_policy",
+        "validation_recovery",
+    )
+    saved = {name: sys.modules.pop(name, None) for name in support_modules}
+    support_release = str(TEST_SUPPORT_ROOT / "ops/release")
+    sys.path.insert(0, support_release)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_buh_recovery_approval_fixture", fixture_path
+        )
+        if spec is None or spec.loader is None:
+            raise AssertionError("recovery approval fixture loader is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(support_release)
+        for name in support_modules:
+            sys.modules.pop(name, None)
+            if saved[name] is not None:
+                sys.modules[name] = saved[name]
+
+
+approval_fixture = load_approval_fixture()
+
+
 V061_RELEASE = "43234a8c0b6371fdfc62b59fa75a7980924ac3a5"
 SYNTHETIC_RECOVERY_FRAGMENT = """\
 schema_version = 1
@@ -1525,6 +1568,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             activation_tree = "c" * 40
             activation_run = 6000003
             recovery_run = 6000004
+            continuation = "d" * 40
+            continuation_head = "e" * 40
+            continuation_tree = "f" * 40
+            continuation_run = 6000005
             recovery_artifact_digest = "sha256:" + hashlib.sha256(
                 b"synthetic exact-release validation artifact"
             ).hexdigest()
@@ -1541,6 +1588,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 ARTIFACT=preflight_artifact,
                 ARTIFACT_DIGEST=preflight_digest,
                 FIRST_PARENT=head,
+                CONTINUATION=continuation,
+                CONTINUATION_HEAD=continuation_head,
+                CONTINUATION_RUN=continuation_run,
+                CONTINUATION_TREE=continuation_tree,
                 MANIFEST=target["manifest_sha256"],
                 PREFLIGHT_RUN=6000002,
                 RECOVERY_ARTIFACT=recovery_artifact,
@@ -1560,7 +1611,19 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     api_url="https://api.github.com",
                     server_url="https://github.com",
                     output=base / "recovery-ready.json",
-                    feature_readiness=approval_fixture._published_readiness(),
+                    feature_readiness=approval_fixture._published_readiness(
+                        merge_source_commit=head
+                    ),
+                    activation_readiness=approval_fixture._published_readiness(
+                        pull_request=53,
+                        feature_head=activation_head,
+                        merge_source_commit=activation,
+                    ),
+                    continuation_readiness=approval_fixture._published_readiness(
+                        pull_request=54,
+                        feature_head=continuation_head,
+                        merge_source_commit=continuation,
+                    ),
                     validation_attestation=attestation,
                     validation_artifact_id=(
                         approval_fixture.RECOVERY_ARTIFACT_ID
@@ -1585,7 +1648,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     ready_report["ready"]["recovery_validation"]["attestation"][
                         "harness"
                     ]["commit"],
-                    activation,
+                    continuation,
                 )
 
                 authorization_index = 0

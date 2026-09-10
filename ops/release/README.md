@@ -127,39 +127,63 @@ release-manifest hash, synchronization PR #52, original main validation, every
 job in the original Prepare Release run, and the successful retained preflight
 artifact. It does not rebuild or change v0.6.2.
 
-PR #53 is the only activation PR. During its review, the normal release ledger
-still fails first because v0.6.2 is published but not yet in its source tree.
-`validation_recovery.py ledger` accepts only that exact error, PR number, base,
-and allowlisted tree delta. It then constructs a disposable synthetic merge of
-the candidate activation with the existing immutable release, runs the ordinary
-ledger verifier on that future tree, and requires the resulting next plan to be
-v0.6.3 from v0.6.2. Every other ledger failure remains fatal.
+PR #53 is the immutable original activation. It merged as
+`e0bd37fafcedee3135aa4c4d6bdfc7778d032d48`, with reviewed head
+`a8aaf10e03c35a5510f0a7e03a92d4f19e8be0e8`, onto exact source
+`4f98e7cb559ee1a9b269ea1f94938678d2dac4df`. Recovery run
+`34428188769` then failed only in the fast lane because its two-file harness
+imported approval helpers absent from the frozen release checkout. The contract
+retains that run's exact jobs and bounded failure artifact; it is historical
+evidence and must not be rerun or relabeled.
 
-After activation, `Validate Published Release Recovery` runs the complete
+PR #54 is the only permitted continuation from that merged activation.
+`validation_recovery.py ledger` accepts only the known stale-v0.6.2 ledger
+error, this exact PR number and base, and its executable allowlisted tree delta.
+It verifies the original activation independently, constructs a disposable
+synthetic merge of the reviewed continuation with the immutable release, runs
+the ordinary ledger verifier on that future tree, and requires the next plan to
+be v0.6.3 from v0.6.2. Every other ledger failure or main advance remains fatal.
+
+After continuation, `Validate Published Release Recovery` runs the complete
 reusable source suite against the exact published v0.6.2 commit. Only the fast
-lane receives the two reviewed test-fixture files from the activation merge:
+lane replaces these two reviewed test fixtures from the continuation merge:
 
 - `tests/deploy/test_request_archive.py`
 - `tests/platform/test_coordinated_recovery_rehearsal.py`
 
-The workflow records the immutable release commit/tree separately from the
-activation commit/tree and both harness blob hashes. Application, runtime,
-receiver, workflow-under-test, and release bytes therefore remain those of
-v0.6.2. Its last job revalidates the original feature readiness, PR #53's exact
-published readiness, activation main CI, the original failed release run's exact
-job set, and the retained successful preflight before it may place a distinct
-recovery-readiness record on PR #52. The activation commit is associated to PR
-#53 through GitHub's commit-to-PR endpoint, but merger, author, state, head,
-base, and merge identity are accepted only from a separate full PR-detail
-response. Authorization repeats those live checks.
+The approval portion of that rehearsal loads only the following attested support
+under `.buh-recovery-test-support`; it does not overwrite release/runtime code:
+
+- `ops/release/buh_release.py`
+- `ops/release/ledger.py`
+- `ops/release/open_sync_pr.py`
+- `ops/release/platform_approval.py`
+- `ops/release/published-release-recovery-v0.6.2.json`
+- `ops/release/recovery_policy.py`
+- `ops/release/validation_recovery.py`
+- `tests/release/test_platform_approval.py`
+
+The manifest records every staged path, source blob and SHA-256. Deployment,
+application, receiver, migration, browser and release bytes remain those of
+v0.6.2; the staged files exercise only activation-side readiness and approval.
+The last job separately revalidates original feature PR #51, activation PR #53,
+continuation PR #54, both push validations, the failed recovery attempt, the
+original failed release run, and the retained successful preflight before it
+may place recovery readiness on PR #52. Each merge is associated to its PR by
+GitHub's commit-to-PR endpoint, while author, merger, state, head, base and merge
+identity come from full PR detail. Authorization repeats the live checks and
+requires the order PR #53, PR #54, then PR #52.
 
 After all eight reusable-suite lanes pass, the recovery workflow records their
 exact job IDs and publishes one GitHub Actions check named
 `Source test suite / Required source checks` on immutable PR #52 head
 `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Its report distinguishes the
-unchanged release commit/tree from the two-file fixture harness, links to the
-workflow run, and binds the activation, run/attempt, attestation artifact, and
-every lane. Before posting recovery readiness, the verifier requires main's
+unchanged release commit/tree, original activation, continuation, two replaced
+fixtures and isolated test support. It links the verified workflow path and run,
+and binds repository, event, actors, head SHA, attempt, attestation artifact and
+every exact lane name and ID. GitHub's job `workflow_name` is a mutable display
+title, so it is diagnostic only and is never authorization. Before posting
+recovery readiness, the verifier requires main's
 protected context to remain bound to GitHub Actions app `15368`, confirms the
 original failed check remains historical evidence, and records the new check's
 exact REST ID, GraphQL node ID, check-suite ID, completion time, and evidence
@@ -169,19 +193,20 @@ check must remain the latest row in its own suite, have no pending or newer
 conflicting matching suite, and GitHub GraphQL `CheckRun.isRequired` must report
 that exact node as required for PR #52. Authorization repeats the same query for
 the merged PR; a private comment or an arbitrary successful row cannot
-substitute for it. The recovery has not run yet, so its future suite and node
-identities are intentionally captured and verified only during activation.
+substitute for it. Failed run `34428188769` published no recovery check; the
+future successful suite and node identities are captured only by the reviewed
+continuation run.
 The deployment workflow stages the recovery-aware verifier from the exact PR #52
 merge before checking out v0.6.2, then uses that staged verifier at both queued
 authorization boundaries. The deployment archive and receiver still come only
 from the immutable release.
 
-The recovery descriptor also holds automatic release creation on both the PR
-#53 activation merge and the later PR #52 synchronization merge. This is a
-deliberate, bounded activation exception: main temporarily contains one
-unconsumed platform fragment while the already-published release is not yet
+The recovery descriptor holds automatic release creation on both the PR #54
+continuation merge and the later PR #52 synchronization merge. This is a
+deliberate, bounded continuation exception: main temporarily contains the
+reviewed unconsumed platform fragments while the published release is not yet
 synchronized, but ordinary ledger validation is never disabled and no new
-release may start. Any main advance, unexpected parent/tree, changed ref,
+release may start. Any other main advance, unexpected parent/tree, changed ref,
 rerun, missing artifact, or expired artifact fails closed.
 
 ### Work activation sequence
@@ -189,20 +214,22 @@ rerun, missing artifact, or expired artifact fails closed.
 Work must perform these steps in order; none is an instruction for Codex or a
 routine operator to merge or deploy:
 
-1. Require PR #53's final head to have all required checks, applicable Preview
-   UI evidence, trusted readiness, and no `needs-codex`. Reconfirm that main is
-   exactly `4f98e7cb559ee1a9b269ea1f94938678d2dac4df`, PR #52 is open at
+1. Require follow-up PR #54's final head to have all required checks, applicable
+   Preview UI evidence, trusted readiness, and no `needs-codex`. Reconfirm that
+   main is exactly `e0bd37fafcedee3135aa4c4d6bdfc7778d032d48`, PR #53's
+   full detail matches the pinned activation, and PR #52 is open at
    `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, and both `release/platform-v0.6.2`
    and `sync/platform-v0.6.2` still resolve to that commit.
-2. Merge PR #53 with a merge commit, without squash or rebase. Its ordered
-   parents must be the base above and the reviewed final PR head, and its tree
-   must equal the reviewed head. If main has moved, stop and review a new bounded
-   contract rather than updating the base opportunistically.
-3. Require the push-triggered `Validate PR` for that activation merge to pass.
+2. Merge PR #54 with a merge commit, without squash or rebase. Its ordered
+   parents must be the activation above and the reviewed PR #54 head, and its
+   tree must equal that reviewed head. If main has moved, stop; do not update the
+   base or continuation contract opportunistically.
+3. Require the push-triggered `Validate PR` for that continuation merge to pass.
    Inspect the associated `Prepare Release` run and require the
    `published-release-recovery` hold result; it must not build or publish v0.6.3.
 4. While the retained preflight artifact is still present and unexpired, dispatch
-   the reviewed workflow from that exact main commit:
+   the reviewed workflow once from that exact continuation commit. This must be
+   a new run, not a rerun of failed run `34428188769`:
 
    ```bash
    gh workflow run source-published-release-recovery.yml \
@@ -228,7 +255,7 @@ routine operator to merge or deploy:
    production approval. Before approval, do not merge PR #52. After explicit
    approval, Work may merge PR #52 with a merge commit whose message contains
    the exact generated `buh-chatgpt-approved-recovery:v1` marker. Its ordered
-   parents must be the activation merge and the immutable v0.6.2 commit.
+   parents must be the PR #54 continuation merge and immutable v0.6.2.
 6. The existing `Deploy Production` pull-request event must authorize and deploy
    only v0.6.2. Do not manually dispatch another deployment or retry a failed
    production run. Confirm its retained evidence and final version through the
@@ -241,8 +268,10 @@ routine operator to merge or deploy:
 Useful read-only checks before steps 2 and 4 are:
 
 ```bash
-gh pr view 53 --repo Fifty5D/B-UH-AllianceAuth \
+gh pr view 54 --repo Fifty5D/B-UH-AllianceAuth \
   --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,labels
+gh pr view 53 --repo Fifty5D/B-UH-AllianceAuth \
+  --json headRefOid,baseRefOid,mergeCommit,state,mergedAt
 gh pr view 52 --repo Fifty5D/B-UH-AllianceAuth \
   --json headRefOid,baseRefOid,state,isDraft,title
 gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/release/platform-v0.6.2
@@ -251,7 +280,7 @@ gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/sync/platform-v0.6.2
 
 If preflight artifact `10083806725` (digest
 `sha256:d527be28e5f79972835cd2d12c92e6ce98f4c9f77f081e872df76908c6ca0510`)
-expires or any pinned identity differs, this activation is blocked. Do not
+expires or any pinned identity differs, this continuation is blocked. Do not
 relabel old evidence or rebuild v0.6.2; a separately reviewed contract update
 must bind a truthful fresh no-change preflight for the same immutable release.
 

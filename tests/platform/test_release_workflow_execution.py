@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -16,7 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
-RECOVERY_BASE = "4f98e7cb559ee1a9b269ea1f94938678d2dac4df"
+RECOVERY_ACTIVATION = "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48"
 PUBLISHED_V062 = "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
 RECOVERY_HARNESS_PATHS = (
     "tests/deploy/test_request_archive.py",
@@ -137,6 +138,60 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     encoding="ascii"
                 ),
                 '{"ready":true}\n',
+            )
+
+    def test_release_plan_step_accepts_only_the_current_recovery_report(self):
+        script = _step_script(
+            "reusable-source-tests.yml",
+            "release_ledger",
+            "Validate the release plan and change fragments",
+        )
+        source = "a" * 40
+        report = {
+            "latest_release": {"platform_version": "0.6.2"},
+            "next_release": {
+                "deployment_predecessor": None,
+                "platform_version": "0.6.3",
+                "previous_platform_version": "0.6.2",
+                "release_required": True,
+            },
+            "recovery_id": "published-platform-v0.6.2-validation-20260909",
+            "schema_version": 2,
+            "source_commit": source,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_plan = root / "recovery-plan.json"
+
+            def execute() -> subprocess.CompletedProcess[str]:
+                recovery_plan.write_text(
+                    json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="ascii",
+                )
+                return _execute_step(
+                    script,
+                    root,
+                    {
+                        "BOOTSTRAP": "false",
+                        "PREVIOUS_RELEASE_PATH": "",
+                        "RECOVERY_PLAN": _bash_path(recovery_plan),
+                        "SOURCE_SHA": source,
+                        "TEST_RUN_URL": "https://example.invalid/recovery-test",
+                    },
+                )
+
+            accepted = execute()
+            self.assertEqual(
+                accepted.returncode,
+                0,
+                msg=(accepted.stdout + accepted.stderr)[-2000:],
+            )
+            report["schema_version"] = 1
+            rejected = execute()
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                "Published-release recovery plan is invalid",
+                rejected.stdout + rejected.stderr,
             )
 
     def test_ready_job_reverification_creates_build_in_fresh_checkout(self):
@@ -272,7 +327,16 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
             origin = base / "origin"
-            _git(base, "clone", "--quiet", "--no-checkout", str(ROOT), str(origin))
+            _git(
+                base,
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                "-c",
+                "core.autocrlf=false",
+                str(ROOT),
+                str(origin),
+            )
             _git(origin, "config", "user.name", "Recovery Workflow Fixture")
             _git(
                 origin,
@@ -280,25 +344,47 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "user.email",
                 "recovery-workflow@example.invalid",
             )
-            feature = _git(ROOT, "rev-parse", "HEAD")
             _git(origin, "fetch", "--no-tags", str(ROOT), PUBLISHED_V062)
             _git(origin, "branch", "published-v0.6.2", PUBLISHED_V062)
+            _git(origin, "checkout", "--quiet", "-b", "recovery-repair", RECOVERY_ACTIVATION)
+            contract = json.loads(
+                (
+                    ROOT
+                    / "ops/release/published-release-recovery-v0.6.2.json"
+                ).read_text(encoding="ascii")
+            )
+            for relative in contract["continuation"]["allowed_paths"]:
+                source = ROOT / relative
+                destination = origin / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            _git(origin, "add", "--all")
+            _git(origin, "commit", "--quiet", "-m", "reviewed recovery repair")
+            feature = _git(origin, "rev-parse", "HEAD")
             feature_tree = _git(origin, "rev-parse", f"{feature}^{{tree}}")
-            activation = _git(
+            continuation = _git(
                 origin,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                RECOVERY_BASE,
+                RECOVERY_ACTIVATION,
                 "-p",
                 feature,
                 "-m",
-                "synthetic reviewed activation",
+                "synthetic reviewed continuation",
             )
-            _git(origin, "branch", "reviewed-activation", activation)
+            _git(origin, "branch", "reviewed-continuation", continuation)
 
             checkout = base / "checkout"
-            _git(base, "clone", "--quiet", str(origin), str(checkout))
+            _git(
+                base,
+                "clone",
+                "--quiet",
+                "-c",
+                "core.autocrlf=false",
+                str(origin),
+                str(checkout),
+            )
             _git(checkout, "checkout", "--quiet", "--detach", PUBLISHED_V062)
             runner_temp = base / "runner-temp"
             runner_temp.mkdir()
@@ -309,7 +395,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 script,
                 checkout,
                 {
-                    "HARNESS_SHA": activation,
+                    "HARNESS_SHA": continuation,
                     "RUNNER_TEMP": "../runner-temp",
                     "SOURCE_SHA": PUBLISHED_V062,
                 },
@@ -333,7 +419,41 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                         capture_output=True,
                     ).stdout,
                 )
+            support_root = checkout / contract["continuation"]["test_support_root"]
+            support_paths = contract["continuation"]["test_support_paths"]
+            self.assertEqual(
+                _git(checkout, "ls-files", "--others", "--exclude-standard").splitlines(),
+                [f"{contract['continuation']['test_support_root']}/{path}" for path in support_paths],
+            )
+            for relative in support_paths:
+                self.assertEqual(
+                    (support_root / relative).read_bytes(),
+                    subprocess.run(
+                        ["git", "show", f"{feature}:{relative}"],
+                        cwd=origin,
+                        check=True,
+                        capture_output=True,
+                    ).stdout,
+                )
             self.assertEqual(
                 (checkout / "releases/platform/v0.6.2/RELEASE.json").read_bytes(),
                 original_manifest,
+            )
+            combined = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "tests.platform.test_coordinated_recovery_rehearsal",
+                ],
+                cwd=checkout,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                combined.returncode,
+                0,
+                msg=(combined.stdout + combined.stderr)[-4000:],
             )
