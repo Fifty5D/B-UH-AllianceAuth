@@ -23,6 +23,7 @@ SOURCE_WORKFLOWS = (
     "ui-preview.yml",
     "invalidate-readiness.yml",
     "source-published-release-recovery.yml",
+    "continue-published-release-recovery.yml",
 )
 PRODUCTION_V2_WORKFLOWS = (
     "auto-platform-release.yml",
@@ -1530,6 +1531,11 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(contract["activation"]["pull_request"], 53)
         self.assertEqual(contract["continuation"]["pull_request"], 54)
         self.assertEqual(contract["repair"]["pull_request"], 55)
+        self.assertEqual(contract["publication_repair"]["pull_request"], 56)
+        self.assertEqual(
+            contract["publication_repair"]["base_commit"],
+            "f064694cca7e9d1147a87b880636a94f5c5cbe94",
+        )
         self.assertEqual(
             contract["activation"]["commit"],
             "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48",
@@ -1600,6 +1606,60 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertEqual(contract["failed_validation"]["run_id"], 34428188769)
         self.assertEqual(contract["failed_publication"]["run_id"], 34440488685)
+        self.assertEqual(contract["partial_publication"]["run_id"], 34638993007)
+        self.assertEqual(
+            contract["partial_publication"]["artifact"]["id"], 10279641606
+        )
+        self.assertEqual(
+            contract["partial_publication"]["required_check"]["check_run_id"],
+            103395196156,
+        )
+        self.assertEqual(
+            contract["partial_publication"]["required_check"]["details_url"],
+            "https://github.com/Fifty5D/B-UH-AllianceAuth/runs/103395196156",
+        )
+
+        continuation_path = WORKFLOWS / "continue-published-release-recovery.yml"
+        continuation = _load_workflow(continuation_path)
+        continuation_text = continuation_path.read_text(encoding="utf-8")
+        continuation_triggers = continuation.get("on", continuation.get(True))
+        self.assertEqual(set(continuation_triggers), {"workflow_dispatch"})
+        self.assertEqual(
+            continuation["concurrency"], workflow["concurrency"]
+        )
+        self.assertEqual(
+            continuation["jobs"]["ready"]["permissions"],
+            {
+                "actions": "read",
+                "checks": "read",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
+        for job_name in ("qualify", "ready"):
+            checkout = next(
+                step
+                for step in continuation["jobs"][job_name]["steps"]
+                if str(step.get("uses", "")).startswith("actions/checkout@")
+            )
+            self.assertEqual(checkout["with"]["fetch-depth"], 0)
+            self.assertIs(checkout["with"]["persist-credentials"], False)
+        for required in (
+            "CONTINUE PUBLISHED V0.6.2",
+            "publication-repair",
+            "artifact-ids: 10279641606",
+            "run-id: 34638993007",
+            "--pull-request 56",
+            "--publication-repair",
+            "--publication-readiness",
+            "--validation-artifact-id 10279641606",
+            "--validation-artifact-digest sha256:2890ce18bd66892972c732a92fbdd82aec22c899a752353375f5e91a8335c37b",
+        ):
+            self.assertIn(required, continuation_text)
+        self.assertNotIn("checks: write", continuation_text)
+        self.assertNotIn("environment: production", continuation_text)
+        self.assertNotIn("secrets.", continuation_text)
 
     def test_recovery_ledger_exception_and_release_hold_are_bounded(self):
         reusable = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
@@ -1642,7 +1702,7 @@ class PlatformConfigurationContracts(TestCase):
             for step in reusable["jobs"]["release_ledger"]["steps"]
             if step["name"] == "Validate the release plan and change fragments"
         )
-        self.assertIn('report.get("schema_version") != 3', plan_step["run"])
+        self.assertIn('report.get("schema_version") != 4', plan_step["run"])
 
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
         fragment_step = next(

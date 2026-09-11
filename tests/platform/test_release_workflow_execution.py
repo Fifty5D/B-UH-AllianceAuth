@@ -157,7 +157,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "release_required": True,
             },
             "recovery_id": "published-platform-v0.6.2-validation-20260909",
-            "schema_version": 3,
+            "schema_version": 4,
             "source_commit": source,
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,6 +302,12 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     feature_head=fixture.REPAIR_HEAD,
                     merge_source_commit=fixture.REPAIR,
                 ),
+                publication_repair=fixture._publication_repair_evidence(),
+                publication_readiness=fixture._published_readiness(
+                    pull_request=56,
+                    feature_head=fixture.PUBLICATION_HEAD,
+                    merge_source_commit=fixture.PUBLICATION,
+                ),
                 validation_attestation=fixture._recovery_attestation(),
                 validation_artifact_id=fixture.RECOVERY_ARTIFACT_ID,
                 validation_artifact_name=fixture.RECOVERY_ARTIFACT,
@@ -309,7 +315,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 transport=ready_transport,
                 sleeper=lambda _: None,
             )
-            self.assertIn(
+            self.assertNotIn(
                 ("POST", f"/repos/{fixture.REPOSITORY}/check-runs"),
                 ready_transport.calls,
             )
@@ -319,6 +325,18 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     f"/repos/{fixture.REPOSITORY}/issues/{fixture.PR_NUMBER}/comments",
                 ),
                 ready_transport.calls,
+            )
+            self.assertEqual(
+                ready_report["ready"]["recovery_validation"]["required_check"][
+                    "check_run_id"
+                ],
+                fixture.RECOVERED_REQUIRED_CHECK,
+            )
+            self.assertEqual(
+                ready_report["ready"]["recovery_validation"][
+                    "publication_repair"
+                ]["publication_repair_commit"],
+                fixture.PUBLICATION,
             )
 
             with mock.patch.object(
@@ -388,6 +406,12 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                         pull_request=55,
                         feature_head=fixture.REPAIR_HEAD,
                         merge_source_commit=fixture.REPAIR,
+                    ),
+                    publication_repair=fixture._publication_repair_evidence(),
+                    publication_readiness=fixture._published_readiness(
+                        pull_request=56,
+                        feature_head=fixture.PUBLICATION_HEAD,
+                        merge_source_commit=fixture.PUBLICATION,
                     ),
                     validation_attestation=fixture._recovery_attestation(),
                     validation_artifact_id=fixture.RECOVERY_ARTIFACT_ID,

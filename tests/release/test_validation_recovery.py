@@ -46,6 +46,7 @@ class RecoveryRepository:
             set(recovery.ACTIVATION_PATHS)
             | set(recovery.CONTINUATION_PATHS)
             | set(recovery.REPAIR_PATHS)
+            | set(recovery.PUBLICATION_REPAIR_PATHS)
             | set(recovery.HARNESS_PATHS)
             | set(recovery.TEST_SUPPORT_PATHS)
         )
@@ -128,6 +129,26 @@ class RecoveryRepository:
         )
         self.repair = run(root, "rev-parse", "HEAD")
 
+        run(root, "checkout", "--quiet", "-b", "recovery-publication", self.repair)
+        for relative in recovery.PUBLICATION_REPAIR_PATHS:
+            path = root.joinpath(*relative.split("/"))
+            path.write_text(f"publication:{relative}\n", encoding="utf-8")
+        run(root, "add", "--all")
+        run(root, "commit", "--quiet", "-m", "bounded publication repair")
+        self.publication_feature = run(root, "rev-parse", "HEAD")
+        self.publication_tree = run(root, "rev-parse", "HEAD^{tree}")
+        run(root, "checkout", "--quiet", "-B", "main", self.repair)
+        run(
+            root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "recovery-publication",
+            "-m",
+            "continue partial publication",
+        )
+        self.publication = run(root, "rev-parse", "HEAD")
+
         self.contract = {
             "activation": {
                 "allowed_paths": list(recovery.ACTIVATION_PATHS),
@@ -154,6 +175,23 @@ class RecoveryRepository:
                 "pull_request": 55,
                 "test_support_paths": list(recovery.TEST_SUPPORT_PATHS),
                 "test_support_root": recovery.TEST_SUPPORT_ROOT,
+            },
+            "publication_repair": {
+                "allowed_paths": list(recovery.PUBLICATION_REPAIR_PATHS),
+                "base_commit": self.repair,
+                "pull_request": 56,
+            },
+            "partial_publication": {
+                "artifact": {
+                    "digest": "sha256:" + "7" * 64,
+                    "id": 114,
+                    "name": "partial-publication",
+                },
+                "attestation_sha256": "sha256:" + "6" * 64,
+                "jobs": [],
+                "required_check": {},
+                "run_attempt": 1,
+                "run_id": 113,
             },
             "failed_publication": {
                 "artifact": {
@@ -205,7 +243,7 @@ class RecoveryRepository:
             "--quiet",
             "-B",
             "continued-main",
-            self.repair,
+            self.publication,
         )
         run(
             self.root,
@@ -240,6 +278,12 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(
             contract["required_check"]["historical_failure"]["check_run_id"],
             102298823162,
+        )
+        self.assertEqual(contract["publication_repair"]["pull_request"], 56)
+        self.assertEqual(contract["partial_publication"]["run_id"], 34638993007)
+        self.assertEqual(
+            contract["partial_publication"]["required_check"]["check_run_id"],
+            103395196156,
         )
         self.assertEqual(
             contract["activation"]["allowed_paths"],
@@ -290,17 +334,45 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 [item["path"] for item in repair["paths"]],
                 list(recovery.REPAIR_PATHS),
             )
-            held = recovery.validate_hold(
-                fixture.root, fixture.repair, contract=fixture.contract
+            publication_feature = recovery.validate_publication_repair(
+                fixture.root,
+                fixture.publication_feature,
+                event_name="pull_request",
+                pull_request=56,
+                contract=fixture.contract,
             )
-            self.assertEqual(held["state"], "repair-pending-sync")
+            self.assertIsNone(
+                publication_feature["publication_repair_commit"]
+            )
+            publication = recovery.validate_publication_repair(
+                fixture.root,
+                fixture.publication,
+                event_name="workflow_dispatch",
+                pull_request=None,
+                contract=fixture.contract,
+            )
+            self.assertEqual(
+                publication["publication_repair_commit"], fixture.publication
+            )
+            self.assertEqual(
+                publication["publication_repair_tree"], fixture.publication_tree
+            )
+            held = recovery.validate_hold(
+                fixture.root, fixture.publication, contract=fixture.contract
+            )
+            self.assertEqual(held["state"], "publication-repair-pending-sync")
+            self.assertEqual(
+                held["publication_repair_commit"], fixture.publication
+            )
 
             synchronized = fixture.add_sync_merge()
             held = recovery.validate_hold(
                 fixture.root, synchronized, contract=fixture.contract
             )
             self.assertEqual(held["state"], "synchronized-awaiting-retirement")
-            self.assertEqual(held["repair_commit"], fixture.repair)
+            self.assertEqual(
+                held["publication_repair_commit"], fixture.publication
+            )
 
     def test_unreviewed_activation_path_and_dirty_harness_target_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -327,6 +399,31 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                     unsafe,
                     event_name="pull_request",
                     pull_request=55,
+                    contract=fixture.contract,
+                )
+
+            run(
+                fixture.root,
+                "checkout",
+                "--quiet",
+                "-b",
+                "unsafe-publication",
+                fixture.publication_feature,
+            )
+            (fixture.root / "unreviewed-publication.py").write_text(
+                "changed = True\n", encoding="utf-8"
+            )
+            run(fixture.root, "add", "--all")
+            run(fixture.root, "commit", "--quiet", "-m", "unreviewed publication")
+            unsafe_publication = run(fixture.root, "rev-parse", "HEAD")
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError, "outside the reviewed scope"
+            ):
+                recovery.validate_publication_repair(
+                    fixture.root,
+                    unsafe_publication,
+                    event_name="pull_request",
+                    pull_request=56,
                     contract=fixture.contract,
                 )
 
@@ -456,34 +553,40 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "checkout",
                 "--quiet",
                 "-b",
-                "recovery-repair",
-                contract["repair"]["base_commit"],
+                "recovery-publication",
+                contract["publication_repair"]["base_commit"],
             )
-            for relative in contract["repair"]["allowed_paths"]:
+            for relative in contract["publication_repair"]["allowed_paths"]:
                 destination = review / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / relative, destination)
             run(review, "add", "--all")
-            run(review, "commit", "--quiet", "-m", "reviewed recovery repair")
+            run(
+                review,
+                "commit",
+                "--quiet",
+                "-m",
+                "reviewed publication continuation",
+            )
             feature = run(review, "rev-parse", "HEAD")
-            run(review, "push", "--quiet", "origin", "recovery-repair")
+            run(review, "push", "--quiet", "origin", "recovery-publication")
             feature_tree = run(mirror, "rev-parse", f"{feature}^{{tree}}")
-            repair = run(
+            publication = run(
                 mirror,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                contract["repair"]["base_commit"],
+                contract["publication_repair"]["base_commit"],
                 "-p",
                 feature,
                 "-m",
-                "synthetic exact digest repair",
+                "synthetic exact publication continuation",
             )
             run(
                 mirror,
                 "update-ref",
-                "refs/heads/recovery-digest-repair",
-                repair,
+                "refs/heads/recovery-publication",
+                publication,
             )
 
             checkout = base / "checkout"
@@ -496,10 +599,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 str(checkout),
             )
             run(checkout, "config", "core.autocrlf", "false")
-            run(checkout, "checkout", "--quiet", "--detach", repair)
+            run(checkout, "checkout", "--quiet", "--detach", publication)
             report = recovery.verify_pending_ledger(
                 checkout,
-                repair,
+                publication,
                 event_name="push",
                 pull_request=None,
                 contract=contract,
@@ -525,7 +628,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 report["synthetic_merge_tree"],
                 recovery._merge_tree(
-                    checkout, repair, contract["release"]["commit"]
+                    checkout, publication, contract["release"]["commit"]
                 ),
             )
 

@@ -1,0 +1,21 @@
+{
+  "app": {"id": 15368, "slug": "github-actions"},
+  "check_suite": {"id": 92911719432},
+  "completed_at": "2026-09-11T19:32:53Z",
+  "conclusion": "success",
+  "details_url": "https://github.com/Fifty5D/B-UH-AllianceAuth/runs/103395196156",
+  "external_id": "published-platform-v0.6.2-validation-20260909:544fe3a61336f5e9136180588a2c8ca05afefb3d9c7c2adb5b44a7387f8bee25",
+  "head_sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+  "id": 103395196156,
+  "name": "Source test suite / Required source checks",
+  "node_id": "CR_kwDOUIayms8AAAAYEtV8_A",
+  "output": {
+    "summary": "The complete required source suite passed against immutable release `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Only the two attested test-fixture files from activation/harness `f064694cca7e9d1147a87b880636a94f5c5cbe94` were overlaid; release and runtime bytes were not rebuilt or changed.\n\nRecovery run/attempt: `34638993007/1`  \nRelease tree: `cfcd1f21903d3609aef0bbd7b61950be5fef2aa5`  \nAttestation artifact: `platform-validation-recovery-v0.6.2-6074b965cbd2-34638993007-1` / `10279641606` / `sha256:2890ce18bd66892972c732a92fbdd82aec22c899a752353375f5e91a8335c37b`  \nAttestation SHA-256: `sha256:109f96e5d81de4a2f97de239ba71170dde6a0eb65c1240eb48047550825d594d`  \nEvidence binding: `sha256:544fe3a61336f5e9136180588a2c8ca05afefb3d9c7c2adb5b44a7387f8bee25`\n\nRequired lanes:\n- `Validate unchanged v0.6.2 with the reviewed harness / Test configuration` (job `103393822134`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Immutable release ledger` (job `103393822048`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Immutable Moon Tax v0.3.3 recovery artifact` (job `103393822100`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Fast source checks` (job `103393847866`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / MariaDB, Redis, Celery, and fake ESI` (job `103393847842`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Legacy schema upgrade and backup restore` (job `103393847901`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Browser tables, actions, and permissions` (job `103393847860`): success\n- `Validate unchanged v0.6.2 with the reviewed harness / Required source checks` (job `103394825002`): success",
+    "title": "Validated immutable platform v0.6.2 with reviewed recovery harness"
+  },
+  "pull_requests": [
+    {"base": {"ref": "main"}, "head": {"sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6"}, "number": 52}
+  ],
+  "started_at": "2026-09-11T19:32:53Z",
+  "status": "completed"
+}
