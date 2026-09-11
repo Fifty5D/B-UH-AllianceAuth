@@ -133,7 +133,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact_digest: ${{ steps.digest.outputs.artifact_digest }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.identity.outputs.artifact_name }}
     steps:
@@ -178,6 +178,16 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Canonicalize the verified upload digest
+        id: digest
+        env:
+          UPLOAD_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${UPLOAD_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          printf 'artifact_digest=sha256:%s\n' \
+            "${UPLOAD_ARTIFACT_DIGEST}" >>"${GITHUB_OUTPUT}"
 
   ready:
     name: Publish the recovered one-approval boundary
