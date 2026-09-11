@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, mock
 
 import yaml
 
@@ -18,6 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 RECOVERY_ACTIVATION = "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48"
+RECOVERY_CONTINUATION = "57e0e29042bab3a989c80e5473ad552ec5b4505b"
 PUBLISHED_V062 = "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
 RECOVERY_HARNESS_PATHS = (
     "tests/deploy/test_request_archive.py",
@@ -156,7 +157,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "release_required": True,
             },
             "recovery_id": "published-platform-v0.6.2-validation-20260909",
-            "schema_version": 2,
+            "schema_version": 3,
             "source_commit": source,
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -233,6 +234,179 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     (root / "build" / name).read_text(encoding="ascii"),
                     expected,
                 )
+
+    def test_recovery_upload_digest_handoff_is_canonical_and_fail_closed(self):
+        """Execute upload output -> approval -> protected check -> authorization."""
+
+        from tests.release import test_platform_approval as fixture
+
+        script = _step_script(
+            "source-published-release-recovery.yml",
+            "attest",
+            "Canonicalize the verified upload digest",
+        )
+
+        def canonicalize(root: Path, bare: str):
+            output = root / "github-output.txt"
+            completed = _execute_step(
+                script,
+                root,
+                {
+                    "GITHUB_OUTPUT": _bash_path(output),
+                    "UPLOAD_ARTIFACT_DIGEST": bare,
+                },
+            )
+            values = {}
+            if output.is_file():
+                for line in output.read_text(encoding="utf-8").splitlines():
+                    key, separator, value = line.partition("=")
+                    if separator:
+                        values[key] = value
+            return completed, values
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bare = fixture.RECOVERY_ARTIFACT_DIGEST.removeprefix("sha256:")
+            completed, values = canonicalize(root, bare)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                msg=(completed.stdout + completed.stderr)[-2000:],
+            )
+            self.assertEqual(
+                values, {"artifact_digest": fixture.RECOVERY_ARTIFACT_DIGEST}
+            )
+
+            ready_transport = fixture.RecoveryTransport(ready=True)
+            ready_report = fixture.approval.ready_recovery(
+                fixture._recovery_contract(),
+                fixture.TOKEN,
+                owner=fixture.OWNER,
+                repository=fixture.REPOSITORY,
+                api_url="https://api.github.com",
+                server_url="https://github.com",
+                output=root / "recovery-ready.json",
+                feature_readiness=fixture._published_readiness(),
+                activation_readiness=fixture._published_readiness(
+                    pull_request=53,
+                    feature_head=fixture.ACTIVATION_HEAD,
+                    merge_source_commit=fixture.ACTIVATION,
+                ),
+                continuation_readiness=fixture._published_readiness(
+                    pull_request=54,
+                    feature_head=fixture.CONTINUATION_HEAD,
+                    merge_source_commit=fixture.CONTINUATION,
+                ),
+                repair_readiness=fixture._published_readiness(
+                    pull_request=55,
+                    feature_head=fixture.REPAIR_HEAD,
+                    merge_source_commit=fixture.REPAIR,
+                ),
+                validation_attestation=fixture._recovery_attestation(),
+                validation_artifact_id=fixture.RECOVERY_ARTIFACT_ID,
+                validation_artifact_name=fixture.RECOVERY_ARTIFACT,
+                validation_artifact_digest=values["artifact_digest"],
+                transport=ready_transport,
+                sleeper=lambda _: None,
+            )
+            self.assertIn(
+                ("POST", f"/repos/{fixture.REPOSITORY}/check-runs"),
+                ready_transport.calls,
+            )
+            self.assertIn(
+                (
+                    "POST",
+                    f"/repos/{fixture.REPOSITORY}/issues/{fixture.PR_NUMBER}/comments",
+                ),
+                ready_transport.calls,
+            )
+
+            with mock.patch.object(
+                fixture.approval.validation_recovery,
+                "load_contract",
+                return_value=fixture._recovery_contract(),
+            ):
+                authorized = fixture.approval.authorize(
+                    fixture._recovery_event(),
+                    owner=fixture.OWNER,
+                    repository=fixture.REPOSITORY,
+                    actor=fixture.OWNER,
+                    triggering_actor=fixture.OWNER,
+                    run_attempt=1,
+                    api_url="https://api.github.com",
+                    server_url="https://github.com",
+                    output=root / "authorized.json",
+                    token=fixture.TOKEN,
+                    transport=fixture.RecoveryTransport(
+                        ready=False, payload=ready_report["ready"]
+                    ),
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(
+                authorized["validation_mode"], "published-release-recovery"
+            )
+            self.assertEqual(authorized["release_commit"], fixture.RELEASE)
+
+        for invalid in ("", "sha256:" + "d" * 64, "D" * 64, "d" * 63):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                rejected_transport = fixture.RecoveryTransport(ready=True)
+                completed, values = canonicalize(root, invalid)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(values, {})
+                self.assertFalse(rejected_transport.calls)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            completed, values = canonicalize(root, "c" * 64)
+            self.assertEqual(completed.returncode, 0)
+            mismatched_transport = fixture.RecoveryTransport(ready=True)
+            with self.assertRaisesRegex(
+                fixture.approval.ApprovalError,
+                "artifact digest changed",
+            ):
+                fixture.approval.ready_recovery(
+                    fixture._recovery_contract(),
+                    fixture.TOKEN,
+                    owner=fixture.OWNER,
+                    repository=fixture.REPOSITORY,
+                    api_url="https://api.github.com",
+                    server_url="https://github.com",
+                    output=root / "rejected.json",
+                    feature_readiness=fixture._published_readiness(),
+                    activation_readiness=fixture._published_readiness(
+                        pull_request=53,
+                        feature_head=fixture.ACTIVATION_HEAD,
+                        merge_source_commit=fixture.ACTIVATION,
+                    ),
+                    continuation_readiness=fixture._published_readiness(
+                        pull_request=54,
+                        feature_head=fixture.CONTINUATION_HEAD,
+                        merge_source_commit=fixture.CONTINUATION,
+                    ),
+                    repair_readiness=fixture._published_readiness(
+                        pull_request=55,
+                        feature_head=fixture.REPAIR_HEAD,
+                        merge_source_commit=fixture.REPAIR,
+                    ),
+                    validation_attestation=fixture._recovery_attestation(),
+                    validation_artifact_id=fixture.RECOVERY_ARTIFACT_ID,
+                    validation_artifact_name=fixture.RECOVERY_ARTIFACT,
+                    validation_artifact_digest=values["artifact_digest"],
+                    transport=mismatched_transport,
+                    sleeper=lambda _: None,
+                )
+            self.assertNotIn(
+                ("POST", f"/repos/{fixture.REPOSITORY}/check-runs"),
+                mismatched_transport.calls,
+            )
+            self.assertNotIn(
+                (
+                    "POST",
+                    f"/repos/{fixture.REPOSITORY}/issues/{fixture.PR_NUMBER}/comments",
+                ),
+                mismatched_transport.calls,
+            )
 
     def test_deploy_stages_approval_code_from_the_exact_sync_merge(self):
         script = _step_script(
@@ -346,14 +520,21 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             )
             _git(origin, "fetch", "--no-tags", str(ROOT), PUBLISHED_V062)
             _git(origin, "branch", "published-v0.6.2", PUBLISHED_V062)
-            _git(origin, "checkout", "--quiet", "-b", "recovery-repair", RECOVERY_ACTIVATION)
+            _git(
+                origin,
+                "checkout",
+                "--quiet",
+                "-b",
+                "recovery-repair",
+                RECOVERY_CONTINUATION,
+            )
             contract = json.loads(
                 (
                     ROOT
                     / "ops/release/published-release-recovery-v0.6.2.json"
                 ).read_text(encoding="ascii")
             )
-            for relative in contract["continuation"]["allowed_paths"]:
+            for relative in contract["repair"]["allowed_paths"]:
                 source = ROOT / relative
                 destination = origin / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -362,18 +543,18 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             _git(origin, "commit", "--quiet", "-m", "reviewed recovery repair")
             feature = _git(origin, "rev-parse", "HEAD")
             feature_tree = _git(origin, "rev-parse", f"{feature}^{{tree}}")
-            continuation = _git(
+            repair = _git(
                 origin,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                RECOVERY_ACTIVATION,
+                RECOVERY_CONTINUATION,
                 "-p",
                 feature,
                 "-m",
-                "synthetic reviewed continuation",
+                "synthetic reviewed digest repair",
             )
-            _git(origin, "branch", "reviewed-continuation", continuation)
+            _git(origin, "branch", "reviewed-digest-repair", repair)
 
             checkout = base / "checkout"
             _git(
@@ -395,7 +576,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 script,
                 checkout,
                 {
-                    "HARNESS_SHA": continuation,
+                    "HARNESS_SHA": repair,
                     "RUNNER_TEMP": "../runner-temp",
                     "SOURCE_SHA": PUBLISHED_V062,
                 },
@@ -419,11 +600,11 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                         capture_output=True,
                     ).stdout,
                 )
-            support_root = checkout / contract["continuation"]["test_support_root"]
-            support_paths = contract["continuation"]["test_support_paths"]
+            support_root = checkout / contract["repair"]["test_support_root"]
+            support_paths = contract["repair"]["test_support_paths"]
             self.assertEqual(
                 _git(checkout, "ls-files", "--others", "--exclude-standard").splitlines(),
-                [f"{contract['continuation']['test_support_root']}/{path}" for path in support_paths],
+                [f"{contract['repair']['test_support_root']}/{path}" for path in support_paths],
             )
             for relative in support_paths:
                 self.assertEqual(

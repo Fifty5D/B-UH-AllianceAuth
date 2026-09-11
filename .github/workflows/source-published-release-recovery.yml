@@ -37,16 +37,18 @@ jobs:
       continuation_commit: ${{ steps.contract.outputs.continuation_commit }}
       continuation_feature_head: ${{ steps.contract.outputs.continuation_feature_head }}
       release_commit: ${{ steps.contract.outputs.release_commit }}
+      repair_commit: ${{ steps.contract.outputs.repair_commit }}
+      repair_feature_head: ${{ steps.contract.outputs.repair_feature_head }}
       source_commit: ${{ steps.contract.outputs.source_commit }}
     steps:
-      - name: Check out the exact continuation merge
+      - name: Check out the exact digest-repair merge
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate actor, activation, continuation, release refs, and synchronization PR
+      - name: Validate actor, activation, continuation, repair, release refs, and synchronization PR
         id: contract
         env:
           ACTOR: ${{ github.actor }}
@@ -75,11 +77,11 @@ jobs:
           mkdir -p build
           python3 ops/release/validation_recovery.py \
             --contract ops/release/published-release-recovery-v0.6.2.json \
-            continuation \
+            repair \
             --root . \
             --source-commit "${SELECTED_SHA}" \
             --event-name workflow_dispatch \
-            --output build/recovery-continuation.json >/dev/null
+            --output build/recovery-repair.json >/dev/null
 
           for branch in release/platform-v0.6.2 sync/platform-v0.6.2; do
             encoded="${branch//\//%2F}"
@@ -121,7 +123,7 @@ jobs:
     with:
       cache_scope: published-v0.6.2-recovery
       source_sha: ${{ needs.qualify.outputs.release_commit }}
-      recovery_harness_sha: ${{ needs.qualify.outputs.continuation_commit }}
+      recovery_harness_sha: ${{ needs.qualify.outputs.repair_commit }}
     permissions:
       contents: read
 
@@ -137,17 +139,17 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.identity.outputs.artifact_name }}
     steps:
-      - name: Check out the exact continuation merge
+      - name: Check out the exact digest-repair merge
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.qualify.outputs.continuation_commit }}
+          ref: ${{ needs.qualify.outputs.repair_commit }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Record the successful exact-release validation
         id: identity
         env:
-          CONTINUATION_COMMIT: ${{ needs.qualify.outputs.continuation_commit }}
+          REPAIR_COMMIT: ${{ needs.qualify.outputs.repair_commit }}
           REPOSITORY: ${{ github.repository }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
@@ -160,7 +162,7 @@ jobs:
             --contract ops/release/published-release-recovery-v0.6.2.json \
             attest \
             --root . \
-            --continuation-commit "${CONTINUATION_COMMIT}" \
+            --repair-commit "${REPAIR_COMMIT}" \
             --repository "${REPOSITORY}" \
             --run-id "${RUN_ID}" \
             --run-attempt "${RUN_ATTEMPT}" \
@@ -201,10 +203,10 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - name: Check out the exact continuation merge
+      - name: Check out the exact digest-repair merge
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.qualify.outputs.continuation_commit }}
+          ref: ${{ needs.qualify.outputs.repair_commit }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -229,6 +231,8 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
+          REPAIR_COMMIT: ${{ needs.qualify.outputs.repair_commit }}
+          REPAIR_FEATURE_HEAD: ${{ needs.qualify.outputs.repair_feature_head }}
           VALIDATION_ARTIFACT_DIGEST: ${{ needs.attest.outputs.artifact_digest }}
           VALIDATION_ARTIFACT_ID: ${{ needs.attest.outputs.artifact_id }}
           VALIDATION_ARTIFACT_NAME: ${{ needs.attest.outputs.artifact_name }}
@@ -241,7 +245,7 @@ jobs:
             --attestation build/recovery-validation/platform-validation-recovery.json \
             --run-id "${RUN_ID}" \
             --run-attempt "${RUN_ATTEMPT}" \
-            --continuation-commit "${CONTINUATION_COMMIT}" >/dev/null
+            --repair-commit "${REPAIR_COMMIT}" >/dev/null
           allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
           if [[ -n "${WORK_ACTOR}" ]]; then
             [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
@@ -263,6 +267,13 @@ jobs:
             --output build/continuation-feature-readiness.json >/dev/null
           python3 ops/readiness.py published \
             --repository "${REPOSITORY}" \
+            --pull-request 55 \
+            --feature-head "${REPAIR_FEATURE_HEAD}" \
+            --merge-source-commit "${REPAIR_COMMIT}" \
+            "${allowed_mergers[@]}" \
+            --output build/repair-feature-readiness.json >/dev/null
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
             --pull-request 51 \
             --feature-head 7e945de03a75e8d7ec75930f7e60fe402abfcf48 \
             --merge-source-commit 4f98e7cb559ee1a9b269ea1f94938678d2dac4df \
@@ -275,6 +286,7 @@ jobs:
             --feature-readiness build/original-feature-readiness.json \
             --activation-readiness build/activation-feature-readiness.json \
             --continuation-readiness build/continuation-feature-readiness.json \
+            --repair-readiness build/repair-feature-readiness.json \
             --validation-attestation build/recovery-validation/platform-validation-recovery.json \
             --validation-artifact-id "${VALIDATION_ARTIFACT_ID}" \
             --validation-artifact-name "${VALIDATION_ARTIFACT_NAME}" \

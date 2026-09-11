@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,58 @@ kind = "fix"
 summary = "Exercise the bounded coordinated-recovery release rehearsal."
 deployment_predecessor = "0.5.6"
 """
+
+
+def canonical_recovery_upload_digest(root: Path, bare_digest: str) -> str:
+    """Execute the reviewed workflow's upload-output canonicalization step."""
+
+    workflow_root = TEST_SUPPORT_ROOT if TEST_SUPPORT_ROOT.is_dir() else ROOT
+    workflow = yaml.safe_load(
+        (
+            workflow_root
+            / ".github/workflows/source-published-release-recovery.yml"
+        ).read_text(encoding="utf-8")
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["attest"]["steps"]
+        if item.get("name") == "Canonicalize the verified upload digest"
+    )
+    output = root / "recovery-digest-output.txt"
+    output_value = str(output.resolve())
+    if os.name == "nt":
+        resolved = output.resolve()
+        output_value = f"/{resolved.drive[0].lower()}{resolved.as_posix()[2:]}"
+    environment = {
+        **os.environ,
+        "GITHUB_OUTPUT": output_value,
+        "UPLOAD_ARTIFACT_DIGEST": bare_digest,
+    }
+    bash = shutil.which("bash")
+    if bash is None:
+        windows_bash = Path("C:/Program Files/Git/bin/bash.exe")
+        if windows_bash.is_file():
+            bash = str(windows_bash)
+    if bash is None:
+        raise AssertionError("bash is required for recovery workflow rehearsal")
+    completed = subprocess.run(
+        [bash, "-c", step["run"]],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "Recovery digest handoff failed: "
+            + (completed.stdout + completed.stderr)[-1200:]
+        )
+    key, separator, value = output.read_text(encoding="utf-8").strip().partition("=")
+    if key != "artifact_digest" or not separator:
+        raise AssertionError("Recovery digest handoff output is invalid")
+    return value
 
 
 def run(*arguments: object, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1572,9 +1625,16 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             continuation_head = "e" * 40
             continuation_tree = "f" * 40
             continuation_run = 6000005
-            recovery_artifact_digest = "sha256:" + hashlib.sha256(
-                b"synthetic exact-release validation artifact"
-            ).hexdigest()
+            repair = "7" * 40
+            repair_head = "8" * 40
+            repair_tree = "9" * 40
+            repair_run = 6000006
+            recovery_artifact_digest = canonical_recovery_upload_digest(
+                base,
+                hashlib.sha256(
+                    b"synthetic exact-release validation artifact"
+                ).hexdigest(),
+            )
             recovery_artifact = (
                 f"platform-validation-recovery-v{target['platform_version']}-"
                 f"{release_commit[:12]}-{recovery_run}-1"
@@ -1597,6 +1657,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 RECOVERY_ARTIFACT=recovery_artifact,
                 RECOVERY_ARTIFACT_DIGEST=recovery_artifact_digest,
                 RECOVERY_RUN=recovery_run,
+                REPAIR=repair,
+                REPAIR_HEAD=repair_head,
+                REPAIR_RUN=repair_run,
+                REPAIR_TREE=repair_tree,
                 RELEASE=release_commit,
                 SOURCE=head,
                 VERSION=target["platform_version"],
@@ -1624,6 +1688,11 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                         feature_head=continuation_head,
                         merge_source_commit=continuation,
                     ),
+                    repair_readiness=approval_fixture._published_readiness(
+                        pull_request=55,
+                        feature_head=repair_head,
+                        merge_source_commit=repair,
+                    ),
                     validation_attestation=attestation,
                     validation_artifact_id=(
                         approval_fixture.RECOVERY_ARTIFACT_ID
@@ -1648,7 +1717,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     ready_report["ready"]["recovery_validation"]["attestation"][
                         "harness"
                     ]["commit"],
-                    continuation,
+                    repair,
                 )
 
                 authorization_index = 0

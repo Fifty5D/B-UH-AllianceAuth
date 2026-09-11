@@ -50,10 +50,21 @@ CONTINUATION_TREE = "f" * 40
 RECOVERY_RUN = 666
 ACTIVATION_RUN = 667
 CONTINUATION_RUN = 669
+REPAIR = "7" * 40
+REPAIR_HEAD = "8" * 40
+REPAIR_TREE = "9" * 40
+REPAIR_RUN = 671
 FAILED_RECOVERY_RUN = 670
 FAILED_RECOVERY_ARTIFACT_ID = 996
 FAILED_RECOVERY_ARTIFACT_DIGEST = "sha256:" + "a" * 64
 FAILED_RECOVERY_ARTIFACT = f"source-fast-failure-{FAILED_RECOVERY_RUN}-1"
+FAILED_PUBLICATION_RUN = 672
+FAILED_PUBLICATION_ARTIFACT_ID = 997
+FAILED_PUBLICATION_ARTIFACT_DIGEST = "sha256:" + "b" * 64
+FAILED_PUBLICATION_ARTIFACT = (
+    f"platform-validation-recovery-v{VERSION}-{RELEASE[:12]}-"
+    f"{FAILED_PUBLICATION_RUN}-1"
+)
 RECOVERY_ARTIFACT_ID = 991
 RECOVERY_ARTIFACT_DIGEST = "sha256:" + "d" * 64
 RECOVERY_ARTIFACT = (
@@ -199,12 +210,35 @@ def _recovery_contract() -> dict[str, Any]:
         "continuation": {
             "allowed_paths": list(approval.validation_recovery.CONTINUATION_PATHS),
             "base_commit": ACTIVATION,
-            "harness_paths": list(approval.validation_recovery.HARNESS_PATHS),
+            "commit": CONTINUATION,
+            "feature_head": CONTINUATION_HEAD,
             "pull_request": 54,
+            "tree": CONTINUATION_TREE,
+            "validation": {"run_attempt": 1, "run_id": CONTINUATION_RUN},
+        },
+        "repair": {
+            "allowed_paths": list(approval.validation_recovery.REPAIR_PATHS),
+            "base_commit": CONTINUATION,
+            "harness_paths": list(approval.validation_recovery.HARNESS_PATHS),
+            "pull_request": 55,
             "test_support_paths": list(
                 approval.validation_recovery.TEST_SUPPORT_PATHS
             ),
             "test_support_root": approval.validation_recovery.TEST_SUPPORT_ROOT,
+        },
+        "failed_publication": {
+            "artifact": {
+                "digest": FAILED_PUBLICATION_ARTIFACT_DIGEST,
+                "id": FAILED_PUBLICATION_ARTIFACT_ID,
+                "name": FAILED_PUBLICATION_ARTIFACT,
+            },
+            "jobs": [
+                {"conclusion": "success", "id": 972, "name": "Required source checks"},
+                {"conclusion": "success", "id": 973, "name": "Attest evidence"},
+                {"conclusion": "failure", "id": 974, "name": "Publish readiness"},
+            ],
+            "run_attempt": 1,
+            "run_id": FAILED_PUBLICATION_RUN,
         },
         "failed_validation": {
             "artifact": {
@@ -265,7 +299,7 @@ def _recovery_contract() -> dict[str, Any]:
             "tree": "e" * 40,
         },
         "repository": REPOSITORY,
-        "schema_version": 2,
+        "schema_version": approval.validation_recovery.SCHEMA_VERSION,
         "sync": {"branch": f"sync/platform-v{VERSION}", "pull_request": PR_NUMBER},
     }
 
@@ -291,6 +325,15 @@ def _recovery_attestation() -> dict[str, Any]:
         )
     ]
     by_path.update({item["path"]: item for item in continuation_paths})
+    repair_paths = [
+        {
+            "git_blob_sha": f"{index + 301:040x}",
+            "path": path,
+            "sha256": f"{index + 301:064x}",
+        }
+        for index, path in enumerate(approval.validation_recovery.REPAIR_PATHS)
+    ]
+    by_path.update({item["path"]: item for item in repair_paths})
     support_files = [
         {
             "git_blob_sha": f"{index + 201:040x}",
@@ -320,7 +363,7 @@ def _recovery_attestation() -> dict[str, Any]:
             "pull_request": 54,
         },
         "harness": {
-            "commit": CONTINUATION,
+            "commit": REPAIR,
             "files": [
                 copy.deepcopy(by_path[path])
                 for path in approval.validation_recovery.HARNESS_PATHS
@@ -329,17 +372,25 @@ def _recovery_attestation() -> dict[str, Any]:
                 "files": support_files,
                 "root": approval.validation_recovery.TEST_SUPPORT_ROOT,
             },
-            "tree": CONTINUATION_TREE,
+            "tree": REPAIR_TREE,
         },
         "recovery_id": approval.validation_recovery.RECOVERY_ID,
         "release": _recovery_contract()["release"],
         "repository": REPOSITORY,
-        "schema_version": 2,
+        "repair": {
+            "base_commit": CONTINUATION,
+            "feature_head": REPAIR_HEAD,
+            "paths": repair_paths,
+            "pull_request": 55,
+            "repair_commit": REPAIR,
+            "repair_tree": REPAIR_TREE,
+        },
+        "schema_version": approval.validation_recovery.ATTESTATION_SCHEMA_VERSION,
         "validation": {
             "actor": OWNER,
             "event": "workflow_dispatch",
             "head_branch": "main",
-            "head_sha": CONTINUATION,
+            "head_sha": REPAIR,
             "result": "success",
             "run_attempt": 1,
             "run_id": RECOVERY_RUN,
@@ -404,6 +455,13 @@ def _recovery_ready_payload() -> dict[str, Any]:
             ),
             "continuation_validation_run_attempt": 1,
             "continuation_validation_run_id": CONTINUATION_RUN,
+            "failed_publication": {
+                "artifact_digest": FAILED_PUBLICATION_ARTIFACT_DIGEST,
+                "artifact_id": FAILED_PUBLICATION_ARTIFACT_ID,
+                "artifact_name": FAILED_PUBLICATION_ARTIFACT,
+                "run_attempt": 1,
+                "run_id": FAILED_PUBLICATION_RUN,
+            },
             "failed_validation": {
                 "artifact_digest": FAILED_RECOVERY_ARTIFACT_DIGEST,
                 "artifact_id": FAILED_RECOVERY_ARTIFACT_ID,
@@ -412,6 +470,13 @@ def _recovery_ready_payload() -> dict[str, Any]:
                 "run_id": FAILED_RECOVERY_RUN,
             },
             "mode": "published-release-recovery",
+            "repair_readiness": _published_readiness(
+                pull_request=55,
+                feature_head=REPAIR_HEAD,
+                merge_source_commit=REPAIR,
+            ),
+            "repair_validation_run_attempt": 1,
+            "repair_validation_run_id": REPAIR_RUN,
             "required_check": {
                 "app_id": contract["required_check"]["app_id"],
                 "app_slug": contract["required_check"]["app_slug"],
@@ -530,7 +595,7 @@ def _event() -> dict[str, Any]:
 
 def _recovery_event() -> dict[str, Any]:
     event = _event()
-    event["pull_request"]["merged_at"] = "2026-09-10T13:00:00Z"
+    event["pull_request"]["merged_at"] = "2026-09-11T13:00:00Z"
     return event
 
 
@@ -748,10 +813,10 @@ class RecoveryTransport(ApprovalTransport):
         super().__init__(include_merge_marker=include_merge_marker)
         self.ready_mode = ready
         self.recovery_payload = payload or _recovery_ready_payload()
-        self.main_tip = CONTINUATION if ready else MERGE
+        self.main_tip = REPAIR if ready else MERGE
         self.recovery_run_path = approval.validation_recovery.WORKFLOW_PATH
         self.recovery_workflow_title = (
-            f"Validate published v0.6.2 / {CONTINUATION} / {OWNER}"
+            f"Validate published v0.6.2 / {REPAIR} / {OWNER}"
         )
         self.recovery_run_status = "in_progress" if ready else "completed"
         self.recovery_run_conclusion = None if ready else "success"
@@ -759,6 +824,8 @@ class RecoveryTransport(ApprovalTransport):
         self.activation_detail = self._activation_pr()
         self.continuation_detail_status = 200
         self.continuation_detail = self._continuation_pr()
+        self.repair_detail_status = 200
+        self.repair_detail = self._repair_pr()
         self.deny_check_publication = False
         self.published_check_payload: dict[str, Any] | None = None
         self.required_check_published = not ready
@@ -798,6 +865,19 @@ class RecoveryTransport(ApprovalTransport):
             "run_number": 82,
             "status": "completed",
         }
+        self.repair_run = {
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": REPAIR,
+            "id": REPAIR_RUN,
+            "path": ".github/workflows/source-ci.yml@refs/heads/main",
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 84,
+            "status": "completed",
+        }
 
     def _recovery_run(self) -> dict[str, Any]:
         return {
@@ -806,7 +886,7 @@ class RecoveryTransport(ApprovalTransport):
             "event": "workflow_dispatch",
             "head_branch": "main",
             "head_repository": {"full_name": REPOSITORY},
-            "head_sha": CONTINUATION,
+            "head_sha": REPAIR,
             "id": RECOVERY_RUN,
             "path": f"{self.recovery_run_path}@refs/heads/main",
             "repository": {"full_name": REPOSITORY},
@@ -852,6 +932,24 @@ class RecoveryTransport(ApprovalTransport):
             "user": {"login": OWNER},
         }
 
+    @staticmethod
+    def _repair_pr() -> dict[str, Any]:
+        return {
+            "base": {"ref": "main", "repo": {"full_name": REPOSITORY}},
+            "draft": False,
+            "head": {
+                "ref": "codex/recovery-artifact-digest",
+                "repo": {"full_name": REPOSITORY},
+                "sha": REPAIR_HEAD,
+            },
+            "merge_commit_sha": REPAIR,
+            "merged_at": "2026-09-11T12:00:00Z",
+            "merged_by": {"login": OWNER},
+            "number": 55,
+            "state": "closed",
+            "user": {"login": OWNER},
+        }
+
     @classmethod
     def _activation_association(cls) -> dict[str, Any]:
         # Actual commit-to-PR responses omit the merger field. The verifier
@@ -863,6 +961,12 @@ class RecoveryTransport(ApprovalTransport):
     @classmethod
     def _continuation_association(cls) -> dict[str, Any]:
         value = cls._continuation_pr()
+        value.pop("merged_by")
+        return value
+
+    @classmethod
+    def _repair_association(cls) -> dict[str, Any]:
+        value = cls._repair_pr()
         value.pop("merged_by")
         return value
 
@@ -965,7 +1069,7 @@ class RecoveryTransport(ApprovalTransport):
         jobs = [
             {
                 **item,
-                "head_sha": CONTINUATION,
+                "head_sha": REPAIR,
                 "run_attempt": 1,
                 "run_id": RECOVERY_RUN,
                 "status": "completed",
@@ -977,7 +1081,7 @@ class RecoveryTransport(ApprovalTransport):
             [
                 {
                     "conclusion": "success",
-                    "head_sha": CONTINUATION,
+                    "head_sha": REPAIR,
                     "id": 920,
                     "name": "Qualify the reviewed one-release recovery",
                     "run_attempt": 1,
@@ -987,7 +1091,7 @@ class RecoveryTransport(ApprovalTransport):
                 },
                 {
                     "conclusion": "success",
-                    "head_sha": CONTINUATION,
+                    "head_sha": REPAIR,
                     "id": 921,
                     "name": "Attest separate release and harness identities",
                     "run_attempt": 1,
@@ -997,7 +1101,7 @@ class RecoveryTransport(ApprovalTransport):
                 },
                 {
                     "conclusion": None if self.ready_mode else "success",
-                    "head_sha": CONTINUATION,
+                    "head_sha": REPAIR,
                     "id": 922,
                     "name": "Publish the recovered one-approval boundary",
                     "run_attempt": 1,
@@ -1125,6 +1229,22 @@ class RecoveryTransport(ApprovalTransport):
                     "sha": CONTINUATION_HEAD,
                 }
             )
+        if suffix == f"commits/{REPAIR}":
+            return _response(
+                {
+                    "commit": {"tree": {"sha": REPAIR_TREE}},
+                    "parents": [{"sha": CONTINUATION}, {"sha": REPAIR_HEAD}],
+                    "sha": REPAIR,
+                }
+            )
+        if suffix == f"commits/{REPAIR_HEAD}":
+            return _response(
+                {
+                    "commit": {"tree": {"sha": REPAIR_TREE}},
+                    "parents": [{"sha": CONTINUATION}],
+                    "sha": REPAIR_HEAD,
+                }
+            )
         if suffix == f"commits/{ACTIVATION}/pulls":
             return _response([self._activation_association()])
         if suffix == "pulls/53":
@@ -1143,6 +1263,15 @@ class RecoveryTransport(ApprovalTransport):
                     b'{"message":"private continuation detail"}\n',
                 )
             return _response(self.continuation_detail)
+        if suffix == f"commits/{REPAIR}/pulls":
+            return _response([self._repair_association()])
+        if suffix == "pulls/55":
+            if self.repair_detail_status != 200:
+                return sync.HttpResponse(
+                    self.repair_detail_status,
+                    b'{"message":"private digest repair detail"}\n',
+                )
+            return _response(self.repair_detail)
         if suffix == f"commits/{MERGE}":
             message = f"Sync platform release v{VERSION}"
             if self.include_merge_marker:
@@ -1153,7 +1282,7 @@ class RecoveryTransport(ApprovalTransport):
             return _response(
                 {
                     "commit": {"message": message},
-                    "parents": [{"sha": CONTINUATION}, {"sha": RELEASE}],
+                    "parents": [{"sha": REPAIR}, {"sha": RELEASE}],
                     "sha": MERGE,
                 }
             )
@@ -1163,6 +1292,8 @@ class RecoveryTransport(ApprovalTransport):
             return _response(self.activation_run)
         if suffix == f"actions/runs/{CONTINUATION_RUN}":
             return _response(self.continuation_run)
+        if suffix == f"actions/runs/{REPAIR_RUN}":
+            return _response(self.repair_run)
         if suffix == f"actions/runs/{FAILED_RECOVERY_RUN}":
             return _response(
                 {
@@ -1195,6 +1326,40 @@ class RecoveryTransport(ApprovalTransport):
                     ),
                 }
                 for item in _recovery_contract()["failed_validation"]["jobs"]
+            ]
+            return _response({"jobs": jobs, "total_count": len(jobs)})
+        if suffix == f"actions/runs/{FAILED_PUBLICATION_RUN}":
+            return _response(
+                {
+                    "actor": {"login": OWNER},
+                    "conclusion": "failure",
+                    "event": "workflow_dispatch",
+                    "head_branch": "main",
+                    "head_repository": {"full_name": REPOSITORY},
+                    "head_sha": CONTINUATION,
+                    "id": FAILED_PUBLICATION_RUN,
+                    "path": (
+                        f"{approval.validation_recovery.WORKFLOW_PATH}@refs/heads/main"
+                    ),
+                    "repository": {"full_name": REPOSITORY},
+                    "run_attempt": 1,
+                    "status": "completed",
+                    "triggering_actor": {"login": OWNER},
+                }
+            )
+        if suffix == f"actions/runs/{FAILED_PUBLICATION_RUN}/jobs":
+            jobs = [
+                {
+                    **item,
+                    "head_sha": CONTINUATION,
+                    "run_attempt": 1,
+                    "run_id": FAILED_PUBLICATION_RUN,
+                    "status": "completed",
+                    "workflow_name": (
+                        f"Validate published v0.6.2 / {CONTINUATION} / {OWNER}"
+                    ),
+                }
+                for item in _recovery_contract()["failed_publication"]["jobs"]
             ]
             return _response({"jobs": jobs, "total_count": len(jobs)})
         if suffix == f"actions/runs/{PREFLIGHT_RUN}":
@@ -1230,7 +1395,7 @@ class RecoveryTransport(ApprovalTransport):
             return _response(self._historical_required_run())
         if suffix == "actions/workflows/source-ci.yml/runs":
             return _response(
-                {"total_count": 1, "workflow_runs": [self.continuation_run]}
+                {"total_count": 1, "workflow_runs": [self.repair_run]}
             )
         if suffix == "actions/workflows/source-published-release-recovery.yml/runs":
             return _response(
@@ -1268,7 +1433,7 @@ class RecoveryTransport(ApprovalTransport):
                             "size_in_bytes": 8192,
                             "workflow_run": {
                                 "head_branch": "main",
-                                "head_sha": CONTINUATION,
+                                "head_sha": REPAIR,
                                 "id": RECOVERY_RUN,
                             },
                         }
@@ -1290,6 +1455,26 @@ class RecoveryTransport(ApprovalTransport):
                                 "head_branch": "main",
                                 "head_sha": ACTIVATION,
                                 "id": FAILED_RECOVERY_RUN,
+                            },
+                        }
+                    ],
+                    "total_count": 1,
+                }
+            )
+        if suffix == f"actions/runs/{FAILED_PUBLICATION_RUN}/artifacts":
+            return _response(
+                {
+                    "artifacts": [
+                        {
+                            "digest": FAILED_PUBLICATION_ARTIFACT_DIGEST,
+                            "expired": False,
+                            "id": FAILED_PUBLICATION_ARTIFACT_ID,
+                            "name": FAILED_PUBLICATION_ARTIFACT,
+                            "size_in_bytes": 8192,
+                            "workflow_run": {
+                                "head_branch": "main",
+                                "head_sha": CONTINUATION,
+                                "id": FAILED_PUBLICATION_RUN,
                             },
                         }
                     ],
@@ -1447,6 +1632,11 @@ class PlatformApprovalTests(unittest.TestCase):
                     pull_request=54,
                     feature_head=CONTINUATION_HEAD,
                     merge_source_commit=CONTINUATION,
+                ),
+                repair_readiness=_published_readiness(
+                    pull_request=55,
+                    feature_head=REPAIR_HEAD,
+                    merge_source_commit=REPAIR,
                 ),
                 validation_attestation=_recovery_attestation(),
                 validation_artifact_id=RECOVERY_ARTIFACT_ID,
@@ -2161,8 +2351,16 @@ class PlatformApprovalTests(unittest.TestCase):
             {"head_sha": CONTINUATION_HEAD, "number": 54},
         )
         self.assertEqual(
+            ready["recovery_validation"]["repair_readiness"]["feature_pr"],
+            {"head_sha": REPAIR_HEAD, "number": 55},
+        )
+        self.assertEqual(
             ready["recovery_validation"]["attestation"]["harness"]["commit"],
-            CONTINUATION,
+            REPAIR,
+        )
+        self.assertEqual(
+            ready["recovery_validation"]["failed_publication"]["run_id"],
+            FAILED_PUBLICATION_RUN,
         )
         self.assertEqual(
             ready["recovery_validation"]["artifact_digest"],
@@ -2209,6 +2407,27 @@ class PlatformApprovalTests(unittest.TestCase):
             )
         )
         self.assertGreaterEqual(transport.calls.count(("POST", "/graphql")), 3)
+
+    def test_recovery_check_binding_names_the_digest_repair(self) -> None:
+        binding, _ = approval._recovery_check_binding(
+            _recovery_contract(),
+            _recovery_attestation(),
+            {
+                "digest": RECOVERY_ARTIFACT_DIGEST,
+                "id": RECOVERY_ARTIFACT_ID,
+                "name": RECOVERY_ARTIFACT,
+            },
+            _recovery_lane_records(),
+        )
+
+        self.assertEqual(
+            binding["schema_version"],
+            approval.RECOVERY_CHECK_BINDING_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            binding["repair"],
+            _recovery_attestation()["repair"],
+        )
 
     def test_recovery_lanes_accept_custom_run_title_but_reject_other_run(self):
         accepted = RecoveryTransport(ready=True)
@@ -2323,6 +2542,13 @@ class PlatformApprovalTests(unittest.TestCase):
             ("GET", f"/repos/{REPOSITORY}/pulls/54")
         )
         self.assertLess(continuation_association, continuation_detail)
+        repair_association = transport.calls.index(
+            ("GET", f"/repos/{REPOSITORY}/commits/{REPAIR}/pulls")
+        )
+        repair_detail = transport.calls.index(
+            ("GET", f"/repos/{REPOSITORY}/pulls/55")
+        )
+        self.assertLess(repair_association, repair_detail)
 
     def test_recovery_activation_denied_or_mismatched_detail_fails_closed(self):
         denied = RecoveryTransport(ready=True)
@@ -2434,6 +2660,11 @@ class PlatformApprovalTests(unittest.TestCase):
                             feature_head=CONTINUATION_HEAD,
                             merge_source_commit=CONTINUATION,
                         ),
+                        repair_readiness=_published_readiness(
+                            pull_request=55,
+                            feature_head=REPAIR_HEAD,
+                            merge_source_commit=REPAIR,
+                        ),
                         validation_attestation=_recovery_attestation(),
                         validation_artifact_id=RECOVERY_ARTIFACT_ID,
                         validation_artifact_name=RECOVERY_ARTIFACT,
@@ -2463,6 +2694,11 @@ class PlatformApprovalTests(unittest.TestCase):
                     pull_request=54,
                     feature_head=CONTINUATION_HEAD,
                     merge_source_commit=CONTINUATION,
+                ),
+                repair_readiness=_published_readiness(
+                    pull_request=55,
+                    feature_head=REPAIR_HEAD,
+                    merge_source_commit=REPAIR,
                 ),
                 validation_attestation=_recovery_attestation(),
                 validation_artifact_id=RECOVERY_ARTIFACT_ID,

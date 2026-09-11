@@ -28,8 +28,8 @@ except ImportError:  # pragma: no cover - exercised by the CLI tests.
     import ledger  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 2
-ATTESTATION_SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+ATTESTATION_SCHEMA_VERSION = 3
 RECOVERY_ID = "published-platform-v0.6.2-validation-20260909"
 WORKFLOW_PATH = ".github/workflows/source-published-release-recovery.yml"
 DEFAULT_CONTRACT = Path(__file__).with_name(
@@ -47,6 +47,7 @@ HARNESS_PATHS = (
 )
 TEST_SUPPORT_ROOT = ".buh-recovery-test-support"
 TEST_SUPPORT_PATHS = (
+    ".github/workflows/source-published-release-recovery.yml",
     "ops/release/buh_release.py",
     "ops/release/ledger.py",
     "ops/release/open_sync_pr.py",
@@ -100,6 +101,25 @@ CONTINUATION_PATHS = (
     ".github/workflows/reusable-source-tests.yml",
     ".github/workflows/source-published-release-recovery.yml",
     "changes/recovery-rehearsal-snapshot-isolation.toml",
+    "ops/release/README.md",
+    "ops/release/platform_approval.py",
+    "ops/release/published-release-recovery-v0.6.2.json",
+    "ops/release/validation_recovery.py",
+    "tests/platform/test_configuration.py",
+    "tests/platform/test_coordinated_recovery_rehearsal.py",
+    "tests/platform/test_release_workflow_execution.py",
+    "tests/release/test_platform_approval.py",
+    "tests/release/test_validation_recovery.py",
+)
+
+# Exact tree delta permitted for the one digest-handoff repair after PR #54.
+# PR #54 remains immutable evidence; this separately bounded merge may change
+# only the workflow boundary, its approval/continuation contracts, tests, docs,
+# and the one new change fragment.
+REPAIR_PATHS = (
+    ".github/workflows/reusable-source-tests.yml",
+    ".github/workflows/source-published-release-recovery.yml",
+    "changes/recovery-artifact-digest-handoff.toml",
     "ops/release/README.md",
     "ops/release/platform_approval.py",
     "ops/release/published-release-recovery-v0.6.2.json",
@@ -169,11 +189,13 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "activation",
         "continuation",
+        "failed_publication",
         "failed_validation",
         "feature",
         "main_validation",
         "platform_version",
         "preflight",
+        "repair",
         "required_check",
         "recovery_id",
         "release",
@@ -226,23 +248,56 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
     if not isinstance(continuation, dict) or set(continuation) != {
         "allowed_paths",
         "base_commit",
-        "harness_paths",
+        "commit",
+        "feature_head",
         "pull_request",
-        "test_support_paths",
-        "test_support_root",
+        "tree",
+        "validation",
     }:
         raise ValidationRecoveryError("Recovery continuation contract is invalid")
+    continuation_validation = continuation.get("validation")
+    if not isinstance(continuation_validation, dict) or set(
+        continuation_validation
+    ) != {"run_attempt", "run_id"}:
+        raise ValidationRecoveryError("Recovery continuation validation is invalid")
     if (
         _positive_int(continuation.get("pull_request"), context="Continuation PR")
         != 54
         or _commit(continuation.get("base_commit"), context="Continuation base")
         != activation["commit"]
+        or _commit(continuation.get("commit"), context="Continuation commit")
+        != "57e0e29042bab3a989c80e5473ad552ec5b4505b"
+        or _commit(
+            continuation.get("feature_head"), context="Continuation feature head"
+        )
+        != "a743e222546371f386a629459ab8e7b209684905"
+        or _commit(continuation.get("tree"), context="Continuation tree")
+        != "4fdb46bcbd29081d7a04a7cd41bd7e59f5210c50"
         or continuation.get("allowed_paths") != list(CONTINUATION_PATHS)
-        or continuation.get("harness_paths") != list(HARNESS_PATHS)
-        or continuation.get("test_support_paths") != list(TEST_SUPPORT_PATHS)
-        or continuation.get("test_support_root") != TEST_SUPPORT_ROOT
+        or continuation_validation != {"run_attempt": 1, "run_id": 34440024442}
     ):
         raise ValidationRecoveryError("Recovery continuation scope changed")
+
+    repair = value.get("repair")
+    if not isinstance(repair, dict) or set(repair) != {
+        "allowed_paths",
+        "base_commit",
+        "harness_paths",
+        "pull_request",
+        "test_support_paths",
+        "test_support_root",
+    }:
+        raise ValidationRecoveryError("Recovery digest repair contract is invalid")
+    if (
+        _positive_int(repair.get("pull_request"), context="Digest repair PR") != 55
+        or _commit(repair.get("base_commit"), context="Digest repair base")
+        != continuation["commit"]
+        or repair.get("allowed_paths") != list(REPAIR_PATHS)
+        or repair.get("harness_paths") != list(HARNESS_PATHS)
+        or repair.get("test_support_paths") != list(TEST_SUPPORT_PATHS)
+        or repair.get("test_support_root") != TEST_SUPPORT_ROOT
+    ):
+        raise ValidationRecoveryError("Recovery digest repair scope changed")
 
     failed_validation = value.get("failed_validation")
     if not isinstance(failed_validation, dict) or set(failed_validation) != {
@@ -301,6 +356,71 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         102718509763,
     ]:
         raise ValidationRecoveryError("Failed recovery validation failure set changed")
+
+    failed_publication = value.get("failed_publication")
+    if not isinstance(failed_publication, dict) or set(failed_publication) != {
+        "artifact",
+        "jobs",
+        "run_attempt",
+        "run_id",
+    }:
+        raise ValidationRecoveryError("Failed recovery publication evidence is invalid")
+    failed_publication_artifact = failed_publication.get("artifact")
+    if (
+        _positive_int(
+            failed_publication.get("run_id"),
+            context="Failed publication run ID",
+        )
+        != 34440488685
+        or _positive_int(
+            failed_publication.get("run_attempt"),
+            context="Failed publication run attempt",
+        )
+        != 1
+        or failed_publication_artifact
+        != {
+            "digest": "sha256:b04387d5eb10ae9a4e9abf0eaf87d87e264a8b7aeb5937fac4ad9dbc5168143f",
+            "id": 10137840766,
+            "name": (
+                "platform-validation-recovery-v0.6.2-6074b965cbd2-"
+                "34440488685-1"
+            ),
+        }
+    ):
+        raise ValidationRecoveryError("Failed recovery publication identity changed")
+    failed_publication_jobs = failed_publication.get("jobs")
+    if not isinstance(failed_publication_jobs, list) or len(
+        failed_publication_jobs
+    ) != 11:
+        raise ValidationRecoveryError("Failed recovery publication job set is invalid")
+    for item in failed_publication_jobs:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"conclusion", "id", "name"}
+            or item.get("conclusion") not in {"failure", "success"}
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+        ):
+            raise ValidationRecoveryError("Failed recovery publication job is invalid")
+        _positive_int(item.get("id"), context="Failed publication job ID")
+    if {item["id"] for item in failed_publication_jobs} != {
+        102754324829,
+        102754356788,
+        102754356792,
+        102754356793,
+        102754378571,
+        102754378637,
+        102754378658,
+        102754378963,
+        102755185034,
+        102755200516,
+        102755231308,
+    } or [
+        item["id"]
+        for item in failed_publication_jobs
+        if item["conclusion"] == "failure"
+    ] != [102755231308]:
+        raise ValidationRecoveryError("Failed recovery publication jobs changed")
 
     feature = value.get("feature")
     if not isinstance(feature, dict) or set(feature) != {
@@ -673,7 +793,36 @@ def verify_activation(
     }
 
 
-def validate_continuation(
+def verify_continuation(root: Path, *, contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify already-merged PR #54 as immutable continuation evidence."""
+
+    root = root.resolve()
+    activation = verify_activation(root, contract=contract)
+    continuation = contract["continuation"]
+    base = activation["activation_commit"]
+    commit = _resolve(root, continuation["commit"])
+    feature_head = _resolve(root, continuation["feature_head"])
+    if continuation["base_commit"] != base:
+        raise ValidationRecoveryError("Recovery continuation base changed")
+    if (
+        _parents(root, commit) != [base, feature_head]
+        or _tree(root, commit) != continuation["tree"]
+        or _tree(root, feature_head) != continuation["tree"]
+        or _changed_paths(root, base, feature_head) != CONTINUATION_PATHS
+        or _changed_paths(root, base, commit) != CONTINUATION_PATHS
+    ):
+        raise ValidationRecoveryError("Recovery continuation identity changed")
+    return {
+        "base_commit": base,
+        "continuation_commit": commit,
+        "continuation_tree": continuation["tree"],
+        "feature_head": feature_head,
+        "paths": _blob_records(root, commit, CONTINUATION_PATHS),
+        "pull_request": continuation["pull_request"],
+    }
+
+
+def validate_repair(
     root: Path,
     current_commit: str,
     *,
@@ -681,73 +830,71 @@ def validate_continuation(
     pull_request: int | None,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Validate the exact follow-up branch or its one merge commit."""
+    """Validate the exact digest-repair branch or its one merge commit."""
 
     root = root.resolve()
     current = _resolve(root, current_commit)
-    activation = verify_activation(root, contract=contract)
-    continuation = contract["continuation"]
-    base = activation["activation_commit"]
+    continuation = verify_continuation(root, contract=contract)
+    repair = contract["repair"]
+    base = continuation["continuation_commit"]
     release = contract["release"]["commit"]
     _verify_release_identity(root, contract)
-    if continuation["base_commit"] != base:
-        raise ValidationRecoveryError("Recovery continuation base changed")
+    if repair["base_commit"] != base:
+        raise ValidationRecoveryError("Recovery digest repair base changed")
     if _git(
         root,
         ["merge-base", "--is-ancestor", base, current],
-        operation="continuation ancestry inspection",
+        operation="digest repair ancestry inspection",
         check=False,
     ).returncode != 0:
-        raise ValidationRecoveryError("Continuation is not based on the activation")
+        raise ValidationRecoveryError("Digest repair is not based on PR #54")
     if _git(
         root,
         ["merge-base", "--is-ancestor", release, current],
         operation="unsynchronized release inspection",
         check=False,
     ).returncode == 0:
-        raise ValidationRecoveryError("Continuation unexpectedly contains the release ledger")
+        raise ValidationRecoveryError("Digest repair unexpectedly contains the release ledger")
 
     if event_name == "pull_request":
-        if pull_request != continuation["pull_request"]:
-            raise ValidationRecoveryError("Recovery is restricted to continuation PR #54")
+        if pull_request != repair["pull_request"]:
+            raise ValidationRecoveryError("Recovery is restricted to digest repair PR #55")
         feature_head = current
-        continuation_commit = None
+        repair_commit = None
     elif event_name in {"push", "workflow_dispatch"}:
         parents = _parents(root, current)
         if len(parents) != 2 or parents[0] != base:
             raise ValidationRecoveryError(
-                "Recovery continuation is not a direct two-parent merge onto its activation"
+                "Recovery digest repair is not a direct two-parent merge onto PR #54"
             )
         feature_head = parents[1]
         if _tree(root, feature_head) != _tree(root, current):
             raise ValidationRecoveryError(
-                "Continuation merge tree differs from its reviewed head"
+                "Digest repair merge tree differs from its reviewed head"
             )
-        continuation_commit = current
+        repair_commit = current
     else:
         raise ValidationRecoveryError("Event cannot continue published-release recovery")
 
     if _git(
         root,
         ["merge-base", "--is-ancestor", base, feature_head],
-        operation="continuation feature ancestry inspection",
+        operation="digest repair feature ancestry inspection",
         check=False,
     ).returncode != 0:
-        raise ValidationRecoveryError("Continuation feature head has invalid ancestry")
+        raise ValidationRecoveryError("Digest repair feature head has invalid ancestry")
     changed = _changed_paths(root, base, feature_head)
-    if changed != CONTINUATION_PATHS:
-        raise ValidationRecoveryError(
-            "Continuation tree delta is outside the reviewed scope"
-        )
-    if _changed_paths(root, base, current) != CONTINUATION_PATHS:
-        raise ValidationRecoveryError("Current continuation tree delta changed")
+    if changed != REPAIR_PATHS:
+        raise ValidationRecoveryError("Digest repair tree delta is outside the reviewed scope")
+    if _changed_paths(root, base, current) != REPAIR_PATHS:
+        raise ValidationRecoveryError("Current digest repair tree delta changed")
     return {
-        "continuation_commit": continuation_commit,
-        "continuation_tree": _tree(root, current),
         "base_commit": base,
         "feature_head": feature_head,
-        "paths": _blob_records(root, current, CONTINUATION_PATHS),
-        "pull_request": continuation["pull_request"],
+        "paths": _blob_records(root, current, REPAIR_PATHS),
+        "pull_request": repair["pull_request"],
+        "repair_commit": repair_commit,
+        "repair_tree": _tree(root, current),
     }
 
 
@@ -828,7 +975,7 @@ def verify_pending_ledger(
     else:
         raise ValidationRecoveryError("Published-release recovery is no longer pending")
 
-    continuation = validate_continuation(
+    repair = validate_repair(
         root,
         current_commit,
         event_name=event_name,
@@ -878,7 +1025,7 @@ def verify_pending_ledger(
         raise ValidationRecoveryError("Post-synchronization release plan is invalid")
     return {
         "activation": verify_activation(root, contract=contract),
-        "continuation": continuation,
+        "continuation": verify_continuation(root, contract=contract),
         "latest_release": {
             key: state["latest"][key]
             for key in ("manifest_sha256", "platform_version", "release_commit")
@@ -890,6 +1037,7 @@ def verify_pending_ledger(
             "release_required": plan["release_required"],
         },
         "recovery_id": contract["recovery_id"],
+        "repair": repair,
         "schema_version": SCHEMA_VERSION,
         "source_commit": current_commit,
         "synthetic_merge_commit": synthetic,
@@ -903,41 +1051,42 @@ def validate_hold(
     *,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Hold new-release creation across the reviewed continuation and sync."""
+    """Hold new-release creation across the reviewed repair and sync."""
 
     current = _resolve(root, current_commit)
     try:
-        continuation = validate_continuation(
+        repair = validate_repair(
             root,
             current,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        state = "continuation-pending-sync"
-        continuation_commit = current
+        state = "repair-pending-sync"
+        repair_commit = current
     except ValidationRecoveryError:
         parents = _parents(root, current)
         release = contract["release"]["commit"]
         if len(parents) != 2 or parents[1] != release:
             raise ValidationRecoveryError("Current main is outside the recovery hold")
-        continuation_commit = parents[0]
-        continuation = validate_continuation(
+        repair_commit = parents[0]
+        repair = validate_repair(
             root,
-            continuation_commit,
+            repair_commit,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        if _tree(root, current) != _merge_tree(root, continuation_commit, release):
+        if _tree(root, current) != _merge_tree(root, repair_commit, release):
             raise ValidationRecoveryError("Synchronization merge tree changed")
         state = "synchronized-awaiting-retirement"
     return {
         "activation": verify_activation(root, contract=contract),
-        "continuation": continuation,
-        "continuation_commit": continuation_commit,
+        "continuation": verify_continuation(root, contract=contract),
         "current_commit": current,
         "recovery_id": contract["recovery_id"],
+        "repair": repair,
+        "repair_commit": repair_commit,
         "schema_version": SCHEMA_VERSION,
         "state": state,
     }
@@ -961,7 +1110,7 @@ def apply_harness(
         operation="harness worktree inspection",
     ).stdout:
         raise ValidationRecoveryError("Harness target worktree is not clean")
-    continuation = validate_continuation(
+    repair = validate_repair(
         root,
         harness_commit,
         event_name="workflow_dispatch",
@@ -1045,12 +1194,13 @@ def apply_harness(
         raise ValidationRecoveryError("Harness changed files outside its reviewed scope")
     return {
         "activation": verify_activation(root, contract=contract),
-        "continuation": continuation,
+        "continuation": verify_continuation(root, contract=contract),
         "files": files,
         "harness_commit": harness_commit,
         "recovery_id": contract["recovery_id"],
         "release_commit": release,
         "release_tree": contract["release"]["tree"],
+        "repair": repair,
         "schema_version": SCHEMA_VERSION,
         "test_support": {
             "files": support_files,
@@ -1061,7 +1211,7 @@ def apply_harness(
 
 def create_attestation(
     root: Path,
-    continuation_commit: str,
+    repair_commit: str,
     *,
     repository: str,
     run_id: int,
@@ -1076,16 +1226,16 @@ def create_attestation(
         raise ValidationRecoveryError("Recovery workflow reruns are forbidden")
     if LOGIN_RE.fullmatch(actor) is None:
         raise ValidationRecoveryError("Recovery workflow actor is invalid")
-    continuation = validate_continuation(
+    repair = validate_repair(
         root,
-        continuation_commit,
+        repair_commit,
         event_name="workflow_dispatch",
         pull_request=None,
         contract=contract,
     )
-    files = _blob_records(root, continuation_commit, HARNESS_PATHS)
+    files = _blob_records(root, repair_commit, HARNESS_PATHS)
     support_files = []
-    for item in _blob_records(root, continuation_commit, TEST_SUPPORT_PATHS):
+    for item in _blob_records(root, repair_commit, TEST_SUPPORT_PATHS):
         support_files.append(
             {
                 **item,
@@ -1094,25 +1244,26 @@ def create_attestation(
         )
     return {
         "activation": verify_activation(root, contract=contract),
-        "continuation": continuation,
+        "continuation": verify_continuation(root, contract=contract),
         "harness": {
-            "commit": continuation_commit,
+            "commit": repair_commit,
             "files": files,
             "test_support": {
                 "files": support_files,
                 "root": TEST_SUPPORT_ROOT,
             },
-            "tree": continuation["continuation_tree"],
+            "tree": repair["repair_tree"],
         },
         "recovery_id": contract["recovery_id"],
         "release": dict(contract["release"]),
         "repository": repository,
+        "repair": repair,
         "schema_version": ATTESTATION_SCHEMA_VERSION,
         "validation": {
             "actor": actor,
             "event": "workflow_dispatch",
             "head_branch": "main",
-            "head_sha": continuation_commit,
+            "head_sha": repair_commit,
             "result": "success",
             "run_attempt": run_attempt,
             "run_id": run_id,
@@ -1127,7 +1278,7 @@ def validate_attestation_data(
     contract: Mapping[str, Any],
     expected_run_id: int | None = None,
     expected_run_attempt: int | None = None,
-    expected_continuation: str | None = None,
+    expected_repair: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "activation",
@@ -1136,6 +1287,7 @@ def validate_attestation_data(
         "recovery_id",
         "release",
         "repository",
+        "repair",
         "schema_version",
         "validation",
     }:
@@ -1199,12 +1351,12 @@ def validate_attestation_data(
     )
     if (
         continuation.get("base_commit") != activation_commit
-        or continuation.get("pull_request")
-        != contract["continuation"]["pull_request"]
-        or COMMIT_RE.fullmatch(str(continuation.get("continuation_tree"))) is None
-        or COMMIT_RE.fullmatch(str(continuation.get("feature_head"))) is None
-        or expected_continuation is not None
-        and continuation_commit != expected_continuation
+        or continuation_commit != contract["continuation"]["commit"]
+        or continuation.get("continuation_tree")
+        != contract["continuation"]["tree"]
+        or continuation.get("feature_head")
+        != contract["continuation"]["feature_head"]
+        or continuation.get("pull_request") != contract["continuation"]["pull_request"]
     ):
         raise ValidationRecoveryError("Validation recovery continuation identity changed")
     continuation_paths = continuation.get("paths")
@@ -1222,6 +1374,43 @@ def validate_attestation_data(
         _commit(item.get("git_blob_sha"), context="Continuation blob")
         _sha256(item.get("sha256"), context="Continuation blob digest")
 
+    repair = value.get("repair")
+    if not isinstance(repair, dict) or set(repair) != {
+        "base_commit",
+        "feature_head",
+        "paths",
+        "pull_request",
+        "repair_commit",
+        "repair_tree",
+    }:
+        raise ValidationRecoveryError("Validation recovery digest repair is invalid")
+    repair_commit = _commit(
+        repair.get("repair_commit"), context="Attested digest repair commit"
+    )
+    if (
+        repair.get("base_commit") != continuation_commit
+        or repair.get("pull_request") != contract["repair"]["pull_request"]
+        or COMMIT_RE.fullmatch(str(repair.get("repair_tree"))) is None
+        or COMMIT_RE.fullmatch(str(repair.get("feature_head"))) is None
+        or expected_repair is not None
+        and repair_commit != expected_repair
+    ):
+        raise ValidationRecoveryError("Validation recovery digest repair identity changed")
+    repair_paths = repair.get("paths")
+    if not isinstance(repair_paths, list) or [
+        item.get("path") for item in repair_paths
+    ] != list(REPAIR_PATHS):
+        raise ValidationRecoveryError("Attested digest repair path scope changed")
+    for item in repair_paths:
+        if not isinstance(item, dict) or set(item) != {
+            "git_blob_sha",
+            "path",
+            "sha256",
+        }:
+            raise ValidationRecoveryError("Attested digest repair blob is invalid")
+        _commit(item.get("git_blob_sha"), context="Digest repair blob")
+        _sha256(item.get("sha256"), context="Digest repair blob digest")
+
     harness = value.get("harness")
     if not isinstance(harness, dict) or set(harness) != {
         "commit",
@@ -1231,8 +1420,8 @@ def validate_attestation_data(
     }:
         raise ValidationRecoveryError("Validation recovery harness is invalid")
     if (
-        harness.get("commit") != continuation_commit
-        or harness.get("tree") != continuation.get("continuation_tree")
+        harness.get("commit") != repair_commit
+        or harness.get("tree") != repair.get("repair_tree")
     ):
         raise ValidationRecoveryError("Validation recovery harness identity changed")
     files = harness.get("files")
@@ -1251,8 +1440,9 @@ def validate_attestation_data(
         _sha256(item.get("sha256"), context="Harness blob digest")
     reviewed_by_path = {item["path"]: item for item in paths}
     reviewed_by_path.update({item["path"]: item for item in continuation_paths})
+    reviewed_by_path.update({item["path"]: item for item in repair_paths})
     if any(reviewed_by_path.get(item["path"]) != item for item in files):
-        raise ValidationRecoveryError("Harness bytes differ from the continuation commit")
+        raise ValidationRecoveryError("Harness bytes differ from the digest repair commit")
     test_support = harness.get("test_support")
     if not isinstance(test_support, dict) or set(test_support) != {"files", "root"}:
         raise ValidationRecoveryError("Validation recovery test support is invalid")
@@ -1296,7 +1486,7 @@ def validate_attestation_data(
         attempt != 1
         or validation.get("event") != "workflow_dispatch"
         or validation.get("head_branch") != "main"
-        or validation.get("head_sha") != continuation_commit
+        or validation.get("head_sha") != repair_commit
         or validation.get("result") != "success"
         or validation.get("workflow_path") != WORKFLOW_PATH
         or not isinstance(validation.get("actor"), str)
@@ -1316,7 +1506,7 @@ def load_attestation(
     contract: Mapping[str, Any],
     expected_run_id: int | None = None,
     expected_run_attempt: int | None = None,
-    expected_continuation: str | None = None,
+    expected_repair: str | None = None,
 ) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
@@ -1335,7 +1525,7 @@ def load_attestation(
         contract=contract,
         expected_run_id=expected_run_id,
         expected_run_attempt=expected_run_attempt,
-        expected_continuation=expected_continuation,
+        expected_repair=expected_repair,
     )
 
 
@@ -1367,12 +1557,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("continuation", "ledger", "hold"):
+    for name in ("repair", "ledger", "hold"):
         command = subparsers.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--source-commit", required=True)
         command.add_argument("--output", type=Path, required=True)
-        if name in {"continuation", "ledger"}:
+        if name in {"repair", "ledger"}:
             command.add_argument(
                 "--event-name",
                 choices=("pull_request", "push", "workflow_dispatch"),
@@ -1385,7 +1575,7 @@ def _parser() -> argparse.ArgumentParser:
     overlay.add_argument("--output", type=Path, required=True)
     attest = subparsers.add_parser("attest")
     attest.add_argument("--root", type=Path, required=True)
-    attest.add_argument("--continuation-commit", required=True)
+    attest.add_argument("--repair-commit", required=True)
     attest.add_argument("--repository", required=True)
     attest.add_argument("--run-id", type=int, required=True)
     attest.add_argument("--run-attempt", type=int, required=True)
@@ -1395,7 +1585,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--attestation", type=Path, required=True)
     verify.add_argument("--run-id", type=int, required=True)
     verify.add_argument("--run-attempt", type=int, required=True)
-    verify.add_argument("--continuation-commit", required=True)
+    verify.add_argument("--repair-commit", required=True)
     return parser
 
 
@@ -1403,8 +1593,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         contract = load_contract(arguments.contract)
-        if arguments.command == "continuation":
-            continuation = validate_continuation(
+        if arguments.command == "repair":
+            repair = validate_repair(
                 arguments.root,
                 arguments.source_commit,
                 event_name=arguments.event_name,
@@ -1413,8 +1603,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             report = {
                 "activation": verify_activation(arguments.root, contract=contract),
-                "continuation": continuation,
+                "continuation": verify_continuation(
+                    arguments.root, contract=contract
+                ),
                 "recovery_id": contract["recovery_id"],
+                "repair": repair,
                 "schema_version": SCHEMA_VERSION,
             }
             _write(arguments.output, report)
@@ -1422,11 +1615,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "activation_commit": report["activation"]["activation_commit"],
                     "activation_feature_head": report["activation"]["feature_head"],
-                    "continuation_commit": (
-                        continuation["continuation_commit"] or "feature"
-                    ),
-                    "continuation_feature_head": continuation["feature_head"],
+                    "continuation_commit": report["continuation"][
+                        "continuation_commit"
+                    ],
+                    "continuation_feature_head": report["continuation"][
+                        "feature_head"
+                    ],
                     "release_commit": contract["release"]["commit"],
+                    "repair_commit": repair["repair_commit"] or "feature",
+                    "repair_feature_head": repair["feature_head"],
                     "source_commit": contract["release"]["source_commit"],
                 }
             )
@@ -1465,7 +1662,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "attest":
             report = create_attestation(
                 arguments.root,
-                arguments.continuation_commit,
+                arguments.repair_commit,
                 repository=arguments.repository,
                 run_id=arguments.run_id,
                 run_attempt=arguments.run_attempt,
@@ -1476,8 +1673,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _append_outputs(
                 {
                     "activation_commit": contract["activation"]["commit"],
-                    "continuation_commit": arguments.continuation_commit,
+                    "continuation_commit": contract["continuation"]["commit"],
                     "release_commit": contract["release"]["commit"],
+                    "repair_commit": arguments.repair_commit,
                     "source_commit": contract["release"]["source_commit"],
                 }
             )
@@ -1487,7 +1685,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contract=contract,
                 expected_run_id=arguments.run_id,
                 expected_run_attempt=arguments.run_attempt,
-                expected_continuation=arguments.continuation_commit,
+                expected_repair=arguments.repair_commit,
             )
             report = {
                 "recovery_id": contract["recovery_id"],
