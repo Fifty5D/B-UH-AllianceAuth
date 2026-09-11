@@ -45,6 +45,7 @@ class RecoveryRepository:
         fixture_paths = sorted(
             set(recovery.ACTIVATION_PATHS)
             | set(recovery.CONTINUATION_PATHS)
+            | set(recovery.REPAIR_PATHS)
             | set(recovery.HARNESS_PATHS)
             | set(recovery.TEST_SUPPORT_PATHS)
         )
@@ -107,6 +108,26 @@ class RecoveryRepository:
         )
         self.continuation = run(root, "rev-parse", "HEAD")
 
+        run(root, "checkout", "--quiet", "-b", "recovery-digest-repair", self.continuation)
+        for relative in recovery.REPAIR_PATHS:
+            path = root.joinpath(*relative.split("/"))
+            path.write_text(f"repair:{relative}\n", encoding="utf-8")
+        run(root, "add", "--all")
+        run(root, "commit", "--quiet", "-m", "bounded digest repair")
+        self.repair_feature = run(root, "rev-parse", "HEAD")
+        self.repair_tree = run(root, "rev-parse", "HEAD^{tree}")
+        run(root, "checkout", "--quiet", "-B", "main", self.continuation)
+        run(
+            root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "recovery-digest-repair",
+            "-m",
+            "repair recovery digest handoff",
+        )
+        self.repair = run(root, "rev-parse", "HEAD")
+
         self.contract = {
             "activation": {
                 "allowed_paths": list(recovery.ACTIVATION_PATHS),
@@ -120,10 +141,29 @@ class RecoveryRepository:
             "continuation": {
                 "allowed_paths": list(recovery.CONTINUATION_PATHS),
                 "base_commit": self.activation,
-                "harness_paths": list(recovery.HARNESS_PATHS),
+                "commit": self.continuation,
+                "feature_head": self.continuation_feature,
                 "pull_request": 54,
+                "tree": self.continuation_tree,
+                "validation": {"run_attempt": 1, "run_id": 106},
+            },
+            "repair": {
+                "allowed_paths": list(recovery.REPAIR_PATHS),
+                "base_commit": self.continuation,
+                "harness_paths": list(recovery.HARNESS_PATHS),
+                "pull_request": 55,
                 "test_support_paths": list(recovery.TEST_SUPPORT_PATHS),
                 "test_support_root": recovery.TEST_SUPPORT_ROOT,
+            },
+            "failed_publication": {
+                "artifact": {
+                    "digest": "sha256:" + "8" * 64,
+                    "id": 112,
+                    "name": "failed-publication",
+                },
+                "jobs": [],
+                "run_attempt": 1,
+                "run_id": 111,
             },
             "failed_validation": {
                 "artifact": {"digest": "sha256:" + "9" * 64, "id": 110, "name": "failed"},
@@ -154,7 +194,7 @@ class RecoveryRepository:
                 "tree": self.release_tree,
             },
             "repository": "Fifty5D/B-UH-AllianceAuth",
-            "schema_version": 1,
+            "schema_version": recovery.SCHEMA_VERSION,
             "sync": {"branch": "sync/platform-v0.6.2", "pull_request": 52},
         }
 
@@ -165,7 +205,7 @@ class RecoveryRepository:
             "--quiet",
             "-B",
             "continued-main",
-            self.continuation,
+            self.repair,
         )
         run(
             self.root,
@@ -206,7 +246,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             list(recovery.ACTIVATION_PATHS),
         )
 
-    def test_activation_continuation_and_hold_have_exact_boundaries(self) -> None:
+    def test_activation_continuation_repair_and_hold_have_exact_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = RecoveryRepository(Path(temporary) / "repository")
             activation = recovery.verify_activation(
@@ -216,44 +256,51 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             self.assertEqual(activation["activation_commit"], fixture.activation)
             self.assertEqual(activation["activation_tree"], fixture.activation_tree)
 
-            feature = recovery.validate_continuation(
+            continuation = recovery.verify_continuation(
                 fixture.root,
-                fixture.continuation_feature,
-                event_name="pull_request",
-                pull_request=54,
                 contract=fixture.contract,
             )
-            self.assertIsNone(feature["continuation_commit"])
-            self.assertEqual(feature["feature_head"], fixture.continuation_feature)
+            self.assertEqual(continuation["continuation_commit"], fixture.continuation)
+            self.assertEqual(continuation["feature_head"], fixture.continuation_feature)
 
-            continuation = recovery.validate_continuation(
+            feature = recovery.validate_repair(
                 fixture.root,
-                fixture.continuation,
+                fixture.repair_feature,
+                event_name="pull_request",
+                pull_request=55,
+                contract=fixture.contract,
+            )
+            self.assertIsNone(feature["repair_commit"])
+            self.assertEqual(feature["feature_head"], fixture.repair_feature)
+
+            repair = recovery.validate_repair(
+                fixture.root,
+                fixture.repair,
                 event_name="workflow_dispatch",
                 pull_request=None,
                 contract=fixture.contract,
             )
             self.assertEqual(
-                continuation["continuation_commit"], fixture.continuation
+                repair["repair_commit"], fixture.repair
             )
             self.assertEqual(
-                continuation["continuation_tree"], fixture.continuation_tree
+                repair["repair_tree"], fixture.repair_tree
             )
             self.assertEqual(
-                [item["path"] for item in continuation["paths"]],
-                list(recovery.CONTINUATION_PATHS),
+                [item["path"] for item in repair["paths"]],
+                list(recovery.REPAIR_PATHS),
             )
             held = recovery.validate_hold(
-                fixture.root, fixture.continuation, contract=fixture.contract
+                fixture.root, fixture.repair, contract=fixture.contract
             )
-            self.assertEqual(held["state"], "continuation-pending-sync")
+            self.assertEqual(held["state"], "repair-pending-sync")
 
             synchronized = fixture.add_sync_merge()
             held = recovery.validate_hold(
                 fixture.root, synchronized, contract=fixture.contract
             )
             self.assertEqual(held["state"], "synchronized-awaiting-retirement")
-            self.assertEqual(held["continuation_commit"], fixture.continuation)
+            self.assertEqual(held["repair_commit"], fixture.repair)
 
     def test_unreviewed_activation_path_and_dirty_harness_target_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -264,7 +311,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "--quiet",
                 "-b",
                 "unsafe",
-                fixture.continuation_feature,
+                fixture.repair_feature,
             )
             (fixture.root / "unreviewed-runtime.py").write_text(
                 "changed = True\n", encoding="utf-8"
@@ -275,11 +322,11 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 recovery.ValidationRecoveryError, "outside the reviewed scope"
             ):
-                recovery.validate_continuation(
+                recovery.validate_repair(
                     fixture.root,
                     unsafe,
                     event_name="pull_request",
-                    pull_request=54,
+                    pull_request=55,
                     contract=fixture.contract,
                 )
 
@@ -290,7 +337,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 recovery.ValidationRecoveryError, "not clean"
             ):
                 recovery.apply_harness(
-                    target, fixture.continuation, contract=fixture.contract
+                    target, fixture.repair, contract=fixture.contract
                 )
 
     def test_harness_stages_only_declared_support_and_preserves_release_bytes(self) -> None:
@@ -301,7 +348,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             runtime = (target / "application-runtime.bin").read_bytes()
             manifest = (target / "releases/platform/v0.6.2/RELEASE.json").read_bytes()
             report = recovery.apply_harness(
-                target, fixture.continuation, contract=fixture.contract
+                target, fixture.repair, contract=fixture.contract
             )
             changed = run(target, "diff", "--name-only").splitlines()
             self.assertEqual(changed, list(recovery.HARNESS_PATHS))
@@ -333,7 +380,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             fixture = RecoveryRepository(Path(temporary) / "repository")
             attestation = recovery.create_attestation(
                 fixture.root,
-                fixture.continuation,
+                fixture.repair,
                 repository=fixture.contract["repository"],
                 run_id=9001,
                 run_attempt=1,
@@ -342,7 +389,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(attestation["release"]["commit"], fixture.release)
             self.assertEqual(attestation["activation"]["activation_commit"], fixture.activation)
-            self.assertEqual(attestation["harness"]["commit"], fixture.continuation)
+            self.assertEqual(attestation["harness"]["commit"], fixture.repair)
             self.assertNotEqual(
                 attestation["release"]["tree"], attestation["harness"]["tree"]
             )
@@ -353,7 +400,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                     contract=fixture.contract,
                     expected_run_id=9001,
                     expected_run_attempt=1,
-                    expected_continuation=fixture.continuation,
+                    expected_repair=fixture.repair,
                 ),
                 attestation,
             )
@@ -410,9 +457,9 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "--quiet",
                 "-b",
                 "recovery-repair",
-                contract["continuation"]["base_commit"],
+                contract["repair"]["base_commit"],
             )
-            for relative in contract["continuation"]["allowed_paths"]:
+            for relative in contract["repair"]["allowed_paths"]:
                 destination = review / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / relative, destination)
@@ -421,22 +468,22 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             feature = run(review, "rev-parse", "HEAD")
             run(review, "push", "--quiet", "origin", "recovery-repair")
             feature_tree = run(mirror, "rev-parse", f"{feature}^{{tree}}")
-            continuation = run(
+            repair = run(
                 mirror,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                contract["continuation"]["base_commit"],
+                contract["repair"]["base_commit"],
                 "-p",
                 feature,
                 "-m",
-                "synthetic exact continuation",
+                "synthetic exact digest repair",
             )
             run(
                 mirror,
                 "update-ref",
-                "refs/heads/recovery-continuation",
-                continuation,
+                "refs/heads/recovery-digest-repair",
+                repair,
             )
 
             checkout = base / "checkout"
@@ -449,10 +496,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 str(checkout),
             )
             run(checkout, "config", "core.autocrlf", "false")
-            run(checkout, "checkout", "--quiet", "--detach", continuation)
+            run(checkout, "checkout", "--quiet", "--detach", repair)
             report = recovery.verify_pending_ledger(
                 checkout,
-                continuation,
+                repair,
                 event_name="push",
                 pull_request=None,
                 contract=contract,
@@ -478,7 +525,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 report["synthetic_merge_tree"],
                 recovery._merge_tree(
-                    checkout, continuation, contract["release"]["commit"]
+                    checkout, repair, contract["release"]["commit"]
                 ),
             )
 

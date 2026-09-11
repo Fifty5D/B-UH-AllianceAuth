@@ -185,7 +185,7 @@ jobs:
 
           report = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
           if (
-              report.get("schema_version") != 2
+              report.get("schema_version") != 3
               or report.get("recovery_id")
               != "published-platform-v0.6.2-validation-20260909"
               or report.get("source_commit") != sys.argv[2]
@@ -380,7 +380,7 @@ jobs:
               or not isinstance(support, dict)
               or support.get("root") != ".buh-recovery-test-support"
               or not isinstance(support.get("files"), list)
-              or len(support["files"]) != 8
+              or len(support["files"]) != 9
           ):
               raise SystemExit("Published-release recovery harness report is invalid")
           PY

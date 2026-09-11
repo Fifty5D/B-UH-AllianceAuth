@@ -1476,7 +1476,7 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertEqual(
             source_tests["with"]["recovery_harness_sha"],
-            "${{ needs.qualify.outputs.continuation_commit }}",
+            "${{ needs.qualify.outputs.repair_commit }}",
         )
         self.assertEqual(source_tests["permissions"], {"contents": "read"})
         self.assertEqual(
@@ -1502,7 +1502,11 @@ class PlatformConfigurationContracts(TestCase):
             "ops/readiness.py published",
             "--pull-request 53",
             "--pull-request 54",
+            "--pull-request 55",
             "--pull-request 51",
+            "Canonicalize the verified upload digest",
+            '[[ "${UPLOAD_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]',
+            "steps.digest.outputs.artifact_digest",
             "platform_approval.py recover-ready",
             "checks: write",
         ):
@@ -1525,6 +1529,7 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertEqual(contract["activation"]["pull_request"], 53)
         self.assertEqual(contract["continuation"]["pull_request"], 54)
+        self.assertEqual(contract["repair"]["pull_request"], 55)
         self.assertEqual(
             contract["activation"]["commit"],
             "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48",
@@ -1573,15 +1578,16 @@ class PlatformConfigurationContracts(TestCase):
             },
         )
         self.assertEqual(
-            contract["continuation"]["harness_paths"],
+            contract["repair"]["harness_paths"],
             [
                 "tests/deploy/test_request_archive.py",
                 "tests/platform/test_coordinated_recovery_rehearsal.py",
             ],
         )
         self.assertEqual(
-            contract["continuation"]["test_support_paths"],
+            contract["repair"]["test_support_paths"],
             [
+                ".github/workflows/source-published-release-recovery.yml",
                 "ops/release/buh_release.py",
                 "ops/release/ledger.py",
                 "ops/release/open_sync_pr.py",
@@ -1593,6 +1599,7 @@ class PlatformConfigurationContracts(TestCase):
             ],
         )
         self.assertEqual(contract["failed_validation"]["run_id"], 34428188769)
+        self.assertEqual(contract["failed_publication"]["run_id"], 34440488685)
 
     def test_recovery_ledger_exception_and_release_hold_are_bounded(self):
         reusable = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
@@ -1635,7 +1642,7 @@ class PlatformConfigurationContracts(TestCase):
             for step in reusable["jobs"]["release_ledger"]["steps"]
             if step["name"] == "Validate the release plan and change fragments"
         )
-        self.assertIn('report.get("schema_version") != 2', plan_step["run"])
+        self.assertIn('report.get("schema_version") != 3', plan_step["run"])
 
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
         fragment_step = next(
