@@ -28,10 +28,13 @@ except ImportError:  # pragma: no cover - exercised by the CLI tests.
     import ledger  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ATTESTATION_SCHEMA_VERSION = 3
 RECOVERY_ID = "published-platform-v0.6.2-validation-20260909"
 WORKFLOW_PATH = ".github/workflows/source-published-release-recovery.yml"
+CONTINUATION_WORKFLOW_PATH = (
+    ".github/workflows/continue-published-release-recovery.yml"
+)
 DEFAULT_CONTRACT = Path(__file__).with_name(
     "published-release-recovery-v0.6.2.json"
 )
@@ -131,6 +134,27 @@ REPAIR_PATHS = (
     "tests/release/test_validation_recovery.py",
 )
 
+# Exact tree delta permitted for the publication-continuation repair after
+# PR #55. The already-tested harness remains the immutable PR #55 merge; this
+# follow-up may only repair the GitHub evidence handoff and its focused tests.
+PUBLICATION_REPAIR_PATHS = (
+    ".github/workflows/continue-published-release-recovery.yml",
+    ".github/workflows/reusable-source-tests.yml",
+    "changes/recovery-check-publication-continuation.toml",
+    "ops/release/README.md",
+    "ops/release/platform_approval.py",
+    "ops/release/published-release-recovery-v0.6.2.json",
+    "ops/release/validation_recovery.py",
+    "tests/platform/test_configuration.py",
+    "tests/platform/test_coordinated_recovery_rehearsal.py",
+    "tests/platform/test_release_workflow_execution.py",
+    "tests/release/fixtures/github-check-run-103395196156-graphql.json",
+    "tests/release/fixtures/github-check-run-103395196156.json",
+    "tests/release/fixtures/github-main-required-checks.json",
+    "tests/release/test_platform_approval.py",
+    "tests/release/test_validation_recovery.py",
+)
+
 
 class ValidationRecoveryError(ValueError):
     """The bounded recovery contract or claimed identity is invalid."""
@@ -193,8 +217,10 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         "failed_validation",
         "feature",
         "main_validation",
+        "partial_publication",
         "platform_version",
         "preflight",
+        "publication_repair",
         "repair",
         "required_check",
         "recovery_id",
@@ -298,6 +324,27 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         or repair.get("test_support_root") != TEST_SUPPORT_ROOT
     ):
         raise ValidationRecoveryError("Recovery digest repair scope changed")
+
+    publication_repair = value.get("publication_repair")
+    if not isinstance(publication_repair, dict) or set(publication_repair) != {
+        "allowed_paths",
+        "base_commit",
+        "pull_request",
+    }:
+        raise ValidationRecoveryError("Recovery publication repair contract is invalid")
+    if (
+        _positive_int(
+            publication_repair.get("pull_request"), context="Publication repair PR"
+        )
+        != 56
+        or _commit(
+            publication_repair.get("base_commit"), context="Publication repair base"
+        )
+        != "f064694cca7e9d1147a87b880636a94f5c5cbe94"
+        or publication_repair.get("allowed_paths")
+        != list(PUBLICATION_REPAIR_PATHS)
+    ):
+        raise ValidationRecoveryError("Recovery publication repair scope changed")
 
     failed_validation = value.get("failed_validation")
     if not isinstance(failed_validation, dict) or set(failed_validation) != {
@@ -421,6 +468,98 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         if item["conclusion"] == "failure"
     ] != [102755231308]:
         raise ValidationRecoveryError("Failed recovery publication jobs changed")
+
+    partial_publication = value.get("partial_publication")
+    if not isinstance(partial_publication, dict) or set(partial_publication) != {
+        "artifact",
+        "attestation_sha256",
+        "jobs",
+        "required_check",
+        "run_attempt",
+        "run_id",
+    }:
+        raise ValidationRecoveryError("Partial recovery publication evidence is invalid")
+    partial_artifact = partial_publication.get("artifact")
+    if (
+        _positive_int(
+            partial_publication.get("run_id"), context="Partial publication run ID"
+        )
+        != 34638993007
+        or _positive_int(
+            partial_publication.get("run_attempt"),
+            context="Partial publication run attempt",
+        )
+        != 1
+        or partial_artifact
+        != {
+            "digest": "sha256:2890ce18bd66892972c732a92fbdd82aec22c899a752353375f5e91a8335c37b",
+            "id": 10279641606,
+            "name": (
+                "platform-validation-recovery-v0.6.2-6074b965cbd2-"
+                "34638993007-1"
+            ),
+        }
+        or _sha256(
+            partial_publication.get("attestation_sha256"),
+            context="Partial publication attestation digest",
+            prefixed=True,
+        )
+        != "sha256:109f96e5d81de4a2f97de239ba71170dde6a0eb65c1240eb48047550825d594d"
+    ):
+        raise ValidationRecoveryError("Partial recovery publication identity changed")
+    partial_jobs = partial_publication.get("jobs")
+    if not isinstance(partial_jobs, list) or len(partial_jobs) != 11:
+        raise ValidationRecoveryError("Partial recovery publication job set is invalid")
+    for item in partial_jobs:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"conclusion", "id", "name"}
+            or item.get("conclusion") not in {"failure", "success"}
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+        ):
+            raise ValidationRecoveryError("Partial recovery publication job is invalid")
+        _positive_int(item.get("id"), context="Partial publication job ID")
+    if {item["id"] for item in partial_jobs} != {
+        103393779917,
+        103393822048,
+        103393822100,
+        103393822134,
+        103393847842,
+        103393847860,
+        103393847866,
+        103393847901,
+        103394825002,
+        103394856094,
+        103394892961,
+    } or [item["id"] for item in partial_jobs if item["conclusion"] == "failure"] != [
+        103394892961
+    ]:
+        raise ValidationRecoveryError("Partial recovery publication jobs changed")
+    partial_check = partial_publication.get("required_check")
+    if partial_check != {
+        "app_id": REQUIRED_CHECK_APP_ID,
+        "app_slug": REQUIRED_CHECK_APP_SLUG,
+        "binding_digest": (
+            "sha256:544fe3a61336f5e9136180588a2c8ca05afefb3d9c7c2adb5b44a7387f8bee25"
+        ),
+        "check_run_id": 103395196156,
+        "check_run_node_id": "CR_kwDOUIayms8AAAAYEtV8_A",
+        "check_suite_id": 92911719432,
+        "completed_at": "2026-09-11T19:32:53Z",
+        "context": REQUIRED_CHECK_CONTEXT,
+        "details_url": (
+            "https://github.com/Fifty5D/B-UH-AllianceAuth/runs/103395196156"
+        ),
+        "external_id": (
+            "published-platform-v0.6.2-validation-20260909:"
+            "544fe3a61336f5e9136180588a2c8ca05afefb3d9c7c2adb5b44a7387f8bee25"
+        ),
+        "head_sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+        "historical_check_run_id": 102298823162,
+        "required_pull_request": 52,
+    }:
+        raise ValidationRecoveryError("Partial recovery required-check identity changed")
 
     feature = value.get("feature")
     if not isinstance(feature, dict) or set(feature) != {
@@ -898,6 +1037,90 @@ def validate_repair(
     }
 
 
+def validate_publication_repair(
+    root: Path,
+    current_commit: str,
+    *,
+    event_name: str,
+    pull_request: int | None,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the exact check-publication repair branch or merge commit."""
+
+    root = root.resolve()
+    current = _resolve(root, current_commit)
+    publication = contract["publication_repair"]
+    base = _resolve(root, publication["base_commit"])
+    release = contract["release"]["commit"]
+    validate_repair(
+        root,
+        base,
+        event_name="workflow_dispatch",
+        pull_request=None,
+        contract=contract,
+    )
+    _verify_release_identity(root, contract)
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", base, current],
+        operation="publication repair ancestry inspection",
+        check=False,
+    ).returncode != 0:
+        raise ValidationRecoveryError("Publication repair is not based on PR #55")
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", release, current],
+        operation="publication repair release inspection",
+        check=False,
+    ).returncode == 0:
+        raise ValidationRecoveryError(
+            "Publication repair unexpectedly contains the release ledger"
+        )
+
+    if event_name == "pull_request":
+        if pull_request != publication["pull_request"]:
+            raise ValidationRecoveryError("Recovery is restricted to publication PR #56")
+        feature_head = current
+        publication_commit = None
+    elif event_name in {"push", "workflow_dispatch"}:
+        parents = _parents(root, current)
+        if len(parents) != 2 or parents[0] != base:
+            raise ValidationRecoveryError(
+                "Recovery publication repair is not a direct two-parent merge onto PR #55"
+            )
+        feature_head = parents[1]
+        if _tree(root, feature_head) != _tree(root, current):
+            raise ValidationRecoveryError(
+                "Publication repair merge tree differs from its reviewed head"
+            )
+        publication_commit = current
+    else:
+        raise ValidationRecoveryError("Event cannot continue recovery publication")
+
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", base, feature_head],
+        operation="publication repair feature ancestry inspection",
+        check=False,
+    ).returncode != 0:
+        raise ValidationRecoveryError("Publication repair feature head has invalid ancestry")
+    changed = _changed_paths(root, base, feature_head)
+    if changed != PUBLICATION_REPAIR_PATHS:
+        raise ValidationRecoveryError(
+            "Publication repair tree delta is outside the reviewed scope"
+        )
+    if _changed_paths(root, base, current) != PUBLICATION_REPAIR_PATHS:
+        raise ValidationRecoveryError("Current publication repair tree delta changed")
+    return {
+        "base_commit": base,
+        "feature_head": feature_head,
+        "paths": _blob_records(root, current, PUBLICATION_REPAIR_PATHS),
+        "publication_repair_commit": publication_commit,
+        "publication_repair_tree": _tree(root, current),
+        "pull_request": publication["pull_request"],
+    }
+
+
 def _merge_tree(root: Path, first_parent: str, second_parent: str) -> str:
     completed = _git(
         root,
@@ -975,7 +1198,7 @@ def verify_pending_ledger(
     else:
         raise ValidationRecoveryError("Published-release recovery is no longer pending")
 
-    repair = validate_repair(
+    publication_repair = validate_publication_repair(
         root,
         current_commit,
         event_name=event_name,
@@ -1037,7 +1260,14 @@ def verify_pending_ledger(
             "release_required": plan["release_required"],
         },
         "recovery_id": contract["recovery_id"],
-        "repair": repair,
+        "publication_repair": publication_repair,
+        "repair": validate_repair(
+            root,
+            contract["publication_repair"]["base_commit"],
+            event_name="workflow_dispatch",
+            pull_request=None,
+            contract=contract,
+        ),
         "schema_version": SCHEMA_VERSION,
         "source_commit": current_commit,
         "synthetic_merge_commit": synthetic,
@@ -1055,38 +1285,45 @@ def validate_hold(
 
     current = _resolve(root, current_commit)
     try:
-        repair = validate_repair(
+        publication_repair = validate_publication_repair(
             root,
             current,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        state = "repair-pending-sync"
-        repair_commit = current
+        state = "publication-repair-pending-sync"
+        publication_commit = current
     except ValidationRecoveryError:
         parents = _parents(root, current)
         release = contract["release"]["commit"]
         if len(parents) != 2 or parents[1] != release:
             raise ValidationRecoveryError("Current main is outside the recovery hold")
-        repair_commit = parents[0]
-        repair = validate_repair(
+        publication_commit = parents[0]
+        publication_repair = validate_publication_repair(
             root,
-            repair_commit,
+            publication_commit,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        if _tree(root, current) != _merge_tree(root, repair_commit, release):
+        if _tree(root, current) != _merge_tree(root, publication_commit, release):
             raise ValidationRecoveryError("Synchronization merge tree changed")
         state = "synchronized-awaiting-retirement"
     return {
         "activation": verify_activation(root, contract=contract),
         "continuation": verify_continuation(root, contract=contract),
         "current_commit": current,
+        "publication_repair": publication_repair,
+        "publication_repair_commit": publication_commit,
         "recovery_id": contract["recovery_id"],
-        "repair": repair,
-        "repair_commit": repair_commit,
+        "repair": validate_repair(
+            root,
+            contract["publication_repair"]["base_commit"],
+            event_name="workflow_dispatch",
+            pull_request=None,
+            contract=contract,
+        ),
         "schema_version": SCHEMA_VERSION,
         "state": state,
     }
@@ -1557,12 +1794,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("repair", "ledger", "hold"):
+    for name in ("repair", "publication-repair", "ledger", "hold"):
         command = subparsers.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--source-commit", required=True)
         command.add_argument("--output", type=Path, required=True)
-        if name in {"repair", "ledger"}:
+        if name in {"repair", "publication-repair", "ledger"}:
             command.add_argument(
                 "--event-name",
                 choices=("pull_request", "push", "workflow_dispatch"),
@@ -1624,6 +1861,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "release_commit": contract["release"]["commit"],
                     "repair_commit": repair["repair_commit"] or "feature",
                     "repair_feature_head": repair["feature_head"],
+                    "source_commit": contract["release"]["source_commit"],
+                }
+            )
+        elif arguments.command == "publication-repair":
+            publication = validate_publication_repair(
+                arguments.root,
+                arguments.source_commit,
+                event_name=arguments.event_name,
+                pull_request=arguments.pull_request,
+                contract=contract,
+            )
+            report = {
+                "publication_repair": publication,
+                "recovery_id": contract["recovery_id"],
+                "repair": validate_repair(
+                    arguments.root,
+                    contract["publication_repair"]["base_commit"],
+                    event_name="workflow_dispatch",
+                    pull_request=None,
+                    contract=contract,
+                ),
+                "schema_version": SCHEMA_VERSION,
+            }
+            _write(arguments.output, report)
+            _append_outputs(
+                {
+                    "publication_repair_commit": publication[
+                        "publication_repair_commit"
+                    ]
+                    or "feature",
+                    "publication_repair_feature_head": publication["feature_head"],
+                    "release_commit": contract["release"]["commit"],
+                    "repair_commit": contract["publication_repair"]["base_commit"],
                     "source_commit": contract["release"]["source_commit"],
                 }
             )

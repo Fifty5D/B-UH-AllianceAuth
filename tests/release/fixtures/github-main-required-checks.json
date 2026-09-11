@@ -1,0 +1,11 @@
+{
+  "name": "main",
+  "protected": true,
+  "protection": {
+    "required_status_checks": {
+      "checks": [{"app_id": 15368, "context": "Source test suite / Required source checks"}],
+      "contexts": ["Source test suite / Required source checks"],
+      "enforcement_level": "everyone"
+    }
+  }
+}

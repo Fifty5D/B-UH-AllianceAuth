@@ -1629,6 +1629,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             repair_head = "8" * 40
             repair_tree = "9" * 40
             repair_run = 6000006
+            publication = "01" * 20
+            publication_head = "02" * 20
+            publication_tree = "03" * 20
+            publication_run = 6000007
             recovery_artifact_digest = canonical_recovery_upload_digest(
                 base,
                 hashlib.sha256(
@@ -1654,6 +1658,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 CONTINUATION_TREE=continuation_tree,
                 MANIFEST=target["manifest_sha256"],
                 PREFLIGHT_RUN=6000002,
+                PUBLICATION=publication,
+                PUBLICATION_HEAD=publication_head,
+                PUBLICATION_RUN=publication_run,
+                PUBLICATION_TREE=publication_tree,
                 RECOVERY_ARTIFACT=recovery_artifact,
                 RECOVERY_ARTIFACT_DIGEST=recovery_artifact_digest,
                 RECOVERY_RUN=recovery_run,
@@ -1692,6 +1700,14 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                         pull_request=55,
                         feature_head=repair_head,
                         merge_source_commit=repair,
+                    ),
+                    publication_repair=(
+                        approval_fixture._publication_repair_evidence()
+                    ),
+                    publication_readiness=approval_fixture._published_readiness(
+                        pull_request=56,
+                        feature_head=publication_head,
+                        merge_source_commit=publication,
                     ),
                     validation_attestation=attestation,
                     validation_artifact_id=(
@@ -1773,7 +1789,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 changed_evidence = approval_fixture.RecoveryTransport(
                     ready=False, payload=ready_report["ready"]
                 )
-                changed_evidence.recovery_run_conclusion = "failure"
+                changed_evidence.recovery_run_conclusion = "success"
                 with self.assertRaisesRegex(
                     approval_fixture.approval.ApprovalError,
                     "did not complete successfully",
