@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Stream the complete retained recovery log interval with bounded memory and deadlines, preserve exact multiline Discord-owner evidence, and prepare a separately approved receiver-file continuation from PR 61's installed repair while retaining its receipt, backups and release hold."

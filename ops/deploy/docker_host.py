@@ -6,10 +6,12 @@ import gzip
 import hashlib
 import json
 import os
+import queue as thread_queue
 import re
 import secrets
 import select
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tarfile
@@ -18,7 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping, Sequence
@@ -77,6 +79,11 @@ SAFE_COMPOSE_PATH_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._/-]{0,254}$")
 SAFE_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SAFE_IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,511}$")
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
+# Logs have no total-output cap: every byte in the requested interval is read.
+# Bound the pipe queue, individual lines/records and one owner incident instead.
+LOG_READ_BYTES = 64 * 1024
+MAX_OWNER_RECORD_LINES = 128
+MAX_OWNER_INCIDENT_BYTES = 512 * 1024
 MAX_COMPOSE_FILES = 8
 MAX_SERVICE_REPLICAS = 128
 BACKUP_LOCK_SECONDS = 120
@@ -4189,6 +4196,236 @@ class DockerHost:
                     "An HTTPS smoke route returned an unsafe redirect Location"
                 )
 
+    def _stream_log_lines(
+        self, args: Sequence[str], *, deadline: float, context: str
+    ) -> Iterator[str]:
+        """Drain the complete Docker interval with backpressure and a hard deadline.
+
+        Never use the ordinary command-output accumulator for logs. A successful
+        EOF AND process exit are required; stderr, failed/partial reads and timeouts
+        cannot establish health. No raw output is included in transport failures.
+        """
+        chunks: thread_queue.Queue[bytes | None] = thread_queue.Queue(maxsize=2)
+        stop = threading.Event()
+        failed = threading.Event()
+        process = subprocess.Popen(
+            list(args),
+            cwd=self.config.app_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        assert process.stdout is not None
+
+        def send(chunk: bytes | None) -> None:
+            while not stop.is_set():
+                try:
+                    chunks.put(chunk, timeout=0.1)
+                    return
+                except thread_queue.Full:
+                    pass
+
+        def read() -> None:
+            try:
+                while not stop.is_set():
+                    chunk = process.stdout.read(LOG_READ_BYTES)
+                    if not chunk:
+                        break
+                    send(chunk)
+            except (OSError, ValueError):
+                failed.set()
+            finally:
+                send(None)
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        pending = b""
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeploymentError(
+                        f"{context} timed out; log verification incomplete"
+                    )
+                try:
+                    chunk = chunks.get(timeout=min(remaining, 0.2))
+                except thread_queue.Empty:
+                    continue
+                if chunk is None:
+                    break
+                # pending is at most one bounded line, not the retained interval.
+                pieces = (pending + chunk).split(b"\n")
+                pending = pieces.pop()
+                for raw in pieces:
+                    if len(raw) > LOG_READ_BYTES:
+                        raise DeploymentError(f"{context} contains an oversized log line")
+                    yield raw.rstrip(b"\r").decode("utf-8", errors="replace")
+                if len(pending) > LOG_READ_BYTES:
+                    raise DeploymentError(f"{context} contains an oversized log line")
+            if failed.is_set():
+                raise DeploymentError(f"{context} failed while reading logs")
+            if pending:
+                raise DeploymentError(f"{context} ended with an incomplete log line")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, 0)
+            if process.wait(timeout=remaining) != 0:
+                raise DeploymentError(
+                    f"{context} command failed; log verification incomplete"
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise DeploymentError(
+                f"{context} timed out; log verification incomplete"
+            ) from exc
+        finally:
+            stop.set()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            reader.join(timeout=5)
+            # kill closes the Docker pipe; do not hang on a buffered close if a
+            # broken reader still owns its lock.
+            if not reader.is_alive():
+                process.stdout.close()
+            else:
+                raise DeploymentError(
+                    f"{context} reader did not finish; verification incomplete"
+                )
+
+    def _log_batches(
+        self, lines: Iterator[str], *, owner_scoped: bool, deadline: float
+    ) -> Iterator[str]:
+        """Bound memory without splitting or forgetting an owner incident.
+
+        Harmless records are checked in small batches. Only possible owner
+        records are spooled in a private temporary SQLite file, indexed by the
+        SAME source-local second used by the established classifier. This keeps
+        interleaved/late duplicate records together without an unbounded in-memory
+        timestamp map or an assumption that application clocks are monotonic.
+        The spool is never retained or uploaded, including on failure.
+        """
+
+        def check_deadline() -> None:
+            if time.monotonic() >= deadline:
+                raise DeploymentError(
+                    "Retained log classification timed out; verification incomplete"
+                )
+
+        operation = re.compile(r"update_[A-Za-z0-9_]+ failed for user ", re.IGNORECASE)
+        ordinary: list[str] = []
+        ordinary_size = 0
+        record: list[str] = []
+        record_size = 0
+        timestamp: str | None = None
+        relevant = False
+        oversized = False
+        # TemporaryDirectory is 0700; the database contains only transient records
+        # and remains below that protected directory, even with a permissive umask.
+        with tempfile.TemporaryDirectory(prefix="buh-log-scan-") as temporary:
+            try:
+                connection = sqlite3.connect(str(Path(temporary) / "incidents.sqlite"))
+            except sqlite3.Error as exc:
+                raise DeploymentError(
+                    "Retained log incident spool could not open; verification incomplete"
+                ) from exc
+            with closing(connection) as database:
+                try:
+                    database.execute("PRAGMA cache_size=-256")
+                    database.execute("PRAGMA temp_store=FILE")
+                    database.execute("PRAGMA journal_mode=OFF")
+                    database.execute(
+                        "CREATE TABLE records (seq INTEGER PRIMARY KEY, stamp TEXT, body TEXT)"
+                    )
+                    database.execute("CREATE INDEX incident_order ON records(stamp, seq)")
+                    database.set_progress_handler(
+                        lambda: int(time.monotonic() >= deadline), 1000
+                    )
+
+                    def finish_record() -> None:
+                        nonlocal ordinary_size
+                        if not record:
+                            return
+                        body = "\n".join(record) + "\n"
+                        if relevant and timestamp is not None:
+                            database.execute(
+                                "INSERT INTO records(stamp, body) VALUES (?, ?)",
+                                (timestamp, body),
+                            )
+                        else:
+                            ordinary.append(body)
+                            ordinary_size += len(body)
+
+                    for line in lines:
+                        check_deadline()
+                        celery = CELERY_LOG_HEADER_RE.match(line) if owner_scoped else None
+                        aa = (
+                            ALLIANCEAUTH_LOG_HEADER_RE.match(line) if owner_scoped else None
+                        )
+                        stamp = None
+                        if celery is not None:
+                            stamp = celery.group("timestamp")
+                        elif aa is not None:
+                            stamp = (
+                                f"{aa.group('year')}-{ALLIANCEAUTH_LOG_MONTHS[aa.group('month')]}-"
+                                f"{aa.group('day')} {aa.group('clock')}"
+                            )
+                        if stamp is not None:
+                            finish_record()
+                            record, record_size = [], 0
+                            timestamp, relevant, oversized = stamp, False, False
+                        if timestamp is not None and (
+                            operation.search(line)
+                            or "50013" in line
+                            or "Missing Permissions" in line
+                        ):
+                            relevant = True
+                        if (
+                            record_size + len(line) + 1 > LOG_READ_BYTES
+                            or len(record) >= MAX_OWNER_RECORD_LINES
+                        ):
+                            if relevant:
+                                raise DeploymentError(
+                                    "Owner-transition record exceeds safe classification bounds"
+                                )
+                            finish_record()
+                            record, record_size, oversized = [], 0, True
+                        if relevant and oversized:
+                            raise DeploymentError(
+                                "Owner-transition record exceeds safe classification bounds"
+                            )
+                        record.append(line)
+                        record_size += len(line) + 1
+                        if ordinary_size >= LOG_READ_BYTES:
+                            yield "".join(ordinary)
+                            ordinary, ordinary_size = [], 0
+                    finish_record()
+                    if ordinary:
+                        yield "".join(ordinary)
+                    check_deadline()
+                    incident: list[str] = []
+                    incident_size = 0
+                    previous = None
+                    for stamp, body in database.execute(
+                        "SELECT stamp, body FROM records ORDER BY stamp, seq"
+                    ):
+                        check_deadline()
+                        if stamp != previous and incident:
+                            yield "".join(incident)
+                            incident, incident_size = [], 0
+                        previous = stamp
+                        incident_size += len(body)
+                        if incident_size > MAX_OWNER_INCIDENT_BYTES:
+                            raise DeploymentError(
+                                "Owner-transition incident exceeds safe classification bounds"
+                            )
+                        incident.append(body)
+                    if incident:
+                        yield "".join(incident)
+                    check_deadline()
+                except sqlite3.Error as exc:
+                    raise DeploymentError(
+                        "Retained log incident spool failed; verification incomplete"
+                    ) from exc
+
     def _scan_new_logs(
         self,
         services_and_slots: Sequence[str],
@@ -4207,12 +4444,13 @@ class DockerHost:
             for service in compose_services
             if service in requested or service in infrastructure
         )
-        logs_by_source: list[tuple[str, str]] = []
+        commands: list[tuple[str, list[str], str]] = []
         individually_scanned: set[str] = set()
         worker_services = {
             service
             for service in self.config.auth_services
-            if service not in {
+            if service
+            not in {
                 self.config.gunicorn_service,
                 self.config.beat_service,
             }
@@ -4245,16 +4483,20 @@ class DockerHost:
                     )
                 expected_image = self.previous_images.get(service, (None, None))[0]
                 for container in containers:
-                    state = self._run(
-                        [
-                            "docker",
-                            "inspect",
-                            "--format",
-                            "{{.State.Status}}|{{.Image}}|{{.RestartCount}}",
-                            container,
-                        ],
-                        context=f"Retained owner-transition identity for {service}",
-                    ).strip().split("|")
+                    state = (
+                        self._run(
+                            [
+                                "docker",
+                                "inspect",
+                                "--format",
+                                "{{.State.Status}}|{{.Image}}|{{.RestartCount}}",
+                                container,
+                            ],
+                            context=f"Retained owner-transition identity for {service}",
+                        )
+                        .strip()
+                        .split("|")
+                    )
                     baseline_restart = self.restart_baselines.get(container)
                     expected_restart = (
                         0 if owner_transition_phase == "rollback" else baseline_restart
@@ -4270,60 +4512,72 @@ class DockerHost:
                         raise DeploymentError(
                             f"Retained owner-transition identity changed for {service}"
                         )
-                    logs_by_source.append(
+                    commands.append(
                         (
                             f"{service}/{container[:12]}",
-                            self._run(
-                                [
-                                    "docker",
-                                    "logs",
-                                    f"--since={self.log_since}",
-                                    container,
-                                ],
-                                bounded_output=True,
-                                context=(
-                                    "Retained owner-transition log scan for "
-                                    f"{service}"
-                                ),
-                            ),
+                            ["docker", "logs", f"--since={self.log_since}", container],
+                            f"Retained owner-transition log scan for {service}",
                         )
                     )
                 individually_scanned.add(service)
         for service in service_set:
             if service in individually_scanned:
                 continue
-            logs_by_source.append(
+            commands.append(
                 (
                     service,
-                    self._compose(
+                    [
+                        *self.compose_prefix,
                         "logs",
                         f"--since={self.log_since}",
                         "--no-color",
                         "--no-log-prefix",
                         service,
-                        bounded_output=True,
-                        context=f"New deployment log scan for {service}",
-                    ),
+                    ],
+                    f"New deployment log scan for {service}",
                 )
             )
         for slot in services_and_slots:
             if slot in compose_services:
                 continue
-            logs_by_source.append(
+            commands.append(
                 (
                     slot,
-                    self._run(
-                        [
-                            "docker",
-                            "logs",
-                            f"--since={self.log_since}",
-                            slot,
-                        ],
-                        bounded_output=True,
-                        context=f"New web-slot log scan for {slot}",
-                    ),
+                    ["docker", "logs", f"--since={self.log_since}", slot],
+                    f"New web-slot log scan for {slot}",
                 )
             )
+        findings: list[str] = []
+        for source, command, context in commands:
+            deadline = time.monotonic() + self.config.command_timeout_seconds
+            lines = self._stream_log_lines(command, deadline=deadline, context=context)
+            batches = self._log_batches(
+                lines,
+                owner_scoped=source.partition("/")[0] in individually_scanned,
+                deadline=deadline,
+            )
+            try:
+                for batch in batches:
+                    for finding in self._classify_log_batch(
+                        [(source, batch)], individually_scanned, owner_transition_phase
+                    ):
+                        if (
+                            finding not in findings
+                            and len(findings) < MAX_RETAINED_LOG_FINDINGS
+                        ):
+                            findings.append(finding)
+            finally:
+                batches.close()
+                lines.close()
+        return tuple(findings)
+
+    def _classify_log_batch(
+        self,
+        logs_by_source: list[tuple[str, str]],
+        individually_scanned: set[str],
+        owner_transition_phase: str | None,
+    ) -> tuple[str, ...]:
+        """Unchanged exact-owner classifier; each batch contains whole incidents."""
         allowed: list[str] = []
         rejected: list[str] = []
         allowlist: list[re.Pattern[str]] = []
@@ -4702,9 +4956,7 @@ class DockerHost:
             "failure": safe_failure,
         }
         path = self.backup_path / "HEALTH.json"
-        _atomic_text(
-            path, canonical_json_bytes(report).decode("ascii"), 0o600
-        )
+        _atomic_text(path, canonical_json_bytes(report).decode("ascii"), 0o600)
         evidence = {
             "filename": path.name,
             "sha256": sha256_file(path),
@@ -4798,18 +5050,13 @@ class DockerHost:
             while True:
                 findings = self._functional_health(bundle, promoted=False)
                 for finding in findings:
-                    if (
-                        finding not in allowed
-                        and len(allowed) < MAX_RETAINED_LOG_FINDINGS
-                    ):
+                    if finding not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
                         allowed.append(finding)
                 iterations += 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                time.sleep(
-                    min(self.config.stabilization_interval_seconds, remaining)
-                )
+                time.sleep(min(self.config.stabilization_interval_seconds, remaining))
         except BaseException as error:
             self._write_health_report(
                 bundle,
@@ -4830,9 +5077,7 @@ class DockerHost:
         gunicorn = self.config.gunicorn_service
         previous_image = self.previous_images[gunicorn][0]
         if not self.previous_web_slots:
-            self._start_web_slots(
-                bundle, role="previous", expected_image=previous_image
-            )
+            self._start_web_slots(bundle, role="previous", expected_image=previous_image)
         self._verify_previous_static_fallback()
 
     def promote_web(self, bundle: ValidatedBundle) -> None:
@@ -4899,9 +5144,7 @@ class DockerHost:
 
     def cleanup_success(self, bundle: ValidatedBundle) -> str:
         del bundle
-        self._remove_web_slots(
-            (*self.candidate_web_slots, *self.previous_web_slots)
-        )
+        self._remove_web_slots((*self.candidate_web_slots, *self.previous_web_slots))
         self._discard_previous_image_pins()
         return "Post-success candidate and previous web slots were removed."
 
@@ -4955,9 +5198,7 @@ class DockerHost:
                 for service, (image, _reference) in self.previous_images.items()
             }
         )
-        self._manage_live(
-            "check", "--no-color", context="Restored Django checks"
-        )
+        self._manage_live("check", "--no-color", context="Restored Django checks")
         migrations = self._manage_live(
             "showmigrations",
             "--plan",
@@ -4968,9 +5209,7 @@ class DockerHost:
             raise DeploymentError("Restored deployment has pending migrations")
         self._redis_health()
         self._celery_health()
-        for container in self._container_names_for_service(
-            self.config.gunicorn_service
-        ):
+        for container in self._container_names_for_service(self.config.gunicorn_service):
             self._internal_http_checks(container)
         self._verify_static_asset(None)
         for command in self.config.application_health_commands:
@@ -5004,8 +5243,8 @@ class DockerHost:
                     raise DeploymentError(f"{label} reported an incomplete restoration")
                 return True
             except Exception as exc:
-                detail = redact_sensitive_text(str(exc)).replace("\r", " ").replace(
-                    "\n", " "
+                detail = (
+                    redact_sensitive_text(str(exc)).replace("\r", " ").replace("\n", " ")
                 )
                 errors.append(f"{label}: {detail[:500]}")
                 return False
@@ -5037,9 +5276,7 @@ class DockerHost:
         workers_restored = True
         if self.workers_replacement_started:
             worker_services = tuple(
-                service
-                for service in self.config.auth_services
-                if service != gunicorn
+                service for service in self.config.auth_services if service != gunicorn
             )
             workers_restored = attempt(
                 "Celery worker restoration",
@@ -5070,9 +5307,7 @@ class DockerHost:
         replaced_services: set[str] = set()
         if self.workers_replacement_started:
             replaced_services.update(
-                service
-                for service in self.config.auth_services
-                if service != gunicorn
+                service for service in self.config.auth_services if service != gunicorn
             )
         if self.gunicorn_replacement_started:
             replaced_services.add(gunicorn)
@@ -5105,8 +5340,10 @@ class DockerHost:
                     )
                     self._public_smoke_checks()
                 except Exception as exc:
-                    detail = redact_sensitive_text(str(exc)).replace("\r", " ").replace(
-                        "\n", " "
+                    detail = (
+                        redact_sensitive_text(str(exc))
+                        .replace("\r", " ")
+                        .replace("\n", " ")
                     )
                     final_errors = [
                         f"final restored Gunicorn route verification: {detail[:500]}"
@@ -5119,20 +5356,19 @@ class DockerHost:
                                 context="Failed final rollback route fail-safe",
                             )
                         except Exception as route_exc:
-                            route_detail = redact_sensitive_text(str(route_exc)).replace(
-                                "\r", " "
-                            ).replace("\n", " ")
+                            route_detail = (
+                                redact_sensitive_text(str(route_exc))
+                                .replace("\r", " ")
+                                .replace("\n", " ")
+                            )
                             final_errors.append(
-                                "previous-slot fail-safe route: "
-                                + route_detail[:500]
+                                "previous-slot fail-safe route: " + route_detail[:500]
                             )
                     raise DeploymentError(
                         "Rollback retained previous safety slots after failures: "
                         + "; ".join(final_errors)
                     ) from exc
-            self._remove_web_slots(
-                (*self.candidate_web_slots, *self.previous_web_slots)
-            )
+            self._remove_web_slots((*self.candidate_web_slots, *self.previous_web_slots))
             self._discard_previous_image_pins()
             self.complete_recovery_plan()
             traffic = (
@@ -5145,9 +5381,7 @@ class DockerHost:
                 "images and replica topology were restored and verified. Database "
                 "migrations were not reversed; the verified backup was retained."
             )
-        self._remove_web_slots(
-            (*self.candidate_web_slots, *self.previous_web_slots)
-        )
+        self._remove_web_slots((*self.candidate_web_slots, *self.previous_web_slots))
         self._discard_previous_image_pins()
         self.complete_recovery_plan()
         return (
