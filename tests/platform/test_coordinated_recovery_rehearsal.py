@@ -1671,6 +1671,16 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 REPAIR_TREE=repair_tree,
                 RELEASE=release_commit,
                 SOURCE=head,
+                SYNC_HEAD="07" * 20,
+                SYNC_HEAD_TREE="08" * 20,
+                SYNC_MERGE="09" * 20,
+                SYNC_NATIVE_CHECK=7000010,
+                SYNC_NATIVE_RUN=7000009,
+                SYNC_NATIVE_SUITE=7000011,
+                SYNC_REPAIR="04" * 20,
+                SYNC_REPAIR_HEAD="05" * 20,
+                SYNC_REPAIR_RUN=7000008,
+                SYNC_REPAIR_TREE="06" * 20,
                 VERSION=target["platform_version"],
             ):
                 contract = approval_fixture._recovery_contract()
@@ -1795,6 +1805,92 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     "did not complete successfully",
                 ):
                     authorize(changed_evidence)
+
+                # Simulate the reviewed ordering after the repair merge:
+                # update PR #52 with a merge commit, require native CI on that
+                # new head, supersede (without deleting) schema-7 readiness,
+                # and authorize the final merge while selecting only the same
+                # immutable release assembled above.
+                current_contract = approval_fixture._current_recovery_contract(
+                    ready_report["ready"]
+                )
+                with mock.patch.object(
+                    approval_fixture.approval.validation_recovery,
+                    "load_contract",
+                    return_value=current_contract,
+                ):
+                    current_ready = (
+                        approval_fixture.approval.ready_recovery_update(
+                            current_contract,
+                            approval_fixture.TOKEN,
+                            owner=approval_fixture.OWNER,
+                            repository=approval_fixture.REPOSITORY,
+                            api_url="https://api.github.com",
+                            server_url="https://github.com",
+                            output=base / "updated-sync-ready.json",
+                            sync_update=approval_fixture._sync_update_report(),
+                            sync_repair_readiness=(
+                                approval_fixture._published_readiness(
+                                    pull_request=57,
+                                    feature_head=approval_fixture.SYNC_REPAIR_HEAD,
+                                    merge_source_commit=approval_fixture.SYNC_REPAIR,
+                                )
+                            ),
+                            transport=(
+                                approval_fixture.UpdatedRecoveryTransport(
+                                    ready=True,
+                                    historical_payload=ready_report["ready"],
+                                )
+                            ),
+                            sleeper=lambda _: None,
+                            polls=1,
+                        )
+                    )
+                    final_transport = (
+                        approval_fixture.UpdatedRecoveryTransport(
+                            ready=False,
+                            current_payload=current_ready["ready"],
+                            historical_payload=ready_report["ready"],
+                        )
+                    )
+                    final_event = {
+                        "action": "closed",
+                        "number": approval_fixture.PR_NUMBER,
+                        "pull_request": final_transport._sync_pr(),
+                        "sender": {"login": approval_fixture.OWNER},
+                    }
+                    current_authorized = approval_fixture.approval.authorize(
+                        final_event,
+                        owner=approval_fixture.OWNER,
+                        repository=approval_fixture.REPOSITORY,
+                        actor=approval_fixture.OWNER,
+                        triggering_actor=approval_fixture.OWNER,
+                        run_attempt=1,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=base / "updated-sync-authorization.json",
+                        token=approval_fixture.TOKEN,
+                        transport=final_transport,
+                        sleeper=lambda _: None,
+                    )
+                self.assertEqual(
+                    current_authorized["validation_mode"],
+                    "published-release-sync-update",
+                )
+                self.assertEqual(
+                    current_authorized["release_commit"], release_commit
+                )
+                self.assertNotEqual(
+                    current_authorized["sync_head_commit"], release_commit
+                )
+                self.assertEqual(
+                    deployment_bundle.request.release_commit,
+                    current_authorized["release_commit"],
+                )
+                self.assertEqual(
+                    deployment_bundle.request.manifest_sha256,
+                    current_authorized["manifest_sha256"],
+                )
 
             failed_host, failed_boundary = prepare_real_recovery_host(
                 base / "failed-host",

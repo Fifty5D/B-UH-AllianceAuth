@@ -157,7 +157,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "release_required": True,
             },
             "recovery_id": "published-platform-v0.6.2-validation-20260909",
-            "schema_version": 4,
+            "schema_version": 5,
             "source_commit": source,
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -480,9 +480,40 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "activation-verifier\n", encoding="utf-8"
             )
             _git(origin, "add", "--all")
-            _git(origin, "commit", "--quiet", "-m", "activation")
-            _git(origin, "merge", "--quiet", "--no-ff", "published", "-m", "sync")
+            _git(origin, "commit", "--quiet", "-m", "reviewed repair")
+            repair = _git(origin, "rev-parse", "HEAD")
+
+            _git(origin, "checkout", "--quiet", "-b", "sync-updated", published)
+            _git(
+                origin,
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "main",
+                "-m",
+                "update synchronization branch",
+            )
+            sync_head = _git(origin, "rev-parse", "HEAD")
+            self.assertEqual(
+                _git(origin, "show", "-s", "--format=%P", sync_head).split(),
+                [published, repair],
+            )
+
+            _git(origin, "checkout", "--quiet", "main")
+            _git(
+                origin,
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "sync-updated",
+                "-m",
+                "approved synchronization merge",
+            )
             merge = _git(origin, "rev-parse", "HEAD")
+            self.assertEqual(
+                _git(origin, "show", "-s", "--format=%P", merge).split(),
+                [repair, sync_head],
+            )
 
             checkout = base / "checkout"
             _git(base, "clone", "--quiet", str(origin), str(checkout))
@@ -498,6 +529,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     "GITHUB_OUTPUT": "../github-output.txt",
                     "RELEASE_COMMIT": published,
                     "RUNNER_TEMP": "../runner-temp",
+                    "SYNC_HEAD_COMMIT": sync_head,
                 },
             )
             self.assertEqual(
@@ -515,6 +547,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             output_value = output.read_text(encoding="utf-8").strip()
             self.assertTrue(output_value.startswith("tool="))
             self.assertTrue(output_value.endswith("/ops/release/platform_approval.py"))
+            self.assertEqual(_git(checkout, "rev-parse", "HEAD"), published)
 
     def test_reusable_fast_step_applies_actual_harness_to_exact_v062(self):
         script = _step_script(

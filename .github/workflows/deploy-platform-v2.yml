@@ -34,6 +34,21 @@ on:
         required: false
         default: ""
         type: string
+      sync_base_commit:
+        description: Exact reviewed main parent of the synchronization update
+        required: false
+        default: ""
+        type: string
+      sync_head_commit:
+        description: Exact native-tested synchronization PR head
+        required: false
+        default: ""
+        type: string
+      sync_head_tree:
+        description: Exact tree shared by the tested head and final merge
+        required: false
+        default: ""
+        type: string
       feature_readiness:
         description: Canonical live-verified feature-readiness attestation
         required: false
@@ -190,6 +205,9 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           SELECTED_REF: ${{ github.ref }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SYNC_BASE_COMMIT: ${{ inputs.sync_base_commit }}
+          SYNC_HEAD_COMMIT: ${{ inputs.sync_head_commit }}
+          SYNC_HEAD_TREE: ${{ inputs.sync_head_tree }}
           SYNC_VALIDATION_RUN_ATTEMPT: ${{ inputs.sync_validation_run_attempt }}
           SYNC_VALIDATION_RUN_ID: ${{ inputs.sync_validation_run_id }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -214,6 +232,8 @@ jobs:
                  -z "${PREFLIGHT_RUN_ID}" && -z "${PREFLIGHT_RUN_ATTEMPT}" &&
                  -z "${PREFLIGHT_ARTIFACT}" && -z "${PREFLIGHT_ARTIFACT_ID}" &&
                  -z "${PREFLIGHT_ARTIFACT_DIGEST}" &&
+                 -z "${SYNC_BASE_COMMIT}" && -z "${SYNC_HEAD_COMMIT}" &&
+                 -z "${SYNC_HEAD_TREE}" &&
                  -z "${SYNC_VALIDATION_RUN_ID}" &&
                  -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
               ;;
@@ -223,6 +243,11 @@ jobs:
               [[ "${FEATURE_PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]
               [[ "${FEATURE_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
               [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+              if [[ -n "${SYNC_BASE_COMMIT}${SYNC_HEAD_COMMIT}${SYNC_HEAD_TREE}" ]]; then
+                [[ "${SYNC_BASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+                [[ "${SYNC_HEAD_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+                [[ "${SYNC_HEAD_TREE}" =~ ^[0-9a-f]{40}$ ]]
+              fi
               [[ -n "${FEATURE_READINESS}" ]]
               [[ "${MAIN_VALIDATION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
               [[ "${MAIN_VALIDATION_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
@@ -247,6 +272,8 @@ jobs:
                  -z "${PREFLIGHT_RUN_ID}" && -z "${PREFLIGHT_RUN_ATTEMPT}" &&
                  -z "${PREFLIGHT_ARTIFACT}" && -z "${PREFLIGHT_ARTIFACT_ID}" &&
                  -z "${PREFLIGHT_ARTIFACT_DIGEST}" &&
+                 -z "${SYNC_BASE_COMMIT}" && -z "${SYNC_HEAD_COMMIT}" &&
+                 -z "${SYNC_HEAD_TREE}" &&
                  -z "${SYNC_VALIDATION_RUN_ID}" &&
                  -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
               ;;
@@ -299,15 +326,18 @@ jobs:
         env:
           APPROVAL_SOURCE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
+          SYNC_HEAD_COMMIT: ${{ inputs.sync_head_commit }}
         run: |
           set -Eeuo pipefail
           [[ "${APPROVAL_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          expected_sync_head="${SYNC_HEAD_COMMIT:-${RELEASE_COMMIT}}"
+          [[ "${expected_sync_head}" =~ ^[0-9a-f]{40}$ ]]
           git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"
           [[ "$(git rev-parse FETCH_HEAD)" == "${APPROVAL_SOURCE_COMMIT}" ]]
           read -r -a parents <<<"$(git show -s --format='%P' "${APPROVAL_SOURCE_COMMIT}")"
           [[ "${#parents[@]}" -eq 2 ]]
-          [[ "${parents[1]}" == "${RELEASE_COMMIT}" ]]
+          [[ "${parents[1]}" == "${expected_sync_head}" ]]
 
           stage="${RUNNER_TEMP}/buh-platform-approval-source"
           [[ ! -e "${stage}" ]]
@@ -534,6 +564,9 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           RELEASE_MANIFEST_SHA256: ${{ steps.release.outputs.manifest_sha256 }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SYNC_BASE_COMMIT: ${{ inputs.sync_base_commit }}
+          SYNC_HEAD_COMMIT: ${{ inputs.sync_head_commit }}
+          SYNC_HEAD_TREE: ${{ inputs.sync_head_tree }}
           SYNC_VALIDATION_RUN_ATTEMPT: ${{ inputs.sync_validation_run_attempt }}
           SYNC_VALIDATION_RUN_ID: ${{ inputs.sync_validation_run_id }}
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
@@ -625,6 +658,14 @@ jobs:
               ),
               "sync_validation_run_id": int(os.environ["SYNC_VALIDATION_RUN_ID"]),
           }
+          if os.environ["SYNC_HEAD_COMMIT"]:
+              expected.update(
+                  {
+                      "sync_base_commit": os.environ["SYNC_BASE_COMMIT"],
+                      "sync_head_commit": os.environ["SYNC_HEAD_COMMIT"],
+                      "sync_head_tree": os.environ["SYNC_HEAD_TREE"],
+                  }
+              )
           for key, value in expected.items():
               if approval.get(key) != value:
                   raise SystemExit(f"Queued production approval changed {key}")

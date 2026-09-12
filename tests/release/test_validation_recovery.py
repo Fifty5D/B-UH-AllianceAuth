@@ -47,6 +47,7 @@ class RecoveryRepository:
             | set(recovery.CONTINUATION_PATHS)
             | set(recovery.REPAIR_PATHS)
             | set(recovery.PUBLICATION_REPAIR_PATHS)
+            | set(recovery.SYNC_REPAIR_PATHS)
             | set(recovery.HARNESS_PATHS)
             | set(recovery.TEST_SUPPORT_PATHS)
         )
@@ -149,6 +150,26 @@ class RecoveryRepository:
         )
         self.publication = run(root, "rev-parse", "HEAD")
 
+        run(root, "checkout", "--quiet", "-b", "sync-head-repair", self.publication)
+        for relative in recovery.SYNC_REPAIR_PATHS:
+            path = root.joinpath(*relative.split("/"))
+            path.write_text(f"sync-repair:{relative}\n", encoding="utf-8")
+        run(root, "add", "--all")
+        run(root, "commit", "--quiet", "-m", "separate sync and release identities")
+        self.sync_repair_feature = run(root, "rev-parse", "HEAD")
+        self.sync_repair_tree = run(root, "rev-parse", "HEAD^{tree}")
+        run(root, "checkout", "--quiet", "-B", "main", self.publication)
+        run(
+            root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "sync-head-repair",
+            "-m",
+            "merge sync-head repair",
+        )
+        self.sync_repair = run(root, "rev-parse", "HEAD")
+
         self.contract = {
             "activation": {
                 "allowed_paths": list(recovery.ACTIVATION_PATHS),
@@ -210,12 +231,21 @@ class RecoveryRepository:
                 "run_id": 109,
             },
             "feature": {"head_commit": "1" * 40, "pull_request": 51},
+            "historical_readiness": {
+                "approval_nonce": "a" * 64,
+                "comment_id": 115,
+                "created_at": "2026-09-11T23:09:03Z",
+                "schema_version": 7,
+                "sync_base_commit": self.publication,
+                "sync_head_commit": self.release,
+            },
             "main_validation": {"run_attempt": 1, "run_id": 101},
             "platform_version": "0.6.2",
             "preflight": {
                 "artifact_digest": "sha256:" + "2" * 64,
                 "artifact_id": 102,
                 "artifact_name": "platform-v2-preflight-103-1",
+                "expires_at": "2099-09-16T01:07:13Z",
                 "failed_job": {"id": 105, "name": "Publish approval"},
                 "jobs": [],
                 "passed_job": {"id": 104, "name": "Preflight"},
@@ -233,26 +263,44 @@ class RecoveryRepository:
             },
             "repository": "Fifty5D/B-UH-AllianceAuth",
             "schema_version": recovery.SCHEMA_VERSION,
-            "sync": {"branch": "sync/platform-v0.6.2", "pull_request": 52},
+            "sync": {
+                "branch": "sync/platform-v0.6.2",
+                "initial_head_commit": self.release,
+                "pull_request": 52,
+            },
+            "sync_repair": {
+                "allowed_paths": list(recovery.SYNC_REPAIR_PATHS),
+                "base_commit": self.publication,
+                "pull_request": 57,
+            },
         }
 
-    def add_sync_merge(self) -> str:
+    def add_sync_update(self) -> str:
         run(
             self.root,
             "checkout",
             "--quiet",
-            "-B",
-            "continued-main",
-            self.publication,
+            "-B", "sync/platform-v0.6.2", self.release,
         )
         run(
             self.root,
             "merge",
             "--quiet",
             "--no-ff",
-            "published-release",
-            "-m",
-            "synchronize release",
+            "main",
+            "-m", "update synchronization branch from reviewed main",
+        )
+        return run(self.root, "rev-parse", "HEAD")
+
+    def add_sync_merge(self, sync_head: str) -> str:
+        run(self.root, "checkout", "--quiet", "-B", "continued-main", self.sync_repair)
+        run(
+            self.root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            sync_head,
+            "-m", "synchronize release",
         )
         return run(self.root, "rev-parse", "HEAD")
 
@@ -280,6 +328,8 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             102298823162,
         )
         self.assertEqual(contract["publication_repair"]["pull_request"], 56)
+        self.assertEqual(contract["sync_repair"]["pull_request"], 57)
+        self.assertEqual(contract["historical_readiness"]["comment_id"], 5641670561)
         self.assertEqual(contract["partial_publication"]["run_id"], 34638993007)
         self.assertEqual(
             contract["partial_publication"]["required_check"]["check_run_id"],
@@ -357,22 +407,118 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 publication["publication_repair_tree"], fixture.publication_tree
             )
+            sync_feature = recovery.validate_sync_repair(
+                fixture.root,
+                fixture.sync_repair_feature,
+                event_name="pull_request",
+                pull_request=57,
+                contract=fixture.contract,
+            )
+            self.assertIsNone(sync_feature["sync_repair_commit"])
+            sync_repair = recovery.validate_sync_repair(
+                fixture.root,
+                fixture.sync_repair,
+                event_name="workflow_dispatch",
+                pull_request=None,
+                contract=fixture.contract,
+            )
+            self.assertEqual(sync_repair["sync_repair_commit"], fixture.sync_repair)
             held = recovery.validate_hold(
-                fixture.root, fixture.publication, contract=fixture.contract
+                fixture.root, fixture.sync_repair, contract=fixture.contract
             )
-            self.assertEqual(held["state"], "publication-repair-pending-sync")
-            self.assertEqual(
-                held["publication_repair_commit"], fixture.publication
-            )
+            self.assertEqual(held["state"], "sync-head-repair-pending-update")
+            self.assertEqual(held["sync_repair_commit"], fixture.sync_repair)
 
-            synchronized = fixture.add_sync_merge()
+            sync_head = fixture.add_sync_update()
+            update = recovery.validate_sync_update(
+                fixture.root,
+                sync_head,
+                fixture.sync_repair,
+                contract=fixture.contract,
+            )
+            self.assertEqual(update["release_commit"], fixture.release)
+            self.assertEqual(update["sync_head_commit"], sync_head)
+            self.assertNotEqual(update["sync_head_commit"], update["release_commit"])
+            synchronized = fixture.add_sync_merge(sync_head)
             held = recovery.validate_hold(
                 fixture.root, synchronized, contract=fixture.contract
             )
             self.assertEqual(held["state"], "synchronized-awaiting-retirement")
             self.assertEqual(
-                held["publication_repair_commit"], fixture.publication
+                held["sync_repair_commit"], fixture.sync_repair
             )
+
+            update_tree = run(fixture.root, "rev-parse", f"{sync_head}^{{tree}}")
+            rebased = run(
+                fixture.root,
+                "commit-tree",
+                update_tree,
+                "-p",
+                fixture.sync_repair,
+                "-m",
+                "forbidden rebased synchronization head",
+            )
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError,
+                "ordered merge",
+            ):
+                recovery.validate_sync_update(
+                    fixture.root,
+                    rebased,
+                    fixture.sync_repair,
+                    contract=fixture.contract,
+                )
+
+            reversed_parents = run(
+                fixture.root,
+                "commit-tree",
+                update_tree,
+                "-p",
+                fixture.sync_repair,
+                "-p",
+                fixture.release,
+                "-m",
+                "forbidden reversed synchronization parents",
+            )
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError,
+                "ordered merge",
+            ):
+                recovery.validate_sync_update(
+                    fixture.root,
+                    reversed_parents,
+                    fixture.sync_repair,
+                    contract=fixture.contract,
+                )
+
+            changed_release_contract = copy.deepcopy(fixture.contract)
+            run(
+                fixture.root,
+                "checkout",
+                "--quiet",
+                "-B",
+                "changed-release",
+                fixture.release,
+            )
+            manifest_path = (
+                fixture.root / "releases/platform/v0.6.2/RELEASE.json"
+            )
+            manifest_path.write_text("{}\n", encoding="ascii")
+            run(fixture.root, "add", "--all")
+            run(fixture.root, "commit", "--quiet", "-m", "changed release bytes")
+            changed_release_contract["release"]["commit"] = run(
+                fixture.root, "rev-parse", "HEAD"
+            )
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError,
+                "Published release tree changed",
+            ):
+                recovery.validate_sync_update(
+                    fixture.root,
+                    sync_head,
+                    fixture.sync_repair,
+                    contract=changed_release_contract,
+                )
 
     def test_unreviewed_activation_path_and_dirty_harness_target_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -553,10 +699,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "checkout",
                 "--quiet",
                 "-b",
-                "recovery-publication",
-                contract["publication_repair"]["base_commit"],
+                "sync-head-repair",
+                contract["sync_repair"]["base_commit"],
             )
-            for relative in contract["publication_repair"]["allowed_paths"]:
+            for relative in contract["sync_repair"]["allowed_paths"]:
                 destination = review / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / relative, destination)
@@ -566,27 +712,27 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "commit",
                 "--quiet",
                 "-m",
-                "reviewed publication continuation",
+                "reviewed synchronization-head repair",
             )
             feature = run(review, "rev-parse", "HEAD")
-            run(review, "push", "--quiet", "origin", "recovery-publication")
+            run(review, "push", "--quiet", "origin", "sync-head-repair")
             feature_tree = run(mirror, "rev-parse", f"{feature}^{{tree}}")
-            publication = run(
+            sync_repair = run(
                 mirror,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                contract["publication_repair"]["base_commit"],
+                contract["sync_repair"]["base_commit"],
                 "-p",
                 feature,
                 "-m",
-                "synthetic exact publication continuation",
+                "synthetic exact synchronization-head repair",
             )
             run(
                 mirror,
                 "update-ref",
-                "refs/heads/recovery-publication",
-                publication,
+                "refs/heads/sync-head-repair",
+                sync_repair,
             )
 
             checkout = base / "checkout"
@@ -599,10 +745,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 str(checkout),
             )
             run(checkout, "config", "core.autocrlf", "false")
-            run(checkout, "checkout", "--quiet", "--detach", publication)
+            run(checkout, "checkout", "--quiet", "--detach", sync_repair)
             report = recovery.verify_pending_ledger(
                 checkout,
-                publication,
+                sync_repair,
                 event_name="push",
                 pull_request=None,
                 contract=contract,
@@ -628,9 +774,18 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 report["synthetic_merge_tree"],
                 recovery._merge_tree(
-                    checkout, publication, contract["release"]["commit"]
+                    checkout,
+                    sync_repair,
+                    report["synthetic_sync_update_commit"],
                 ),
             )
+            update = recovery.validate_sync_update(
+                checkout,
+                report["synthetic_sync_update_commit"],
+                sync_repair,
+                contract=contract,
+            )
+            self.assertEqual(update["release_commit"], contract["release"]["commit"])
 
 
 if __name__ == "__main__":

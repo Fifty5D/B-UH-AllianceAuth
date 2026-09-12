@@ -250,96 +250,116 @@ that exact node as required for PR #52. Authorization repeats the same query for
 the merged PR; a private comment or an arbitrary successful row cannot
 substitute for it. Failed runs `34428188769` and `34440488685` published no
 recovery check. Failed run `34638993007` published the one valid recovered check
-but no readiness comment; that precise partial state is the only evidence PR
-#56 may continue.
-The deployment workflow stages the recovery-aware verifier from the exact PR #52
-merge before checking out v0.6.2, then uses that staged verifier at both queued
-authorization boundaries. The deployment archive and receiver still come only
-from the immutable release.
+and the reviewed continuation later published historical readiness comment
+`5641670561`. That schema-7 comment remains audit history for immutable head
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`; it cannot authorize a changed PR
+head or base. The deployment workflow stages the recovery-aware verifier from
+the exact PR #52 merge before checking out v0.6.2, then uses that staged
+verifier at both queued authorization boundaries. The deployment archive and
+receiver still come only from the immutable release commit, never from the
+updated synchronization head.
 
-The recovery descriptor holds automatic release creation on the PR #56
-publication-repair merge and the later PR #52 synchronization merge. This is a
-deliberate, bounded
-continuation exception: main temporarily contains the reviewed unconsumed
-platform fragments while the published release is not yet synchronized, but
-ordinary ledger validation is never disabled and no new release may start. Any
-other main advance, unexpected parent/tree, changed ref, rerun, missing artifact,
-or expired artifact fails closed.
+The recovery descriptor holds automatic release creation on the exact PR #57
+repair merge and the later, updated PR #52 synchronization merge. This is a
+deliberate, bounded continuation exception: main temporarily contains reviewed
+unconsumed platform fragments while the published release is not yet
+synchronized, but ordinary ledger validation is never disabled and no new
+release may start. Any other main advance, rebase, unexpected parent/tree,
+changed immutable ref, missing native check, missing artifact, or expired
+artifact fails closed.
 
 ### Work activation sequence
 
 Work must perform these steps in order; none is an instruction for Codex or a
 routine operator to merge or deploy:
 
-1. Review follow-up PR #56's final head and this concrete continuation. Require
+1. Review follow-up PR #57's final head and this concrete continuation. Require
    all required checks, applicable Preview UI evidence, trusted readiness, and
    no `needs-codex`, then request Anthony's approval for this non-production
    merge. Reconfirm that main is exactly
-   `f064694cca7e9d1147a87b880636a94f5c5cbe94`, PRs #53–#55 full details match
-   their pinned identities, and PR #52 is open at
+   `9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb`, PRs #53–#56 full details match
+   their pinned identities, historical readiness comment `5641670561` is
+   unchanged, and PR #52 is open at
    `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Both
    `release/platform-v0.6.2` and `sync/platform-v0.6.2` must still resolve to
    that commit.
-2. After that approval, merge PR #56 with a merge commit, without squash or
-   rebase. Its ordered parents must be the PR #55 merge above and the reviewed
-   PR #56 head, and its tree must equal that reviewed head. If main has moved,
+2. After that approval, merge PR #57 with a merge commit, without squash or
+   rebase. Its ordered parents must be
+   `9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb` and the reviewed PR #57 head, and
+   its tree must equal that reviewed head. If main has moved,
    stop; do not update the base or recovery contract opportunistically.
-3. Require the push-triggered `Validate PR` for that publication-repair merge to
+3. Require the push-triggered `Validate PR` for that repair merge to
    pass. Inspect the associated `Prepare Release` run and require the
-   `published-release-recovery` hold result; it must not build or publish v0.6.3.
+   `sync-head-repair-pending-update` hold result; it must not build or publish
+   v0.6.3.
 4. While retained preflight artifact `10083806725` and recovery artifact
-   `10279641606` are still present and unexpired, dispatch only the continuation
-   workflow once from that exact PR #56 merge. Do not dispatch or rerun
-   `source-published-release-recovery.yml` and do not rerun any failed job:
+   `10279641606` are still present and unexpired, use PR #52's normal **Update
+   with merge commit** action exactly once. Do not rebase, force-push, add a
+   manual commit, edit PR #52 files, or move the immutable release ref. The new
+   sync head must have ordered parents: immutable release
+   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, then the exact PR #57 merge. Its
+   tree must equal Git's merge tree for those two commits. The release ref must
+   remain at the immutable commit; only `sync/platform-v0.6.2` may move to this
+   exact update commit.
+5. Wait for native `Validate PR` on that exact new sync head. Require the genuine
+   GitHub Actions aggregate `Source test suite / Required source checks` to
+   succeed, every additional protected requirement to be satisfied, and the PR
+   merge box to be clean. The failed check on the old immutable head and the
+   recovered successful check remain unmodified history; neither substitutes
+   for native validation of the new head.
+6. From the exact PR #57 merge on `main`, dispatch only the updated continuation
+   workflow once. Do not dispatch or rerun
+   `source-published-release-recovery.yml`, do not rerun a failed historical job,
+   and do not publish a check manually:
 
    ```bash
-   gh workflow run continue-published-release-recovery.yml \
+   gh workflow run continue-synchronized-release-recovery.yml \
      --repo Fifty5D/B-UH-AllianceAuth \
      --ref main \
-     --field confirmation='CONTINUE PUBLISHED V0.6.2'
+     --field confirmation='PUBLISH UPDATED V0.6.2 READINESS'
    ```
 
    Only the repository owner or exact `BUH_CHATGPT_WORK_ACTOR` may dispatch it.
-   Run attempt 1 must complete successfully. Confirm it downloaded and
-   byte-verified artifact `10279641606`, reused (and did not POST or alter)
-   successful check `103395196156` on exact commit
-   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, and retained failed check
-   `102298823162` as history. Confirm the recovery record's check ID, canonical
-   URL, GraphQL node, suite ID, completion time, original run/attempt, artifact,
-   and lane binding, and that GitHub reports that exact check node as required
-   for PR #52. Then inspect the single bot-authored recovery-readiness comment
-   on PR #52. If the protected check is absent, not required, superseded,
-   conflicting, or failing, stop; do not merge with admin bypass.
-5. Present that exact validation artifact, unchanged release/manifest, original
-   preflight evidence, and generated approval marker to Anthony for the single
-   production approval. Before approval, do not merge PR #52. After explicit
-   approval, Work may merge PR #52 with a merge commit whose message contains
-   the exact generated `buh-chatgpt-approved-recovery:v1` marker. Its ordered
-   parents must be the PR #56 publication-repair merge and immutable v0.6.2.
-6. The existing `Deploy Production` pull-request event must authorize and deploy
-   only v0.6.2. Do not manually dispatch another deployment or retry a failed
-   production run. Confirm its retained evidence and final version through the
-   normal reporting path.
-7. Keep the recovery contract and release hold in place until production v0.6.2
+   Run attempt 1 must complete successfully. Confirm historical comment
+   `5641670561`, its schema-7 nonce, check `103395196156`, failed check
+   `102298823162`, artifact `10279641606`, and preflight artifact `10083806725`
+   are unchanged and reverified. Confirm exactly one new bot-authored
+   `buh-platform-ready-recovery:v2` comment is added. It must bind the exact PR
+   #57 merge, updated sync head and tree, native run/check, immutable release,
+   manifest, retained evidence, and schema-7 record it supersedes. A missing,
+   duplicate, stale, expired, or mismatched record blocks continuation.
+7. Present the updated native validation, unchanged release/manifest, retained
+   recovery/preflight evidence, and newly generated
+   `buh-chatgpt-approved-recovery:v2` marker to Anthony for the single production
+   approval. Immediately before approval, recheck that main is still the exact
+   PR #57 merge, PR #52's head and base still match the new record, the merge box
+   remains eligible, and both retained artifacts remain unexpired. The earlier
+   schema-7 approval template is ineligible. Before approval, do not merge PR
+   #52. After explicit approval, Work may use the normal protected merge-commit
+   action with the exact v2 marker. Its ordered parents must be the PR #57 merge
+   and the native-tested updated sync head; the merge tree must equal the tested
+   sync-head tree. Never use an admin bypass.
+8. The existing `Deploy Production` pull-request event must authorize the updated
+   synchronization identity but select, archive, and deploy only immutable
+   v0.6.2 commit `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Both queued
+   authorization checks must reproduce the same result. Do not manually
+   dispatch another deployment or retry a failed production run. Confirm its
+   retained evidence and final version through the normal reporting path.
+9. Keep the recovery contract and release hold in place until production v0.6.2
    is confirmed. Retiring this one-time mechanism is a later reviewed PR; it
    must preserve the still-unconsumed platform fragment so the next ordinary
    release is planned as v0.6.3 from synchronized v0.6.2.
 
-Useful read-only checks before steps 2 and 4 are:
+Useful read-only checks before steps 2, 4, 6, and 7 are:
 
 ```bash
-gh pr view 56 --repo Fifty5D/B-UH-AllianceAuth \
+gh pr view 57 --repo Fifty5D/B-UH-AllianceAuth \
   --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,labels
-gh pr view 55 --repo Fifty5D/B-UH-AllianceAuth \
-  --json headRefOid,baseRefOid,mergeCommit,state,mergedAt
-gh pr view 54 --repo Fifty5D/B-UH-AllianceAuth \
-  --json headRefOid,baseRefOid,mergeCommit,state,mergedAt
-gh pr view 53 --repo Fifty5D/B-UH-AllianceAuth \
-  --json headRefOid,baseRefOid,mergeCommit,state,mergedAt
 gh pr view 52 --repo Fifty5D/B-UH-AllianceAuth \
-  --json headRefOid,baseRefOid,state,isDraft,title
+  --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,state,title
 gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/release/platform-v0.6.2
 gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/sync/platform-v0.6.2
+gh api repos/Fifty5D/B-UH-AllianceAuth/issues/52/comments --paginate
 ```
 
 If preflight artifact `10083806725` (digest

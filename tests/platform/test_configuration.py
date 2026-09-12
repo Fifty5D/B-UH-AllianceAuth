@@ -11,6 +11,8 @@ from unittest import TestCase
 
 import yaml
 
+from ops.release import validation_recovery
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -24,6 +26,7 @@ SOURCE_WORKFLOWS = (
     "invalidate-readiness.yml",
     "source-published-release-recovery.yml",
     "continue-published-release-recovery.yml",
+    "continue-synchronized-release-recovery.yml",
 )
 PRODUCTION_V2_WORKFLOWS = (
     "auto-platform-release.yml",
@@ -1170,6 +1173,9 @@ class PlatformConfigurationContracts(TestCase):
             "feature_pr_number",
             "feature_head_sha",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "feature_readiness",
             "main_validation_run_id",
             "main_validation_run_attempt",
@@ -1283,6 +1289,9 @@ class PlatformConfigurationContracts(TestCase):
             "preflight_run_id",
             "release_commit",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "sync_validation_run_attempt",
             "sync_validation_run_id",
         ):
@@ -1542,6 +1551,18 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertEqual(contract["sync"]["pull_request"], 52)
         self.assertEqual(
+            contract["sync"]["initial_head_commit"],
+            "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+        )
+        self.assertEqual(
+            contract["sync_repair"],
+            {
+                "allowed_paths": list(validation_recovery.SYNC_REPAIR_PATHS),
+                "base_commit": "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb",
+                "pull_request": 57,
+            },
+        )
+        self.assertEqual(
             contract["required_check"],
             {
                 "app_id": 15368,
@@ -1661,6 +1682,52 @@ class PlatformConfigurationContracts(TestCase):
         self.assertNotIn("environment: production", continuation_text)
         self.assertNotIn("secrets.", continuation_text)
 
+        synchronized_path = (
+            WORKFLOWS / "continue-synchronized-release-recovery.yml"
+        )
+        synchronized = _load_workflow(synchronized_path)
+        synchronized_text = synchronized_path.read_text(encoding="utf-8")
+        synchronized_triggers = synchronized.get("on", synchronized.get(True))
+        self.assertEqual(set(synchronized_triggers), {"workflow_dispatch"})
+        self.assertEqual(synchronized["concurrency"], workflow["concurrency"])
+        self.assertEqual(
+            synchronized["jobs"]["qualify"]["outputs"],
+            {
+                "release_commit": "${{ steps.contract.outputs.release_commit }}",
+                "source_commit": "${{ steps.contract.outputs.source_commit }}",
+                "sync_head_commit": "${{ steps.contract.outputs.sync_head_commit }}",
+                "sync_repair_commit": "${{ steps.contract.outputs.sync_repair_commit }}",
+                "sync_repair_feature_head": (
+                    "${{ steps.contract.outputs.sync_repair_feature_head }}"
+                ),
+            },
+        )
+        self.assertEqual(
+            synchronized["jobs"]["ready"]["permissions"],
+            {
+                "actions": "read",
+                "checks": "read",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
+        for required in (
+            "PUBLISH UPDATED V0.6.2 READINESS",
+            "sync-repair",
+            "sync-update",
+            "pulls/52",
+            '"6074b965cbd2e6ab2630cd539ee455b8d419aef6"',
+            "platform_approval.py recover-ready-update",
+            "--pull-request 57",
+            "--sync-update build/sync-update.json",
+            "--sync-repair-readiness build/sync-repair-readiness.json",
+        ):
+            self.assertIn(required, synchronized_text)
+        self.assertNotIn("checks: write", synchronized_text)
+        self.assertNotIn("environment: production", synchronized_text)
+        self.assertNotIn("secrets.", synchronized_text)
+
     def test_recovery_ledger_exception_and_release_hold_are_bounded(self):
         reusable = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
         triggers = reusable.get("on", reusable.get(True))
@@ -1702,7 +1769,7 @@ class PlatformConfigurationContracts(TestCase):
             for step in reusable["jobs"]["release_ledger"]["steps"]
             if step["name"] == "Validate the release plan and change fragments"
         )
-        self.assertIn('report.get("schema_version") != 4', plan_step["run"])
+        self.assertIn('report.get("schema_version") != 5', plan_step["run"])
 
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
         fragment_step = next(
@@ -1728,7 +1795,8 @@ class PlatformConfigurationContracts(TestCase):
         self.assertIn("github.event.pull_request.merge_commit_sha", str(stage["env"]))
         for required in (
             'git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"',
-            '[[ "${parents[1]}" == "${RELEASE_COMMIT}" ]]',
+            'expected_sync_head="${SYNC_HEAD_COMMIT:-${RELEASE_COMMIT}}"',
+            '[[ "${parents[1]}" == "${expected_sync_head}" ]]',
             "git archive --format=tar",
             "ops/release/platform_approval.py",
             "ops/release/validation_recovery.py",
@@ -1824,6 +1892,9 @@ class PlatformConfigurationContracts(TestCase):
             "feature_pr_number",
             "feature_head_sha",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "feature_readiness",
             "main_validation_run_id",
             "main_validation_run_attempt",

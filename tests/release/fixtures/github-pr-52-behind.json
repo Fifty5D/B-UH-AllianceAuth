@@ -1,0 +1,26 @@
+{
+  "base": {
+    "ref": "main",
+    "repo": {
+      "full_name": "Fifty5D/B-UH-AllianceAuth"
+    },
+    "sha": "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb"
+  },
+  "draft": false,
+  "head": {
+    "ref": "sync/platform-v0.6.2",
+    "repo": {
+      "full_name": "Fifty5D/B-UH-AllianceAuth"
+    },
+    "sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
+  },
+  "html_url": "https://github.com/Fifty5D/B-UH-AllianceAuth/pull/52",
+  "mergeable": true,
+  "mergeable_state": "behind",
+  "number": 52,
+  "state": "open",
+  "title": "Sync platform release v0.6.2",
+  "user": {
+    "login": "Fifty5D"
+  }
+}

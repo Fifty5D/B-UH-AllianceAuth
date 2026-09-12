@@ -139,6 +139,17 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          if [[ "${EVENT_NAME}" == "pull_request" && "${PULL_REQUEST}" == "52" ]]; then
+            read -r -a sync_parents <<<"$(git show -s --format='%P' "${SOURCE_SHA}")"
+            [[ "${#sync_parents[@]}" -eq 2 ]]
+            python3 ops/release/validation_recovery.py \
+              --contract ops/release/published-release-recovery-v0.6.2.json \
+              sync-update \
+              --root . \
+              --source-commit "${SOURCE_SHA}" \
+              --repair-commit "${sync_parents[1]}" \
+              --output "${RUNNER_TEMP}/sync-update-recovery.json" >/dev/null
+          fi
           set +e
           python3 ops/release/ledger.py verify \
               --root . \
@@ -185,7 +196,7 @@ jobs:
 
           report = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
           if (
-              report.get("schema_version") != 4
+              report.get("schema_version") != 5
               or report.get("recovery_id")
               != "published-platform-v0.6.2-validation-20260909"
               or report.get("source_commit") != sys.argv[2]
