@@ -96,6 +96,18 @@ SYNC_NATIVE_CHECK = 1001
 SYNC_NATIVE_SUITE = 1002
 SYNC_NATIVE_NODE = "CR_updated_sync_required_check"
 SYNC_NATIVE_COMPLETED_AT = "2026-09-12T12:05:00Z"
+ASSOCIATION_REPAIR = "0a" * 20
+ASSOCIATION_REPAIR_HEAD = "0b" * 20
+ASSOCIATION_REPAIR_TREE = "0c" * 20
+ASSOCIATION_REPAIR_RUN = 677
+NEXT_SYNC_HEAD = "0d" * 20
+NEXT_SYNC_HEAD_TREE = "0e" * 20
+NEXT_SYNC_MERGE = "0f" * 20
+NEXT_SYNC_NATIVE_RUN = 678
+NEXT_SYNC_NATIVE_CHECK = 1003
+NEXT_SYNC_NATIVE_SUITE = 1004
+NEXT_SYNC_NATIVE_NODE = "CR_check_association_sync_required_check"
+NEXT_SYNC_NATIVE_COMPLETED_AT = "2026-09-13T12:05:00Z"
 PREFLIGHT_EXPIRES_AT = "2099-09-16T01:07:13Z"
 
 
@@ -225,6 +237,13 @@ def _recovery_contract() -> dict[str, Any]:
             "tree": ACTIVATION_TREE,
             "validation": {"run_attempt": 1, "run_id": ACTIVATION_RUN},
         },
+        "check_association_repair": {
+            "allowed_paths": list(
+                approval.validation_recovery.CHECK_ASSOCIATION_REPAIR_PATHS
+            ),
+            "base_commit": SYNC_REPAIR,
+            "pull_request": 59,
+        },
         "continuation": {
             "allowed_paths": list(approval.validation_recovery.CONTINUATION_PATHS),
             "base_commit": ACTIVATION,
@@ -337,6 +356,8 @@ def _recovery_contract() -> dict[str, Any]:
         "sync": {
             "branch": f"sync/platform-v{VERSION}",
             "initial_head_commit": RELEASE,
+            "prior_head_commit": SYNC_HEAD,
+            "prior_head_tree": SYNC_HEAD_TREE,
             "pull_request": PR_NUMBER,
         },
         "sync_repair": {
@@ -457,13 +478,36 @@ def _sync_repair_report() -> dict[str, Any]:
 
 def _sync_update_report() -> dict[str, Any]:
     return {
-        "base_commit": SYNC_REPAIR,
+        "base_commit": ASSOCIATION_REPAIR,
+        "check_association_repair": _check_association_repair_report(),
         "initial_head_commit": RELEASE,
+        "previous_head_commit": SYNC_HEAD,
         "pull_request": PR_NUMBER,
         "release_commit": RELEASE,
         "sync_branch": f"sync/platform-v{VERSION}",
-        "sync_head_commit": SYNC_HEAD,
-        "sync_head_tree": SYNC_HEAD_TREE,
+        "sync_head_commit": NEXT_SYNC_HEAD,
+        "sync_head_tree": NEXT_SYNC_HEAD_TREE,
+        "sync_repair": _sync_repair_report(),
+    }
+
+
+def _check_association_repair_report() -> dict[str, Any]:
+    return {
+        "base_commit": SYNC_REPAIR,
+        "check_association_repair_commit": ASSOCIATION_REPAIR,
+        "check_association_repair_tree": ASSOCIATION_REPAIR_TREE,
+        "feature_head": ASSOCIATION_REPAIR_HEAD,
+        "paths": [
+            {
+                "git_blob_sha": f"{index + 801:040x}",
+                "path": path,
+                "sha256": f"{index + 801:064x}",
+            }
+            for index, path in enumerate(
+                approval.validation_recovery.CHECK_ASSOCIATION_REPAIR_PATHS
+            )
+        ],
+        "pull_request": 59,
         "sync_repair": _sync_repair_report(),
     }
 
@@ -1013,6 +1057,8 @@ class RecoveryTransport(ApprovalTransport):
         self.graphql_node_overrides: dict[str, Any] = {}
         self.graphql_error_payload: dict[str, Any] | None = None
         self.recovered_check_overrides: dict[str, Any] = {}
+        self.check_association_head = RELEASE
+        self.check_association_base = PUBLICATION
         self.branch_checks = [
             {
                 "app_id": approval.validation_recovery.REQUIRED_CHECK_APP_ID,
@@ -1208,6 +1254,28 @@ class RecoveryTransport(ApprovalTransport):
             "triggering_actor": {"login": OWNER},
         }
 
+    def _required_check_association(self) -> list[dict[str, Any]]:
+        repository = {
+            "id": 1351004826,
+            "name": REPOSITORY.split("/", 1)[1],
+            "url": f"https://api.github.com/repos/{REPOSITORY}",
+        }
+        return [
+            {
+                "base": {
+                    "ref": "main",
+                    "repo": repository,
+                    "sha": self.check_association_base,
+                },
+                "head": {
+                    "ref": f"sync/platform-v{VERSION}",
+                    "repo": repository,
+                    "sha": self.check_association_head,
+                },
+                "number": PR_NUMBER,
+            }
+        ]
+
     def _required_check(self, *, historical: bool) -> dict[str, Any]:
         if historical:
             return {
@@ -1227,13 +1295,7 @@ class RecoveryTransport(ApprovalTransport):
                 "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
                 "node_id": HISTORICAL_REQUIRED_NODE,
                 "check_suite": {"id": HISTORICAL_REQUIRED_SUITE},
-                "pull_requests": [
-                    {
-                        "base": {"ref": "main"},
-                        "head": {"sha": RELEASE},
-                        "number": PR_NUMBER,
-                    }
-                ],
+                "pull_requests": self._required_check_association(),
                 "started_at": "2026-09-09T01:09:34Z",
                 "status": "completed",
             }
@@ -1277,13 +1339,7 @@ class RecoveryTransport(ApprovalTransport):
             ),
             "id": RECOVERED_REQUIRED_CHECK,
             "node_id": RECOVERED_REQUIRED_NODE,
-            "pull_requests": [
-                {
-                    "base": {"ref": "main"},
-                    "head": {"sha": RELEASE},
-                    "number": PR_NUMBER,
-                }
-            ],
+            "pull_requests": self._required_check_association(),
             "started_at": "2026-09-09T12:04:59Z",
         }
         value.update(copy.deepcopy(self.recovered_check_overrides))
@@ -1374,7 +1430,7 @@ class RecoveryTransport(ApprovalTransport):
                                 "repository": {
                                     "nameWithOwner": REPOSITORY,
                                     "pullRequest": {
-                                        "headRefOid": RELEASE,
+                                        "headRefOid": self.check_association_head,
                                         "number": PR_NUMBER,
                                         "state": (
                                             "OPEN" if self.ready_mode else "MERGED"
@@ -1410,7 +1466,7 @@ class RecoveryTransport(ApprovalTransport):
                         "repository": {
                             "nameWithOwner": REPOSITORY,
                             "pullRequest": {
-                                "headRefOid": RELEASE,
+                                "headRefOid": self.check_association_head,
                                 "number": PR_NUMBER,
                                 "state": "OPEN" if self.ready_mode else "MERGED",
                             },
@@ -1421,6 +1477,8 @@ class RecoveryTransport(ApprovalTransport):
         if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
             pr = copy.deepcopy(_event()["pull_request"])
             pr["state"] = "open" if self.ready_mode else "closed"
+            pr["head"]["sha"] = self.check_association_head
+            pr["base"]["sha"] = self.check_association_base
             return _response(pr)
         if suffix == f"git/ref/heads/sync/platform-v{VERSION}":
             return _response(
@@ -1900,14 +1958,28 @@ class UpdatedRecoveryTransport(RecoveryTransport):
         self.historical_payload = historical_payload or _recovery_ready_payload()
         self.merge_payload = merge_payload or current_payload
         self.include_merge_marker = include_merge_marker
-        self.main_tip = SYNC_REPAIR if ready else SYNC_MERGE
-        self.sync_ref = SYNC_HEAD
+        self.current_sync_base = SYNC_REPAIR
+        self.current_sync_head = SYNC_HEAD
+        self.current_sync_tree = SYNC_HEAD_TREE
+        self.current_sync_merge = SYNC_MERGE
+        self.previous_sync_head = RELEASE
+        self.previous_sync_tree = "e" * 40
+        self.main_tip = self.current_sync_base if ready else self.current_sync_merge
+        self.sync_ref = self.current_sync_head
+        self.check_association_head = self.current_sync_head
+        self.check_association_base = self.current_sync_base
         self.pr_mergeable = True
         self.pr_mergeable_state = "clean"
         self.native_run_conclusion = "success"
         self.native_check_conclusion = "success"
-        self.native_check_head = SYNC_HEAD
-        self.native_check_tree = SYNC_HEAD_TREE
+        self.current_native_run = SYNC_NATIVE_RUN
+        self.current_native_run_number = 89
+        self.current_native_check = SYNC_NATIVE_CHECK
+        self.current_native_suite = SYNC_NATIVE_SUITE
+        self.current_native_node = SYNC_NATIVE_NODE
+        self.current_native_completed_at = SYNC_NATIVE_COMPLETED_AT
+        self.native_check_head = self.current_sync_head
+        self.native_check_tree = self.current_sync_tree
         self.sync_repair_run = {
             "conclusion": "success",
             "event": "push",
@@ -1952,16 +2024,16 @@ class UpdatedRecoveryTransport(RecoveryTransport):
             "base": {
                 "ref": "main",
                 "repo": {"full_name": REPOSITORY},
-                "sha": SYNC_REPAIR,
+                "sha": self.current_sync_base,
             },
             "draft": False,
             "head": {
                 "ref": f"sync/platform-v{VERSION}",
                 "repo": {"full_name": REPOSITORY},
-                "sha": SYNC_HEAD,
+                "sha": self.current_sync_head,
             },
             "html_url": f"https://github.com/{REPOSITORY}/pull/{PR_NUMBER}",
-            "merge_commit_sha": SYNC_MERGE if merged else None,
+            "merge_commit_sha": self.current_sync_merge if merged else None,
             "mergeable": self.pr_mergeable,
             "mergeable_state": self.pr_mergeable_state,
             "merged": merged,
@@ -1979,13 +2051,13 @@ class UpdatedRecoveryTransport(RecoveryTransport):
             "event": "pull_request",
             "head_branch": f"sync/platform-v{VERSION}",
             "head_repository": {"full_name": REPOSITORY},
-            "head_sha": SYNC_HEAD,
-            "id": SYNC_NATIVE_RUN,
+            "head_sha": self.current_sync_head,
+            "id": self.current_native_run,
             "path": ".github/workflows/source-ci.yml@refs/pull/52/merge",
             "pull_requests": [{"number": PR_NUMBER}],
             "repository": {"full_name": REPOSITORY},
             "run_attempt": 1,
-            "run_number": 89,
+            "run_number": self.current_native_run_number,
             "status": "completed",
         }
 
@@ -1995,25 +2067,19 @@ class UpdatedRecoveryTransport(RecoveryTransport):
                 "id": approval.validation_recovery.REQUIRED_CHECK_APP_ID,
                 "slug": approval.validation_recovery.REQUIRED_CHECK_APP_SLUG,
             },
-            "check_suite": {"id": SYNC_NATIVE_SUITE},
-            "completed_at": SYNC_NATIVE_COMPLETED_AT,
+            "check_suite": {"id": self.current_native_suite},
+            "completed_at": self.current_native_completed_at,
             "conclusion": self.native_check_conclusion,
             "details_url": (
                 f"https://github.com/{REPOSITORY}/actions/runs/"
-                f"{SYNC_NATIVE_RUN}/job/{SYNC_NATIVE_CHECK}"
+                f"{self.current_native_run}/job/{self.current_native_check}"
             ),
             "external_id": "updated-sync-native-required-job",
             "head_sha": self.native_check_head,
-            "id": SYNC_NATIVE_CHECK,
+            "id": self.current_native_check,
             "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
-            "node_id": SYNC_NATIVE_NODE,
-            "pull_requests": [
-                {
-                    "base": {"ref": "main"},
-                    "head": {"sha": SYNC_HEAD},
-                    "number": PR_NUMBER,
-                }
-            ],
+            "node_id": self.current_native_node,
+            "pull_requests": self._required_check_association(),
             "started_at": "2026-09-12T12:04:00Z",
             "status": "completed",
         }
@@ -2024,7 +2090,7 @@ class UpdatedRecoveryTransport(RecoveryTransport):
         if parsed.path == "/graphql" and body is not None:
             request = json.loads(body)
             variables = request.get("variables", {})
-            if variables.get("checkRunId") != SYNC_NATIVE_NODE:
+            if variables.get("checkRunId") != self.current_native_node:
                 return super().request(method, url, headers, body, timeout)
             self.calls.append((method, parsed.path))
             check = self._native_check()
@@ -2035,10 +2101,10 @@ class UpdatedRecoveryTransport(RecoveryTransport):
                             "__typename": "CheckRun",
                             "checkSuite": {
                                 "commit": {"oid": self.native_check_head},
-                                "databaseId": SYNC_NATIVE_SUITE,
+                                "databaseId": self.current_native_suite,
                             },
                             "conclusion": str(check["conclusion"]).upper(),
-                            "databaseId": SYNC_NATIVE_CHECK,
+                            "databaseId": self.current_native_check,
                             "detailsUrl": check["details_url"],
                             "externalId": check["external_id"],
                             "isRequired": True,
@@ -2049,7 +2115,7 @@ class UpdatedRecoveryTransport(RecoveryTransport):
                         "repository": {
                             "nameWithOwner": REPOSITORY,
                             "pullRequest": {
-                                "headRefOid": SYNC_HEAD,
+                                "headRefOid": self.current_sync_head,
                                 "number": PR_NUMBER,
                                 "state": "OPEN" if self.ready_mode else "MERGED",
                             },
@@ -2085,15 +2151,29 @@ class UpdatedRecoveryTransport(RecoveryTransport):
             association = self._sync_repair_pr()
             association.pop("merged_by")
             response = _response([association])
-        elif suffix == f"commits/{SYNC_HEAD}":
+        elif (
+            self.previous_sync_head != RELEASE
+            and suffix == f"commits/{self.previous_sync_head}"
+        ):
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": self.previous_sync_tree}},
+                    "parents": [{"sha": RELEASE}, {"sha": SYNC_REPAIR}],
+                    "sha": self.previous_sync_head,
+                }
+            )
+        elif suffix == f"commits/{self.current_sync_head}":
             response = _response(
                 {
                     "commit": {"tree": {"sha": self.native_check_tree}},
-                    "parents": [{"sha": RELEASE}, {"sha": SYNC_REPAIR}],
-                    "sha": SYNC_HEAD,
+                    "parents": [
+                        {"sha": self.previous_sync_head},
+                        {"sha": self.current_sync_base},
+                    ],
+                    "sha": self.current_sync_head,
                 }
             )
-        elif suffix == f"commits/{SYNC_MERGE}":
+        elif suffix == f"commits/{self.current_sync_merge}":
             message = f"Sync platform release v{VERSION}"
             if self.include_merge_marker and self.merge_payload is not None:
                 message += "\n\n" + approval.marker(
@@ -2106,8 +2186,11 @@ class UpdatedRecoveryTransport(RecoveryTransport):
                         "message": message,
                         "tree": {"sha": self.native_check_tree},
                     },
-                    "parents": [{"sha": SYNC_REPAIR}, {"sha": SYNC_HEAD}],
-                    "sha": SYNC_MERGE,
+                    "parents": [
+                        {"sha": self.current_sync_base},
+                        {"sha": self.current_sync_head},
+                    ],
+                    "sha": self.current_sync_merge,
                 }
             )
         elif suffix == f"git/ref/heads/sync/platform-v{VERSION}":
@@ -2126,21 +2209,21 @@ class UpdatedRecoveryTransport(RecoveryTransport):
             )
         elif suffix == f"actions/runs/{SYNC_REPAIR_RUN}":
             response = _response(self.sync_repair_run)
-        elif suffix == f"actions/runs/{SYNC_NATIVE_RUN}":
+        elif suffix == f"actions/runs/{self.current_native_run}":
             response = _response(self._native_run())
-        elif suffix == f"actions/runs/{SYNC_NATIVE_RUN}/jobs":
+        elif suffix == f"actions/runs/{self.current_native_run}/jobs":
             check = self._native_check()
             response = _response(
                 {
                     "jobs": [
                         {
                             "conclusion": self.native_check_conclusion,
-                            "head_sha": SYNC_HEAD,
+                            "head_sha": self.current_sync_head,
                             "html_url": check["details_url"],
-                            "id": SYNC_NATIVE_CHECK,
+                            "id": self.current_native_check,
                             "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
                             "run_attempt": 1,
-                            "run_id": SYNC_NATIVE_RUN,
+                            "run_id": self.current_native_run,
                             "status": "completed",
                             "workflow_name": "Validate PR",
                         }
@@ -2148,14 +2231,14 @@ class UpdatedRecoveryTransport(RecoveryTransport):
                     "total_count": 1,
                 }
             )
-        elif suffix == f"check-runs/{SYNC_NATIVE_CHECK}":
+        elif suffix == f"check-runs/{self.current_native_check}":
             response = _response(self._native_check())
         elif suffix == "actions/workflows/source-ci.yml/runs":
             query = urllib.parse.parse_qs(parsed.query)
             head_sha = query.get("head_sha", [None])[0]
             if head_sha == SYNC_REPAIR:
                 runs = [self.sync_repair_run]
-            elif head_sha == SYNC_HEAD:
+            elif head_sha == self.current_sync_head:
                 runs = [self._native_run()]
             else:
                 return super().request(method, url, headers, body, timeout)
@@ -2207,6 +2290,110 @@ class UpdatedRecoveryTransport(RecoveryTransport):
             handled = False
             response = None
         if not handled:
+            return super().request(method, url, headers, body, timeout)
+        self.calls.append((method, parsed.path))
+        return response
+
+
+class FinalRecoveryTransport(UpdatedRecoveryTransport):
+    """Fixture for the reviewed PR #59 merge and PR #52's second update."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.current_sync_base = ASSOCIATION_REPAIR
+        self.current_sync_head = NEXT_SYNC_HEAD
+        self.current_sync_tree = NEXT_SYNC_HEAD_TREE
+        self.current_sync_merge = NEXT_SYNC_MERGE
+        self.previous_sync_head = SYNC_HEAD
+        self.previous_sync_tree = SYNC_HEAD_TREE
+        self.main_tip = self.current_sync_base if self.ready_mode else self.current_sync_merge
+        self.sync_ref = self.current_sync_head
+        self.check_association_head = self.current_sync_head
+        self.check_association_base = self.current_sync_base
+        self.current_native_run = NEXT_SYNC_NATIVE_RUN
+        self.current_native_run_number = 91
+        self.current_native_check = NEXT_SYNC_NATIVE_CHECK
+        self.current_native_suite = NEXT_SYNC_NATIVE_SUITE
+        self.current_native_node = NEXT_SYNC_NATIVE_NODE
+        self.current_native_completed_at = NEXT_SYNC_NATIVE_COMPLETED_AT
+        self.native_check_head = self.current_sync_head
+        self.native_check_tree = self.current_sync_tree
+        self.association_repair_run = {
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": ASSOCIATION_REPAIR,
+            "id": ASSOCIATION_REPAIR_RUN,
+            "path": ".github/workflows/source-ci.yml@refs/heads/main",
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 90,
+            "status": "completed",
+        }
+
+    @staticmethod
+    def _association_repair_pr() -> dict[str, Any]:
+        return {
+            "base": {
+                "ref": "main",
+                "repo": {"full_name": REPOSITORY},
+                "sha": SYNC_REPAIR,
+            },
+            "draft": False,
+            "head": {
+                "ref": "codex/fix-historical-check-pr-association",
+                "repo": {"full_name": REPOSITORY},
+                "sha": ASSOCIATION_REPAIR_HEAD,
+            },
+            "html_url": f"https://github.com/{REPOSITORY}/pull/59",
+            "merge_commit_sha": ASSOCIATION_REPAIR,
+            "merged_at": "2026-09-13T11:00:00Z",
+            "merged_by": {"login": OWNER},
+            "number": 59,
+            "state": "closed",
+            "title": "Fix historical check PR association",
+            "user": {"login": OWNER},
+        }
+
+    def request(self, method, url, headers, body, timeout):
+        parsed = urllib.parse.urlsplit(url)
+        suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        if suffix == "pulls/59" and method == "GET":
+            response = _response(self._association_repair_pr())
+        elif suffix == f"commits/{ASSOCIATION_REPAIR}":
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": ASSOCIATION_REPAIR_TREE}},
+                    "parents": [
+                        {"sha": SYNC_REPAIR},
+                        {"sha": ASSOCIATION_REPAIR_HEAD},
+                    ],
+                    "sha": ASSOCIATION_REPAIR,
+                }
+            )
+        elif suffix == f"commits/{ASSOCIATION_REPAIR_HEAD}":
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": ASSOCIATION_REPAIR_TREE}},
+                    "parents": [{"sha": SYNC_REPAIR}],
+                    "sha": ASSOCIATION_REPAIR_HEAD,
+                }
+            )
+        elif suffix == f"commits/{ASSOCIATION_REPAIR}/pulls":
+            association = self._association_repair_pr()
+            association.pop("merged_by")
+            response = _response([association])
+        elif suffix == f"actions/runs/{ASSOCIATION_REPAIR_RUN}":
+            response = _response(self.association_repair_run)
+        elif suffix == "actions/workflows/source-ci.yml/runs":
+            query = urllib.parse.parse_qs(parsed.query)
+            if query.get("head_sha", [None])[0] != ASSOCIATION_REPAIR:
+                return super().request(method, url, headers, body, timeout)
+            response = _response(
+                {"total_count": 1, "workflow_runs": [self.association_repair_run]}
+            )
+        else:
             return super().request(method, url, headers, body, timeout)
         self.calls.append((method, parsed.path))
         return response
@@ -3086,6 +3273,7 @@ class PlatformApprovalTests(unittest.TestCase):
 
     def test_recovery_check_creation_records_canonical_github_url(self):
         transport = RecoveryTransport(ready=True)
+        transport.check_association_base = REPAIR
         transport.required_check_published = False
         transport.graphql_missing_reads = 1
         config = approval._config(
@@ -3137,6 +3325,17 @@ class PlatformApprovalTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        historical = json.loads(
+            (fixture_root / "github-check-run-102298823162.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        history = json.loads(
+            (
+                fixture_root
+                / "github-required-check-history-6074b965.json"
+            ).read_text(encoding="utf-8")
+        )
         graphql = json.loads(
             (
                 fixture_root
@@ -3185,7 +3384,56 @@ class PlatformApprovalTests(unittest.TestCase):
             check_run_id=required["check_run_id"],
             conclusion="success",
             details_url=required["details_url"],
+            association_head=contract["sync"]["prior_head_commit"],
+            association_base=contract["check_association_repair"]["base_commit"],
             external_id=required["external_id"],
+        )
+        failed = approval._validate_required_check_run(
+            historical,
+            config,
+            contract,
+            check_run_id=contract["required_check"]["historical_failure"][
+                "check_run_id"
+            ],
+            conclusion="failure",
+            details_url=contract["required_check"]["historical_failure"][
+                "details_url"
+            ],
+            association_head=contract["sync"]["prior_head_commit"],
+            association_base=contract["check_association_repair"]["base_commit"],
+        )
+        approval._verify_historical_check_is_current(
+            [historical],
+            config,
+            contract,
+            failed,
+            association_head=contract["sync"]["prior_head_commit"],
+            association_base=contract["check_association_repair"]["base_commit"],
+        )
+        self.assertTrue(
+            approval._published_check_is_current(
+                history["check_runs"],
+                config,
+                contract,
+                checked,
+                association_head=contract["sync"]["prior_head_commit"],
+                association_base=contract["check_association_repair"][
+                    "base_commit"
+                ],
+            )
+        )
+        self.assertTrue(
+            approval._published_check_history_is_present(
+                history["check_runs"],
+                config,
+                contract,
+                checked,
+                failed,
+                association_head=contract["sync"]["prior_head_commit"],
+                association_base=contract["check_association_repair"][
+                    "base_commit"
+                ],
+            )
         )
         approval._verify_required_check_protection(client, config, contract)
         approval._verify_exact_required_check_graphql(
@@ -3194,7 +3442,73 @@ class PlatformApprovalTests(unittest.TestCase):
             contract,
             checked,
             pull_request_state="OPEN",
+            pull_request_head=contract["sync"]["prior_head_commit"],
         )
+
+        for section, field, wrong in (
+            ("head", "sha", "f" * 40),
+            ("head", "ref", "another-branch"),
+            ("base", "sha", contract["sync_repair"]["base_commit"]),
+            ("base", "ref", "another-base"),
+        ):
+            with self.subTest(section=section, field=field):
+                conflicting = copy.deepcopy(rest)
+                conflicting["pull_requests"][0][section][field] = wrong
+                with self.assertRaisesRegex(
+                    approval.ApprovalError, "check association"
+                ):
+                    approval._validate_required_check_run(
+                        conflicting,
+                        config,
+                        contract,
+                        check_run_id=required["check_run_id"],
+                        conclusion="success",
+                        details_url=required["details_url"],
+                        association_head=contract["sync"]["prior_head_commit"],
+                        association_base=contract["check_association_repair"][
+                            "base_commit"
+                        ],
+                        external_id=required["external_id"],
+                    )
+
+        for label, conflicting in (
+            (
+                "pull request",
+                {
+                    **copy.deepcopy(rest),
+                    "pull_requests": [
+                        {
+                            **copy.deepcopy(rest["pull_requests"][0]),
+                            "number": 53,
+                        }
+                    ],
+                },
+            ),
+            ("head repository", copy.deepcopy(rest)),
+            ("base repository", copy.deepcopy(rest)),
+        ):
+            if label == "head repository":
+                conflicting["pull_requests"][0]["head"]["repo"]["url"] = (
+                    "https://api.github.com/repos/Fifty5D/another-repository"
+                )
+            elif label == "base repository":
+                conflicting["pull_requests"][0]["base"]["repo"]["id"] = 0
+            with self.subTest(label=label), self.assertRaisesRegex(
+                approval.ApprovalError, "check association"
+            ):
+                approval._validate_required_check_run(
+                    conflicting,
+                    config,
+                    contract,
+                    check_run_id=required["check_run_id"],
+                    conclusion="success",
+                    details_url=required["details_url"],
+                    association_head=contract["sync"]["prior_head_commit"],
+                    association_base=contract["check_association_repair"][
+                        "base_commit"
+                    ],
+                    external_id=required["external_id"],
+                )
 
     def test_recovery_check_rejects_foreign_or_wrong_id_url(self):
         for details_url in (
@@ -3479,6 +3793,7 @@ class PlatformApprovalTests(unittest.TestCase):
 
     def test_recovery_required_check_denial_is_safe_and_blocks_readiness(self):
         transport = RecoveryTransport(ready=True)
+        transport.check_association_base = REPAIR
         transport.required_check_published = False
         transport.deny_check_publication = True
         config = approval._config(
@@ -3814,41 +4129,99 @@ class PlatformApprovalTests(unittest.TestCase):
                 require_mergeable=True,
             )
 
-    def test_updated_sync_head_readiness_and_authorization_keep_v062_immutable(self):
+    def test_second_updated_sync_readiness_and_authorization_keep_v062_immutable(self):
         with patch(f"{__name__}.VERSION", "0.6.2"):
             contract = _current_recovery_contract()
-            ready_transport = UpdatedRecoveryTransport(ready=True)
+            ready_transport = FinalRecoveryTransport(ready=True)
             with tempfile.TemporaryDirectory() as temp, patch.object(
                 approval.validation_recovery,
                 "load_contract",
                 return_value=contract,
             ):
-                ready_report = approval.ready_recovery_update(
-                    contract,
-                    TOKEN,
-                    owner=OWNER,
-                    repository=REPOSITORY,
-                    api_url="https://api.github.com",
-                    server_url="https://github.com",
-                    output=Path(temp) / "current-ready.json",
-                    sync_update=_sync_update_report(),
-                    sync_repair_readiness=_published_readiness(
-                        pull_request=57,
-                        feature_head=SYNC_REPAIR_HEAD,
-                        merge_source_commit=SYNC_REPAIR,
+                temporary = Path(temp)
+                sync_update_path = temporary / "sync-update.json"
+                sync_repair_readiness_path = temporary / "sync-repair.json"
+                association_readiness_path = temporary / "association-repair.json"
+                for path, value in (
+                    (
+                        sync_update_path,
+                        {
+                            "recovery_id": contract["recovery_id"],
+                            "schema_version": approval.validation_recovery.SCHEMA_VERSION,
+                            "sync_update": _sync_update_report(),
+                        },
                     ),
-                    transport=ready_transport,
-                    sleeper=lambda _: None,
-                    polls=1,
-                )
+                    (
+                        sync_repair_readiness_path,
+                        _published_readiness(
+                            pull_request=57,
+                            feature_head=SYNC_REPAIR_HEAD,
+                            merge_source_commit=SYNC_REPAIR,
+                        ),
+                    ),
+                    (
+                        association_readiness_path,
+                        _published_readiness(
+                            pull_request=59,
+                            feature_head=ASSOCIATION_REPAIR_HEAD,
+                            merge_source_commit=ASSOCIATION_REPAIR,
+                        ),
+                    ),
+                ):
+                    path.write_text(
+                        approval._canonical(value) + "\n", encoding="ascii"
+                    )
+                output = temporary / "current-ready.json"
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                client_class = approval.GitHubClient
+
+                def ready_client(api_url, token, **kwargs):
+                    del kwargs
+                    return client_class(
+                        api_url,
+                        token,
+                        transport=ready_transport,
+                        sleeper=lambda _: None,
+                    )
+
+                with patch.object(approval, "GitHubClient", side_effect=ready_client):
+                    result = approval.main(
+                        [
+                            "recover-ready-update",
+                            "--owner",
+                            OWNER,
+                            "--repository",
+                            REPOSITORY,
+                            "--api-url",
+                            "https://api.github.com",
+                            "--server-url",
+                            "https://github.com",
+                            "--output",
+                            str(output),
+                            "--recovery-contract",
+                            str(temporary / "contract.json"),
+                            "--sync-update",
+                            str(sync_update_path),
+                            "--sync-repair-readiness",
+                            str(sync_repair_readiness_path),
+                            "--check-association-repair-readiness",
+                            str(association_readiness_path),
+                        ],
+                        environment={"GITHUB_TOKEN": TOKEN},
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                self.assertEqual(result, 0, msg=stderr.getvalue())
+                ready_report = json.loads(output.read_text(encoding="ascii"))
                 ready = ready_report["ready"]
                 self.assertEqual(
                     ready_report["schema_version"],
                     approval.CURRENT_RECOVERY_SCHEMA_VERSION,
                 )
                 self.assertEqual(ready["release_commit"], RELEASE)
-                self.assertEqual(ready["sync_base_commit"], SYNC_REPAIR)
-                self.assertEqual(ready["sync_head_commit"], SYNC_HEAD)
+                self.assertEqual(ready["sync_base_commit"], ASSOCIATION_REPAIR)
+                self.assertEqual(ready["sync_head_commit"], NEXT_SYNC_HEAD)
                 self.assertNotEqual(
                     ready["release_commit"], ready["sync_head_commit"]
                 )
@@ -3863,7 +4236,7 @@ class PlatformApprovalTests(unittest.TestCase):
                     ready_transport.calls,
                 )
 
-                authorization_transport = UpdatedRecoveryTransport(
+                authorization_transport = FinalRecoveryTransport(
                     ready=False, current_payload=ready
                 )
                 event = {
@@ -3872,27 +4245,61 @@ class PlatformApprovalTests(unittest.TestCase):
                     "pull_request": authorization_transport._sync_pr(),
                     "sender": {"login": OWNER},
                 }
-                authorized = approval.authorize(
-                    event,
-                    owner=OWNER,
-                    repository=REPOSITORY,
-                    actor=OWNER,
-                    triggering_actor=OWNER,
-                    run_attempt=1,
-                    api_url="https://api.github.com",
-                    server_url="https://github.com",
-                    output=Path(temp) / "authorization.json",
-                    token=TOKEN,
-                    transport=authorization_transport,
-                    sleeper=lambda _: None,
+                event_path = temporary / "event.json"
+                event_path.write_text(json.dumps(event), encoding="utf-8")
+                authorization_output = temporary / "authorization.json"
+
+                def authorization_client(api_url, token, **kwargs):
+                    del kwargs
+                    return client_class(
+                        api_url,
+                        token,
+                        transport=authorization_transport,
+                        sleeper=lambda _: None,
+                    )
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with patch.object(
+                    approval, "GitHubClient", side_effect=authorization_client
+                ):
+                    result = approval.main(
+                        [
+                            "authorize",
+                            "--owner",
+                            OWNER,
+                            "--repository",
+                            REPOSITORY,
+                            "--api-url",
+                            "https://api.github.com",
+                            "--server-url",
+                            "https://github.com",
+                            "--output",
+                            str(authorization_output),
+                            "--actor",
+                            OWNER,
+                            "--triggering-actor",
+                            OWNER,
+                            "--run-attempt",
+                            "1",
+                            "--event",
+                            str(event_path),
+                        ],
+                        environment={"GITHUB_TOKEN": TOKEN},
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                self.assertEqual(result, 0, msg=stderr.getvalue())
+                authorized = json.loads(
+                    authorization_output.read_text(encoding="ascii")
                 )
             self.assertEqual(
                 authorized["validation_mode"],
                 "published-release-sync-update",
             )
             self.assertEqual(authorized["release_commit"], RELEASE)
-            self.assertEqual(authorized["sync_head_commit"], SYNC_HEAD)
-            self.assertEqual(authorized["merge_commit"], SYNC_MERGE)
+            self.assertEqual(authorized["sync_head_commit"], NEXT_SYNC_HEAD)
+            self.assertEqual(authorized["merge_commit"], NEXT_SYNC_MERGE)
             self.assertEqual(
                 authorized["manifest_sha256"], contract["release"]["manifest_sha256"]
             )
@@ -3905,12 +4312,17 @@ class PlatformApprovalTests(unittest.TestCase):
                 feature_head=SYNC_REPAIR_HEAD,
                 merge_source_commit=SYNC_REPAIR,
             )
+            association_readiness = _published_readiness(
+                pull_request=59,
+                feature_head=ASSOCIATION_REPAIR_HEAD,
+                merge_source_commit=ASSOCIATION_REPAIR,
+            )
             with patch.object(
                 approval.validation_recovery,
                 "load_contract",
                 return_value=contract,
             ):
-                behind = UpdatedRecoveryTransport(ready=True)
+                behind = FinalRecoveryTransport(ready=True)
                 behind.pr_mergeable_state = "behind"
                 with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
                     approval.ApprovalError, "Synchronization PR identity"
@@ -3925,6 +4337,7 @@ class PlatformApprovalTests(unittest.TestCase):
                         output=Path(temp) / "behind.json",
                         sync_update=_sync_update_report(),
                         sync_repair_readiness=repair_readiness,
+                        check_association_repair_readiness=association_readiness,
                         transport=behind,
                         sleeper=lambda _: None,
                         polls=1,
@@ -3953,7 +4366,42 @@ class PlatformApprovalTests(unittest.TestCase):
                         output=Path(temp) / "wrong-tree.json",
                         sync_update=wrong_tree,
                         sync_repair_readiness=repair_readiness,
-                        transport=UpdatedRecoveryTransport(ready=True),
+                        check_association_repair_readiness=association_readiness,
+                        transport=FinalRecoveryTransport(ready=True),
+                        sleeper=lambda _: None,
+                        polls=1,
+                    )
+
+                changed_prior = FinalRecoveryTransport(ready=True)
+                original_request = changed_prior.request
+
+                def altered_prior(method, url, headers, body, timeout):
+                    response = original_request(method, url, headers, body, timeout)
+                    if urllib.parse.urlsplit(url).path.endswith(
+                        f"/commits/{SYNC_HEAD}"
+                    ):
+                        value = json.loads(response.body)
+                        value["commit"]["tree"]["sha"] = "f" * 40
+                        return _response(value)
+                    return response
+
+                changed_prior.request = altered_prior  # type: ignore[method-assign]
+                with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
+                    approval.ApprovalError,
+                    "Previously completed synchronization update changed",
+                ):
+                    approval.ready_recovery_update(
+                        contract,
+                        TOKEN,
+                        owner=OWNER,
+                        repository=REPOSITORY,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=Path(temp) / "changed-prior.json",
+                        sync_update=_sync_update_report(),
+                        sync_repair_readiness=repair_readiness,
+                        check_association_repair_readiness=association_readiness,
+                        transport=changed_prior,
                         sleeper=lambda _: None,
                         polls=1,
                     )
@@ -3969,7 +4417,8 @@ class PlatformApprovalTests(unittest.TestCase):
                         output=Path(temp) / "valid.json",
                         sync_update=_sync_update_report(),
                         sync_repair_readiness=repair_readiness,
-                        transport=UpdatedRecoveryTransport(ready=True),
+                        check_association_repair_readiness=association_readiness,
+                        transport=FinalRecoveryTransport(ready=True),
                         sleeper=lambda _: None,
                         polls=1,
                     )
@@ -3977,7 +4426,7 @@ class PlatformApprovalTests(unittest.TestCase):
                     stale = copy.deepcopy(current)
                     stale["sync_base_commit"] = PUBLICATION
                     stale["approval_nonce"] = approval._nonce(stale)
-                    rejected = UpdatedRecoveryTransport(
+                    rejected = FinalRecoveryTransport(
                         ready=False,
                         current_payload=current,
                         merge_payload=stale,

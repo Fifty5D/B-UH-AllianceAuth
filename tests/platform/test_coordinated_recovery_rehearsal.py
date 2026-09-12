@@ -1806,10 +1806,11 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 ):
                     authorize(changed_evidence)
 
-                # Simulate the reviewed ordering after the repair merge:
-                # update PR #52 with a merge commit, require native CI on that
-                # new head, supersede (without deleting) schema-7 readiness,
-                # and authorize the final merge while selecting only the same
+                # Simulate the reviewed ordering after PR #57's completed first
+                # update and the check-association repair: preserve the prior
+                # PR #52 head as parent one, merge reviewed main as parent two,
+                # require native CI on that second head, supersede (without
+                # deleting) schema-7 readiness, and authorize only the same
                 # immutable release assembled above.
                 current_contract = approval_fixture._current_recovery_contract(
                     ready_report["ready"]
@@ -1836,8 +1837,19 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                                     merge_source_commit=approval_fixture.SYNC_REPAIR,
                                 )
                             ),
+                            check_association_repair_readiness=(
+                                approval_fixture._published_readiness(
+                                    pull_request=59,
+                                    feature_head=(
+                                        approval_fixture.ASSOCIATION_REPAIR_HEAD
+                                    ),
+                                    merge_source_commit=(
+                                        approval_fixture.ASSOCIATION_REPAIR
+                                    ),
+                                )
+                            ),
                             transport=(
-                                approval_fixture.UpdatedRecoveryTransport(
+                                approval_fixture.FinalRecoveryTransport(
                                     ready=True,
                                     historical_payload=ready_report["ready"],
                                 )
@@ -1847,7 +1859,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                         )
                     )
                     final_transport = (
-                        approval_fixture.UpdatedRecoveryTransport(
+                        approval_fixture.FinalRecoveryTransport(
                             ready=False,
                             current_payload=current_ready["ready"],
                             historical_payload=ready_report["ready"],
@@ -1873,6 +1885,31 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                         transport=final_transport,
                         sleeper=lambda _: None,
                     )
+                    queued_transport = approval_fixture.FinalRecoveryTransport(
+                        ready=False,
+                        current_payload=current_ready["ready"],
+                        historical_payload=ready_report["ready"],
+                    )
+                    queued_event = {
+                        "action": "closed",
+                        "number": approval_fixture.PR_NUMBER,
+                        "pull_request": queued_transport._sync_pr(),
+                        "sender": {"login": approval_fixture.OWNER},
+                    }
+                    queued_authorized = approval_fixture.approval.authorize(
+                        queued_event,
+                        owner=approval_fixture.OWNER,
+                        repository=approval_fixture.REPOSITORY,
+                        actor=approval_fixture.OWNER,
+                        triggering_actor=approval_fixture.OWNER,
+                        run_attempt=1,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=base / "queued-sync-authorization.json",
+                        token=approval_fixture.TOKEN,
+                        transport=queued_transport,
+                        sleeper=lambda _: None,
+                    )
                 self.assertEqual(
                     current_authorized["validation_mode"],
                     "published-release-sync-update",
@@ -1891,6 +1928,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     deployment_bundle.request.manifest_sha256,
                     current_authorized["manifest_sha256"],
                 )
+                self.assertEqual(queued_authorized, current_authorized)
 
             failed_host, failed_boundary = prepare_real_recovery_host(
                 base / "failed-host",

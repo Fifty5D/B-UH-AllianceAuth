@@ -35,6 +35,8 @@ jobs:
       release_commit: ${{ steps.contract.outputs.release_commit }}
       source_commit: ${{ steps.contract.outputs.source_commit }}
       sync_head_commit: ${{ steps.contract.outputs.sync_head_commit }}
+      check_association_repair_commit: ${{ steps.contract.outputs.check_association_repair_commit }}
+      check_association_repair_feature_head: ${{ steps.contract.outputs.check_association_repair_feature_head }}
       sync_repair_commit: ${{ steps.contract.outputs.sync_repair_commit }}
       sync_repair_feature_head: ${{ steps.contract.outputs.sync_repair_feature_head }}
     steps:
@@ -73,11 +75,11 @@ jobs:
           mkdir -p build
           python3 ops/release/validation_recovery.py \
             --contract ops/release/published-release-recovery-v0.6.2.json \
-            sync-repair \
+            check-association-repair \
             --root . \
             --source-commit "${SELECTED_SHA}" \
             --event-name workflow_dispatch \
-            --output build/sync-repair.json >/dev/null
+            --output build/check-association-repair.json >/dev/null
 
           curl --fail --silent --show-error --location \
             --retry 3 --retry-all-errors \
@@ -151,7 +153,7 @@ jobs:
       - name: Check out the exact reviewed repair merge
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.qualify.outputs.sync_repair_commit }}
+          ref: ${{ needs.qualify.outputs.check_association_repair_commit }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -161,6 +163,8 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           SYNC_HEAD: ${{ needs.qualify.outputs.sync_head_commit }}
+          CHECK_ASSOCIATION_REPAIR_COMMIT: ${{ needs.qualify.outputs.check_association_repair_commit }}
+          CHECK_ASSOCIATION_REPAIR_FEATURE_HEAD: ${{ needs.qualify.outputs.check_association_repair_feature_head }}
           SYNC_REPAIR_COMMIT: ${{ needs.qualify.outputs.sync_repair_commit }}
           SYNC_REPAIR_FEATURE_HEAD: ${{ needs.qualify.outputs.sync_repair_feature_head }}
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
@@ -174,7 +178,7 @@ jobs:
             sync-update \
             --root . \
             --source-commit "${SYNC_HEAD}" \
-            --repair-commit "${SYNC_REPAIR_COMMIT}" \
+            --repair-commit "${CHECK_ASSOCIATION_REPAIR_COMMIT}" \
             --output build/sync-update.json >/dev/null
           allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
           if [[ -n "${WORK_ACTOR}" ]]; then
@@ -188,12 +192,20 @@ jobs:
             --merge-source-commit "${SYNC_REPAIR_COMMIT}" \
             "${allowed_mergers[@]}" \
             --output build/sync-repair-readiness.json >/dev/null
+          python3 ops/readiness.py published \
+            --repository "${REPOSITORY}" \
+            --pull-request 59 \
+            --feature-head "${CHECK_ASSOCIATION_REPAIR_FEATURE_HEAD}" \
+            --merge-source-commit "${CHECK_ASSOCIATION_REPAIR_COMMIT}" \
+            "${allowed_mergers[@]}" \
+            --output build/check-association-repair-readiness.json >/dev/null
           python3 ops/release/platform_approval.py recover-ready-update \
             --owner "${REPOSITORY_OWNER}" \
             --repository "${REPOSITORY}" \
             --recovery-contract ops/release/published-release-recovery-v0.6.2.json \
             --sync-update build/sync-update.json \
             --sync-repair-readiness build/sync-repair-readiness.json \
+            --check-association-repair-readiness build/check-association-repair-readiness.json \
             --work-actor "${WORK_ACTOR}" \
             --api-url "${{ github.api_url }}" \
             --server-url "${{ github.server_url }}" \
