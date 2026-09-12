@@ -5482,6 +5482,12 @@ def main(
             feature_readiness = json.loads(feature_readiness_raw)
             if feature_readiness_raw != _canonical(feature_readiness) + "\n":
                 raise ApprovalError("Feature-readiness evidence is not canonical")
+            import deployment_evidence
+
+            deployment_evidence.require_feature_runway(
+                deployment_evidence.ReadClient(GitHubClient(args.api_url, token)),
+                args.repository, _feature_readiness(feature_readiness, config),
+            )
             report = ready(
                 config,
                 token,

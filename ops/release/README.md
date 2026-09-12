@@ -33,7 +33,10 @@ available, digest-matched, and have **more than 90 minutes remaining**. This exc
 the 65-minute production-job timeout. Missing/deleted/changed evidence, review
 revocation, a newer run, or queue delay fails closed before SSH. The pinned
 preflight `10083806725` expires `2026-09-16T01:07:13Z`: authorization must complete
-before `2026-09-15T23:37:13Z`, with additional time for queueing. Recovery artifact
+before `2026-09-15T23:37:13Z`, with additional time for queueing.
+The corrective PR's three-day readiness/preview retention can impose an earlier
+deadline; its actual expiry is rechecked with the same 90-minute requirement.
+Recovery artifact
 `10279641606` expires `2026-10-11T19:31:49Z`; failed-validation/publication evidence
 is also still required and rechecked. Expiry requires a separately reviewed fresh
 evidence path, never treating deleted bytes as retained or retrying production.

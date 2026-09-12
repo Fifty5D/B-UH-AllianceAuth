@@ -20,7 +20,6 @@ FAILED_RUN = 34679176355
 FAILED_JOB = 103514449958
 SKIPPED_JOB = 103514575417
 APPROVAL_NONCE = "7a9183fcf9ac5a72e761f48c69567b5ac4462acaea351b97373afe9de4a8ff4b"
-READY_COMMENT = 5644197715
 BRANCH = "codex/complete-v062-approved-deployment"
 WORKFLOW = ".github/workflows/deploy-approved-platform-release.yml"
 CONFIRMATION = "CONTINUE APPROVED V0.6.2"
@@ -165,6 +164,7 @@ def authorize(event: Mapping, *, environment: Mapping, **arguments) -> dict:
         )
     except deployment_evidence.readiness.ReadinessError as exc:
         raise approval.ApprovalError(str(exc)) from exc
+    deployment_evidence.require_feature_runway(api, REPOSITORY, repair_readiness)
     main_run = approval._main_ci_run(client, config, current)
     _failed_attempt(client, config)
     # This workflow had no dispatch entry point before this repair. Any other

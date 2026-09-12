@@ -953,6 +953,9 @@ class ReadyTransport(ApprovalTransport):
         del headers, timeout
         parsed = urllib.parse.urlsplit(url)
         suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        if suffix == "actions/artifacts/777" and method == "GET":
+            self.calls.append((method, parsed.path))
+            return _response({"id": 777, "digest": READINESS_DIGEST, "expired": False, "expires_at": PREFLIGHT_EXPIRES_AT})
         if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
             self.calls.append((method, parsed.path))
             pr = copy.deepcopy(_event()["pull_request"])
@@ -4536,6 +4539,9 @@ class PlatformApprovalTests(unittest.TestCase):
             approval,
             "ready",
             side_effect=sync.SyncPrError(operation + unsafe_tail),
+        ), patch.object(
+            approval, "GitHubClient",
+            return_value=sync.GitHubClient("https://api.github.com", TOKEN, transport=ReadyTransport()),
         ):
             result = approval.main(
                 _ready_main_arguments(Path(temp)),

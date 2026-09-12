@@ -46,6 +46,20 @@ def require_runway(artifact: Mapping[str, Any]) -> None:
         )
 
 
+def require_feature_runway(api, repository, published) -> None:
+    identities = []
+    if published["readiness"] is not None:
+        identities.append((published["readiness"]["artifact_id"], published["readiness"]["artifact_digest"]))
+    if published["preview_required"]:
+        identities.extend((published["preview"][kind + "_artifact_id"], published["preview"][kind + "_artifact_digest"])
+                          for kind in ("manifest", "evidence"))
+    for identity, digest in identities:
+        artifact = api.get_json(f"/repos/{repository}/actions/artifacts/{identity}")
+        if artifact.get("id") != identity or artifact.get("digest") != digest:
+            raise approval.ApprovalError("Required feature artifact identity changed")
+        require_runway(artifact)
+
+
 def verify_recovery_feature(client, config, published, *, work_actor="") -> None:
     """Verify the live identity/review behind the approved historical snapshot.
 
@@ -151,6 +165,7 @@ def verify(client, config, report, *, work_actor="") -> None:
             raise approval.ApprovalError(str(exc)) from exc
         if actual != published:
             raise approval.ApprovalError("Live feature readiness differs from approval")
+        require_feature_runway(ReadClient(client), config.repository, actual)
     retained = approval._artifact(
         client, config, report["preflight_run_id"], report["preflight_artifact"],
         expected_id=report["preflight_artifact_id"],

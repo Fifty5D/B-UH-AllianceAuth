@@ -97,6 +97,7 @@ class Replay:
         self.extra_runs = []
         self.future_main = REPAIR_MERGE
         self.future_status = "success"
+        self.repair_expiry = "2026-09-15T12:00:00Z"
 
     def value(self, suffix, query=""):
         return self.records[_key("GET", "https://api.github.com" + PREFIX + suffix + query)]["value"]
@@ -166,7 +167,10 @@ class Replay:
             or suffix == "check-runs/55"
             or (suffix in {"actions/workflows/source-ci.yml/runs", "actions/workflows/ui-preview.yml/runs"} and query.get("head_sha") == REPAIR_HEAD)
         ):
-            return self.repair.get_json(path, query)
+            value = self.repair.get_json(path, query)
+            if suffix.startswith("actions/artifacts/"):
+                value["expires_at"] = self.repair_expiry
+            return value
         return None
 
 
@@ -314,6 +318,10 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "retained preview"):
             self.boundary()
         self.replay.repair.preview_artifact_expired = False
+        self.replay.repair_expiry = "2026-09-12T13:00:00Z"
+        with self.assertRaisesRegex(AssertionError, "90-minute"):
+            self.boundary()
+        self.replay.repair_expiry = "2026-09-15T12:00:00Z"
         self.replay.future_main = "f" * 40
         with self.assertRaisesRegex(AssertionError, "current main"):
             self.boundary()
@@ -442,6 +450,40 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
             # The next real step would materialize protected SSH identities.
             # Neither SSH nor receiver installation is executed by this test.
             self.assertEqual(json.loads((checkout / "build/platform-deploy-boundary-final.json").read_text()), report)
+
+    def test_reusable_caller_gate_executes_the_bounded_dispatch_rules(self):
+        report = self.boundary()
+        env = {key.upper(): str(value) for key, value in report.items() if isinstance(value, (str, int))}
+        env.update({
+            **environment(), "APPROVED_CONTINUATION": "true", "ACTOR": "Fifty5D", "OWNER": "Fifty5D",
+            "TRIGGERING_ACTOR": "Fifty5D", "WORK_ACTOR": "", "API_URL": "https://api.github.com",
+            "EVENT_NAME": "workflow_dispatch", "MODE": "deploy", "CONFIRMATION": "DEPLOY PLATFORM V2",
+            "SELECTED_REF": "refs/heads/main", "FEATURE_READINESS": json.dumps(report["feature_readiness"]),
+        })
+        script = _step_script("deploy-platform-v2.yml", "deploy", "Validate caller, mode, version, and immutable release ref")
+        ref = self.replay.value("git/ref/heads/release/platform-v0.6.2")
+        commit = self.replay.value(f"commits/{report['release_commit']}")
+        # Replace the HTTP boundary only, with the retained exact identities.
+        # Unknown URLs cannot fall through to a real curl or server operation.
+        curl = (
+            'curl() { case "${@: -1}" in\n'
+            f"'https://api.github.com{PREFIX}git/ref/heads/release/platform-v0.6.2') printf '%s' '{json.dumps(ref)}' ;;\n"
+            f"'https://api.github.com{PREFIX}git/commits/{report['release_commit']}') printf '%s' '{json.dumps({'sha': commit['sha'], 'parents': commit['parents']})}' ;;\n"
+            '*) return 64 ;; esac; }\n'
+        )
+        if os.environ.get("BUH_TEST_TOOLS"):
+            curl = f'export PATH="{_bash_path(Path(os.environ["BUH_TEST_TOOLS"]))}:$PATH"\n' + curl
+        result = _execute_step(curl + script, self.root, env)
+        self.assertEqual(result.returncode, 0, result.stderr[-1200:])
+        for key, value in (
+            ("APPROVED_CONTINUATION", "false"), ("ACTOR", "not-owner"),
+            ("GITHUB_WORKFLOW_REF", f"{continuation.REPOSITORY}/.github/workflows/deploy-platform-v2.yml@refs/heads/main"),
+            ("SELECTED_REF", "refs/heads/feature"), ("RELEASE_COMMIT", REPAIR_MERGE),
+            ("EVENT_NAME", "pull_request"),
+        ):
+            with self.subTest(key=key):
+                result = _execute_step(curl + script, self.root, {**env, key: value})
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
