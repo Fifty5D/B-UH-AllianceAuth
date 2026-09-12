@@ -196,7 +196,7 @@ jobs:
 
           report = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
           if (
-              report.get("schema_version") != 5
+              report.get("schema_version") != 6
               or report.get("recovery_id")
               != "published-platform-v0.6.2-validation-20260909"
               or report.get("source_commit") != sys.argv[2]

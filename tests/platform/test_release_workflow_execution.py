@@ -157,7 +157,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 "release_required": True,
             },
             "recovery_id": "published-platform-v0.6.2-validation-20260909",
-            "schema_version": 5,
+            "schema_version": 6,
             "source_commit": source,
         }
         with tempfile.TemporaryDirectory() as temporary:

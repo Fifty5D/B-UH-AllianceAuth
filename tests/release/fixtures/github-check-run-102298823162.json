@@ -1,0 +1,29 @@
+{
+  "app": {"id": 15368, "slug": "github-actions"},
+  "check_suite": {"id": 92911719969},
+  "completed_at": "2026-09-09T01:09:38Z",
+  "conclusion": "failure",
+  "details_url": "https://github.com/Fifty5D/B-UH-AllianceAuth/actions/runs/34297801831/job/102298823162",
+  "external_id": "13ffe0d5-5c51-5ff0-bac4-92f773f1f718",
+  "head_sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+  "id": 102298823162,
+  "name": "Source test suite / Required source checks",
+  "node_id": "CR_kwDOUIayms8AAAAX0Xwp-g",
+  "pull_requests": [
+    {
+      "base": {
+        "ref": "main",
+        "repo": {"id": 1351004826, "name": "B-UH-AllianceAuth", "url": "https://api.github.com/repos/Fifty5D/B-UH-AllianceAuth"},
+        "sha": "8795ebf2e82b0bc204047b0b7834ee23cd24edb6"
+      },
+      "head": {
+        "ref": "sync/platform-v0.6.2",
+        "repo": {"id": 1351004826, "name": "B-UH-AllianceAuth", "url": "https://api.github.com/repos/Fifty5D/B-UH-AllianceAuth"},
+        "sha": "4b4a6f2f2e6eeb7bd85010537fb76ac2c2e44ef6"
+      },
+      "number": 52
+    }
+  ],
+  "started_at": "2026-09-09T01:09:34Z",
+  "status": "completed"
+}
