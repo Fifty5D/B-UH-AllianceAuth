@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Validate immutable recovery checks against the synchronization pull request's independently verified live association."

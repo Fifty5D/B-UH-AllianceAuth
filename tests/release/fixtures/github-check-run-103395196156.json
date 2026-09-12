@@ -14,7 +14,19 @@
     "title": "Validated immutable platform v0.6.2 with reviewed recovery harness"
   },
   "pull_requests": [
-    {"base": {"ref": "main"}, "head": {"sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6"}, "number": 52}
+    {
+      "base": {
+        "ref": "main",
+        "repo": {"id": 1351004826, "name": "B-UH-AllianceAuth", "url": "https://api.github.com/repos/Fifty5D/B-UH-AllianceAuth"},
+        "sha": "8795ebf2e82b0bc204047b0b7834ee23cd24edb6"
+      },
+      "head": {
+        "ref": "sync/platform-v0.6.2",
+        "repo": {"id": 1351004826, "name": "B-UH-AllianceAuth", "url": "https://api.github.com/repos/Fifty5D/B-UH-AllianceAuth"},
+        "sha": "4b4a6f2f2e6eeb7bd85010537fb76ac2c2e44ef6"
+      },
+      "number": 52
+    }
   ],
   "started_at": "2026-09-11T19:32:53Z",
   "status": "completed"

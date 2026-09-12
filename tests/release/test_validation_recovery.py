@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
+import io
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ops.release import validation_recovery as recovery
 
@@ -48,6 +52,7 @@ class RecoveryRepository:
             | set(recovery.REPAIR_PATHS)
             | set(recovery.PUBLICATION_REPAIR_PATHS)
             | set(recovery.SYNC_REPAIR_PATHS)
+            | set(recovery.CHECK_ASSOCIATION_REPAIR_PATHS)
             | set(recovery.HARNESS_PATHS)
             | set(recovery.TEST_SUPPORT_PATHS)
         )
@@ -170,6 +175,53 @@ class RecoveryRepository:
         )
         self.sync_repair = run(root, "rev-parse", "HEAD")
 
+        run(
+            root,
+            "checkout",
+            "--quiet",
+            "-b",
+            "sync/platform-v0.6.2",
+            self.release,
+        )
+        run(
+            root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            self.sync_repair,
+            "-m",
+            "first reviewed synchronization update",
+        )
+        self.prior_sync_head = run(root, "rev-parse", "HEAD")
+        self.prior_sync_tree = run(root, "rev-parse", "HEAD^{tree}")
+
+        run(
+            root,
+            "checkout",
+            "--quiet",
+            "-b",
+            "check-association-repair",
+            self.sync_repair,
+        )
+        for relative in recovery.CHECK_ASSOCIATION_REPAIR_PATHS:
+            path = root.joinpath(*relative.split("/"))
+            path.write_text(f"association-repair:{relative}\n", encoding="utf-8")
+        run(root, "add", "--all")
+        run(root, "commit", "--quiet", "-m", "repair live check association")
+        self.association_repair_feature = run(root, "rev-parse", "HEAD")
+        self.association_repair_tree = run(root, "rev-parse", "HEAD^{tree}")
+        run(root, "checkout", "--quiet", "-B", "main", self.sync_repair)
+        run(
+            root,
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "check-association-repair",
+            "-m",
+            "merge check-association repair",
+        )
+        self.association_repair = run(root, "rev-parse", "HEAD")
+
         self.contract = {
             "activation": {
                 "allowed_paths": list(recovery.ACTIVATION_PATHS),
@@ -179,6 +231,11 @@ class RecoveryRepository:
                 "pull_request": 53,
                 "tree": self.activation_tree,
                 "validation": {"run_attempt": 1, "run_id": 100},
+            },
+            "check_association_repair": {
+                "allowed_paths": list(recovery.CHECK_ASSOCIATION_REPAIR_PATHS),
+                "base_commit": self.sync_repair,
+                "pull_request": 59,
             },
             "continuation": {
                 "allowed_paths": list(recovery.CONTINUATION_PATHS),
@@ -266,6 +323,8 @@ class RecoveryRepository:
             "sync": {
                 "branch": "sync/platform-v0.6.2",
                 "initial_head_commit": self.release,
+                "prior_head_commit": self.prior_sync_head,
+                "prior_head_tree": self.prior_sync_tree,
                 "pull_request": 52,
             },
             "sync_repair": {
@@ -280,7 +339,9 @@ class RecoveryRepository:
             self.root,
             "checkout",
             "--quiet",
-            "-B", "sync/platform-v0.6.2", self.release,
+            "-B",
+            "sync/platform-v0.6.2",
+            self.prior_sync_head,
         )
         run(
             self.root,
@@ -293,7 +354,14 @@ class RecoveryRepository:
         return run(self.root, "rev-parse", "HEAD")
 
     def add_sync_merge(self, sync_head: str) -> str:
-        run(self.root, "checkout", "--quiet", "-B", "continued-main", self.sync_repair)
+        run(
+            self.root,
+            "checkout",
+            "--quiet",
+            "-B",
+            "continued-main",
+            self.association_repair,
+        )
         run(
             self.root,
             "merge",
@@ -329,6 +397,11 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(contract["publication_repair"]["pull_request"], 56)
         self.assertEqual(contract["sync_repair"]["pull_request"], 57)
+        self.assertEqual(contract["check_association_repair"]["pull_request"], 59)
+        self.assertEqual(
+            contract["sync"]["prior_head_commit"],
+            "4b4a6f2f2e6eeb7bd85010537fb76ac2c2e44ef6",
+        )
         self.assertEqual(contract["historical_readiness"]["comment_id"], 5641670561)
         self.assertEqual(contract["partial_publication"]["run_id"], 34638993007)
         self.assertEqual(
@@ -423,17 +496,43 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 contract=fixture.contract,
             )
             self.assertEqual(sync_repair["sync_repair_commit"], fixture.sync_repair)
-            held = recovery.validate_hold(
-                fixture.root, fixture.sync_repair, contract=fixture.contract
+            association_feature = recovery.validate_check_association_repair(
+                fixture.root,
+                fixture.association_repair_feature,
+                event_name="pull_request",
+                pull_request=59,
+                contract=fixture.contract,
             )
-            self.assertEqual(held["state"], "sync-head-repair-pending-update")
-            self.assertEqual(held["sync_repair_commit"], fixture.sync_repair)
+            self.assertIsNone(
+                association_feature["check_association_repair_commit"]
+            )
+            association_repair = recovery.validate_check_association_repair(
+                fixture.root,
+                fixture.association_repair,
+                event_name="workflow_dispatch",
+                pull_request=None,
+                contract=fixture.contract,
+            )
+            self.assertEqual(
+                association_repair["check_association_repair_commit"],
+                fixture.association_repair,
+            )
+            held = recovery.validate_hold(
+                fixture.root, fixture.association_repair, contract=fixture.contract
+            )
+            self.assertEqual(
+                held["state"], "check-association-repair-pending-update"
+            )
+            self.assertEqual(
+                held["check_association_repair_commit"],
+                fixture.association_repair,
+            )
 
             sync_head = fixture.add_sync_update()
             update = recovery.validate_sync_update(
                 fixture.root,
                 sync_head,
-                fixture.sync_repair,
+                fixture.association_repair,
                 contract=fixture.contract,
             )
             self.assertEqual(update["release_commit"], fixture.release)
@@ -445,7 +544,8 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(held["state"], "synchronized-awaiting-retirement")
             self.assertEqual(
-                held["sync_repair_commit"], fixture.sync_repair
+                held["check_association_repair_commit"],
+                fixture.association_repair,
             )
 
             update_tree = run(fixture.root, "rev-parse", f"{sync_head}^{{tree}}")
@@ -454,18 +554,18 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "commit-tree",
                 update_tree,
                 "-p",
-                fixture.sync_repair,
+                fixture.association_repair,
                 "-m",
                 "forbidden rebased synchronization head",
             )
             with self.assertRaisesRegex(
                 recovery.ValidationRecoveryError,
-                "ordered merge",
+                "ordered continuation",
             ):
                 recovery.validate_sync_update(
                     fixture.root,
                     rebased,
-                    fixture.sync_repair,
+                    fixture.association_repair,
                     contract=fixture.contract,
                 )
 
@@ -474,21 +574,34 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "commit-tree",
                 update_tree,
                 "-p",
-                fixture.sync_repair,
+                fixture.association_repair,
                 "-p",
-                fixture.release,
+                fixture.prior_sync_head,
                 "-m",
                 "forbidden reversed synchronization parents",
             )
             with self.assertRaisesRegex(
                 recovery.ValidationRecoveryError,
-                "ordered merge",
+                "ordered continuation",
             ):
                 recovery.validate_sync_update(
                     fixture.root,
                     reversed_parents,
-                    fixture.sync_repair,
+                    fixture.association_repair,
                     contract=fixture.contract,
+                )
+
+            changed_prior = copy.deepcopy(fixture.contract)
+            changed_prior["sync"]["prior_head_tree"] = "f" * 40
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError,
+                "Previously completed synchronization update identity changed",
+            ):
+                recovery.validate_sync_update(
+                    fixture.root,
+                    sync_head,
+                    fixture.association_repair,
+                    contract=changed_prior,
                 )
 
             changed_release_contract = copy.deepcopy(fixture.contract)
@@ -516,7 +629,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 recovery.validate_sync_update(
                     fixture.root,
                     sync_head,
-                    fixture.sync_repair,
+                    fixture.association_repair,
                     contract=changed_release_contract,
                 )
 
@@ -570,6 +683,31 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                     unsafe_publication,
                     event_name="pull_request",
                     pull_request=56,
+                    contract=fixture.contract,
+                )
+
+            run(
+                fixture.root,
+                "checkout",
+                "--quiet",
+                "-b",
+                "unsafe-association-repair",
+                fixture.association_repair_feature,
+            )
+            (fixture.root / "unreviewed-association.py").write_text(
+                "changed = True\n", encoding="utf-8"
+            )
+            run(fixture.root, "add", "--all")
+            run(fixture.root, "commit", "--quiet", "-m", "unreviewed association")
+            unsafe_association = run(fixture.root, "rev-parse", "HEAD")
+            with self.assertRaisesRegex(
+                recovery.ValidationRecoveryError, "outside the reviewed scope"
+            ):
+                recovery.validate_check_association_repair(
+                    fixture.root,
+                    unsafe_association,
+                    event_name="pull_request",
+                    pull_request=59,
                     contract=fixture.contract,
                 )
 
@@ -699,10 +837,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "checkout",
                 "--quiet",
                 "-b",
-                "sync-head-repair",
-                contract["sync_repair"]["base_commit"],
+                "check-association-repair",
+                contract["check_association_repair"]["base_commit"],
             )
-            for relative in contract["sync_repair"]["allowed_paths"]:
+            for relative in contract["check_association_repair"]["allowed_paths"]:
                 destination = review / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / relative, destination)
@@ -712,27 +850,27 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "commit",
                 "--quiet",
                 "-m",
-                "reviewed synchronization-head repair",
+                "reviewed check-association repair",
             )
             feature = run(review, "rev-parse", "HEAD")
-            run(review, "push", "--quiet", "origin", "sync-head-repair")
+            run(review, "push", "--quiet", "origin", "check-association-repair")
             feature_tree = run(mirror, "rev-parse", f"{feature}^{{tree}}")
-            sync_repair = run(
+            association_repair = run(
                 mirror,
                 "commit-tree",
                 feature_tree,
                 "-p",
-                contract["sync_repair"]["base_commit"],
+                contract["check_association_repair"]["base_commit"],
                 "-p",
                 feature,
                 "-m",
-                "synthetic exact synchronization-head repair",
+                "synthetic exact check-association repair",
             )
             run(
                 mirror,
                 "update-ref",
-                "refs/heads/sync-head-repair",
-                sync_repair,
+                "refs/heads/check-association-repair",
+                association_repair,
             )
 
             checkout = base / "checkout"
@@ -745,15 +883,34 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 str(checkout),
             )
             run(checkout, "config", "core.autocrlf", "false")
-            run(checkout, "checkout", "--quiet", "--detach", sync_repair)
-            report = recovery.verify_pending_ledger(
-                checkout,
-                sync_repair,
-                event_name="push",
-                pull_request=None,
-                contract=contract,
-                environ={**os.environ, "GITHUB_TOKEN": "synthetic-token"},
-            )
+            run(checkout, "checkout", "--quiet", "--detach", association_repair)
+            report_path = base / "recovery-plan.json"
+            stdout = io.StringIO()
+            environment = {**os.environ, "GITHUB_TOKEN": "synthetic-token"}
+            environment.pop("GITHUB_OUTPUT", None)
+            with contextlib.redirect_stdout(stdout), mock.patch.dict(
+                os.environ, environment, clear=True
+            ):
+                result = recovery.main(
+                    [
+                        "--contract",
+                        str(
+                            ROOT
+                            / "ops/release/published-release-recovery-v0.6.2.json"
+                        ),
+                        "ledger",
+                        "--root",
+                        str(checkout),
+                        "--source-commit",
+                        association_repair,
+                        "--event-name",
+                        "push",
+                        "--output",
+                        str(report_path),
+                    ]
+                )
+            self.assertEqual(result, 0, msg=stdout.getvalue()[-2000:])
+            report = json.loads(report_path.read_text(encoding="ascii"))
             self.assertEqual(
                 report["latest_release"],
                 {
@@ -775,14 +932,14 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 report["synthetic_merge_tree"],
                 recovery._merge_tree(
                     checkout,
-                    sync_repair,
+                    association_repair,
                     report["synthetic_sync_update_commit"],
                 ),
             )
             update = recovery.validate_sync_update(
                 checkout,
                 report["synthetic_sync_update_commit"],
-                sync_repair,
+                association_repair,
                 contract=contract,
             )
             self.assertEqual(update["release_commit"], contract["release"]["commit"])

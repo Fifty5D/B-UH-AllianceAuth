@@ -751,13 +751,70 @@ def _sync_repair_evidence(
     }
 
 
+def _check_association_repair_evidence(
+    value: Any,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "base_commit",
+        "check_association_repair_commit",
+        "check_association_repair_tree",
+        "feature_head",
+        "paths",
+        "pull_request",
+        "sync_repair",
+    }:
+        raise ApprovalError("Check-association repair evidence is invalid")
+    repair = contract["check_association_repair"]
+    sync_repair = _sync_repair_evidence(value.get("sync_repair"), contract)
+    paths = value.get("paths")
+    if (
+        value.get("base_commit") != repair["base_commit"]
+        or value.get("base_commit") != sync_repair["sync_repair_commit"]
+        or value.get("pull_request") != repair["pull_request"]
+        or not isinstance(value.get("feature_head"), str)
+        or COMMIT_RE.fullmatch(value["feature_head"]) is None
+        or not isinstance(value.get("check_association_repair_commit"), str)
+        or COMMIT_RE.fullmatch(value["check_association_repair_commit"]) is None
+        or not isinstance(value.get("check_association_repair_tree"), str)
+        or COMMIT_RE.fullmatch(value["check_association_repair_tree"]) is None
+        or not isinstance(paths, list)
+        or [item.get("path") for item in paths if isinstance(item, dict)]
+        != list(validation_recovery.CHECK_ASSOCIATION_REPAIR_PATHS)
+    ):
+        raise ApprovalError("Check-association repair identity changed")
+    for item in paths:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"git_blob_sha", "path", "sha256"}
+            or not isinstance(item.get("git_blob_sha"), str)
+            or COMMIT_RE.fullmatch(item["git_blob_sha"]) is None
+            or not isinstance(item.get("sha256"), str)
+            or NONCE_RE.fullmatch(item["sha256"]) is None
+        ):
+            raise ApprovalError("Check-association repair path evidence changed")
+    return {
+        "base_commit": repair["base_commit"],
+        "check_association_repair_commit": value[
+            "check_association_repair_commit"
+        ],
+        "check_association_repair_tree": value["check_association_repair_tree"],
+        "feature_head": value["feature_head"],
+        "paths": [dict(item) for item in paths],
+        "pull_request": repair["pull_request"],
+        "sync_repair": sync_repair,
+    }
+
+
 def _sync_update_evidence(
     value: Any,
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "base_commit",
+        "check_association_repair",
         "initial_head_commit",
+        "previous_head_commit",
         "pull_request",
         "release_commit",
         "sync_branch",
@@ -767,11 +824,17 @@ def _sync_update_evidence(
     }:
         raise ApprovalError("Synchronization update evidence is invalid")
     repair = _sync_repair_evidence(value.get("sync_repair"), contract)
+    association_repair = _check_association_repair_evidence(
+        value.get("check_association_repair"), contract
+    )
     sync = contract["sync"]
     release = contract["release"]
     if (
-        value.get("base_commit") != repair["sync_repair_commit"]
+        value.get("base_commit")
+        != association_repair["check_association_repair_commit"]
         or value.get("initial_head_commit") != sync["initial_head_commit"]
+        or value.get("previous_head_commit") != sync["prior_head_commit"]
+        or association_repair["sync_repair"] != repair
         or value.get("pull_request") != sync["pull_request"]
         or value.get("release_commit") != release["commit"]
         or value.get("sync_branch") != sync["branch"]
@@ -781,7 +844,11 @@ def _sync_update_evidence(
         or COMMIT_RE.fullmatch(value["sync_head_tree"]) is None
     ):
         raise ApprovalError("Synchronization update identity changed")
-    return {**value, "sync_repair": repair}
+    return {
+        **value,
+        "check_association_repair": association_repair,
+        "sync_repair": repair,
+    }
 
 
 def _verify_sync_repair_remote(
@@ -804,6 +871,26 @@ def _verify_sync_repair_remote(
     )
 
 
+def _verify_check_association_repair_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    identity: Mapping[str, Any],
+    *,
+    work_actor: str,
+) -> dict[str, Any]:
+    return _verify_review_merge_remote(
+        client,
+        config,
+        identity,
+        commit_field="check_association_repair_commit",
+        tree_field="check_association_repair_tree",
+        first_parent=identity["base_commit"],
+        label="check-association repair",
+        state="closed",
+        work_actor=work_actor,
+    )
+
+
 def _verify_sync_update_remote(
     client: GitHubClient,
     config: SyncConfig,
@@ -811,13 +898,27 @@ def _verify_sync_update_remote(
     identity: Mapping[str, Any],
 ) -> None:
     sync_head = identity["sync_head_commit"]
+    prior_head = identity["previous_head_commit"]
+    prior = _read_commit(client, config, prior_head)
+    prior_parents = prior.get("parents")
+    prior_base = identity["check_association_repair"]["base_commit"]
+    if (
+        not isinstance(prior_parents, list)
+        or len(prior_parents) != 2
+        or not all(isinstance(parent, dict) for parent in prior_parents)
+        or prior_parents[0].get("sha") != config.release_commit
+        or prior_parents[1].get("sha") != prior_base
+        or _commit_tree(prior, context="Previous synchronization update")
+        != contract["sync"]["prior_head_tree"]
+    ):
+        raise ApprovalError("Previously completed synchronization update changed")
     commit = _read_commit(client, config, sync_head)
     parents = commit.get("parents")
     if (
         not isinstance(parents, list)
         or len(parents) != 2
         or not all(isinstance(parent, dict) for parent in parents)
-        or parents[0].get("sha") != config.release_commit
+        or parents[0].get("sha") != prior_head
         or parents[1].get("sha") != identity["base_commit"]
         or _commit_tree(commit, context="Synchronization update")
         != identity["sync_head_tree"]
@@ -880,9 +981,11 @@ def _required_check_app(value: Any) -> tuple[int | None, str | None]:
 
 def _required_check_pull_matches(
     value: Any,
+    config: SyncConfig,
     *,
     number: int,
-    release_commit: str,
+    head_commit: str,
+    base_commit: str,
 ) -> bool:
     if not isinstance(value, list) or len(value) != 1:
         return False
@@ -891,12 +994,28 @@ def _required_check_pull_matches(
         return False
     head = pull.get("head")
     base = pull.get("base")
+    repository_name = config.repository.split("/", 1)[1]
+    repository_url = f"{config.api_url.rstrip('/')}/repos/{config.repository}"
+
+    def exact_repository(repository: Any) -> bool:
+        return (
+            isinstance(repository, dict)
+            and type(repository.get("id")) is int
+            and repository["id"] > 0
+            and repository.get("name") == repository_name
+            and repository.get("url") == repository_url
+        )
+
     return (
         pull.get("number") == number
         and isinstance(head, dict)
-        and head.get("sha") == release_commit
+        and head.get("ref") == config.sync_branch
+        and head.get("sha") == head_commit
+        and exact_repository(head.get("repo"))
         and isinstance(base, dict)
         and base.get("ref") == "main"
+        and base.get("sha") == base_commit
+        and exact_repository(base.get("repo"))
     )
 
 
@@ -915,6 +1034,8 @@ def _validate_required_check_run(
     check_run_id: int,
     conclusion: str,
     details_url: str,
+    association_head: str | None = None,
+    association_base: str | None = None,
     external_id: str | None = None,
     output: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -934,13 +1055,23 @@ def _validate_required_check_run(
     ):
         raise ApprovalError("Required release validation check identity is invalid")
     associations = value.get("pull_requests")
+    expected_association_head = (
+        config.release_commit if association_head is None else association_head
+    )
+    expected_association_base = (
+        contract["publication_repair"]["base_commit"]
+        if association_base is None
+        else association_base
+    )
     # GitHub may clear check/run PR arrays after merge. At readiness, the live
     # open PR is verified separately; at authorization, the merged event and
     # two-parent merge are verified. Never accept a conflicting association.
     if associations != [] and not _required_check_pull_matches(
         associations,
+        config,
         number=contract["sync"]["pull_request"],
-        release_commit=config.release_commit,
+        head_commit=expected_association_head,
+        base_commit=expected_association_base,
     ):
         raise ApprovalError("Required release validation check association is invalid")
     if external_id is not None and value.get("external_id") != external_id:
@@ -1002,6 +1133,8 @@ def _verify_historical_required_check(
     config: SyncConfig,
     contract: Mapping[str, Any],
     *,
+    association_head: str,
+    association_base: str,
     work_actor: str,
 ) -> dict[str, Any]:
     required = _required_check_contract(contract)
@@ -1016,6 +1149,8 @@ def _verify_historical_required_check(
         check_run_id=historical["check_run_id"],
         conclusion="failure",
         details_url=historical["details_url"],
+        association_head=association_head,
+        association_base=association_base,
     )
     run = client.get(
         _path(config.repository, f"actions/runs/{historical['workflow_run_id']}")
@@ -1293,6 +1428,9 @@ def _listed_required_check(
     value: Any,
     config: SyncConfig,
     contract: Mapping[str, Any],
+    *,
+    association_head: str,
+    association_base: str,
 ) -> dict[str, Any]:
     required = _required_check_contract(contract)
     if not isinstance(value, dict):
@@ -1311,8 +1449,10 @@ def _listed_required_check(
             associations != []
             and not _required_check_pull_matches(
                 associations,
+                config,
                 number=contract["sync"]["pull_request"],
-                release_commit=config.release_commit,
+                head_commit=association_head,
+                base_commit=association_base,
             )
         )
         or status
@@ -1377,11 +1517,19 @@ def _index_required_checks(
     contract: Mapping[str, Any],
     *,
     latest: bool,
+    association_head: str,
+    association_base: str,
 ) -> dict[int, dict[str, Any]]:
     indexed: dict[int, dict[str, Any]] = {}
     suites: set[int] = set()
     for value in runs:
-        normalized = _listed_required_check(value, config, contract)
+        normalized = _listed_required_check(
+            value,
+            config,
+            contract,
+            association_head=association_head,
+            association_base=association_base,
+        )
         check_run_id = normalized["check_run_id"]
         check_suite_id = normalized["check_suite_id"]
         if check_run_id in indexed or (latest and check_suite_id in suites):
@@ -1404,7 +1552,7 @@ def _verify_exact_required_check_graphql(
     check: Mapping[str, Any],
     *,
     pull_request_state: str,
-    head_commit: str | None = None,
+    pull_request_head: str | None = None,
 ) -> None:
     owner, repository = config.repository.split("/", 1)
     locator = _required_check_locator(check)
@@ -1414,7 +1562,12 @@ def _verify_exact_required_check_graphql(
         "repository": repository,
         "pullRequest": contract["sync"]["pull_request"],
     }
-    expected_head = config.release_commit if head_commit is None else head_commit
+    execution_head = check.get("head_sha")
+    if not isinstance(execution_head, str) or COMMIT_RE.fullmatch(execution_head) is None:
+        raise ApprovalError("Required release validation check head is invalid")
+    expected_pull_head = (
+        execution_head if pull_request_head is None else pull_request_head
+    )
     for attempt in range(RECOVERY_CHECK_POLLS):
         payload = _graphql_read(
             client,
@@ -1437,7 +1590,7 @@ def _verify_exact_required_check_graphql(
             or not isinstance(pull, dict)
             or pull.get("number") != contract["sync"]["pull_request"]
             or pull.get("state") != pull_request_state
-            or pull.get("headRefOid") != expected_head
+            or pull.get("headRefOid") != expected_pull_head
         ):
             raise ApprovalError(
                 "Exact recovery check does not satisfy the protected pull-request requirement"
@@ -1469,7 +1622,7 @@ def _verify_exact_required_check_graphql(
             or not isinstance(suite, dict)
             or suite.get("databaseId") != locator["check_suite_id"]
             or not isinstance(commit, dict)
-            or commit.get("oid") != expected_head
+            or commit.get("oid") != execution_head
             or not isinstance(check_repository, dict)
             or check_repository.get("nameWithOwner") != config.repository
         ):
@@ -1484,8 +1637,18 @@ def _verify_historical_check_is_current(
     config: SyncConfig,
     contract: Mapping[str, Any],
     historical: Mapping[str, Any],
+    *,
+    association_head: str,
+    association_base: str,
 ) -> None:
-    indexed = _index_required_checks(runs, config, contract, latest=True)
+    indexed = _index_required_checks(
+        runs,
+        config,
+        contract,
+        latest=True,
+        association_head=association_head,
+        association_base=association_base,
+    )
     locator = _required_check_locator(historical)
     listed = indexed.get(locator["check_run_id"])
     if listed is None or not _same_required_check_locator(listed, locator):
@@ -1507,8 +1670,18 @@ def _published_check_is_current(
     config: SyncConfig,
     contract: Mapping[str, Any],
     current: Mapping[str, Any],
+    *,
+    association_head: str,
+    association_base: str,
 ) -> bool:
-    indexed = _index_required_checks(runs, config, contract, latest=True)
+    indexed = _index_required_checks(
+        runs,
+        config,
+        contract,
+        latest=True,
+        association_head=association_head,
+        association_base=association_base,
+    )
     locator = _required_check_locator(current)
     listed = indexed.get(locator["check_run_id"])
     if listed is not None:
@@ -1519,6 +1692,8 @@ def _published_check_is_current(
             check_run_id=locator["check_run_id"],
             conclusion="success",
             details_url=current["details_url"],
+            association_head=association_head,
+            association_base=association_base,
             external_id=current["external_id"],
         )
         if not _same_required_check_locator(listed, locator):
@@ -1546,8 +1721,18 @@ def _published_check_history_is_present(
     contract: Mapping[str, Any],
     current: Mapping[str, Any],
     historical: Mapping[str, Any],
+    *,
+    association_head: str,
+    association_base: str,
 ) -> bool:
-    indexed = _index_required_checks(runs, config, contract, latest=False)
+    indexed = _index_required_checks(
+        runs,
+        config,
+        contract,
+        latest=False,
+        association_head=association_head,
+        association_base=association_base,
+    )
     current_locator = _required_check_locator(current)
     historical_locator = _required_check_locator(historical)
     current_listed = indexed.get(current_locator["check_run_id"])
@@ -1561,6 +1746,8 @@ def _published_check_history_is_present(
         check_run_id=current_locator["check_run_id"],
         conclusion="success",
         details_url=current["details_url"],
+        association_head=association_head,
+        association_base=association_base,
         external_id=current["external_id"],
     )
     _validate_required_check_run(
@@ -1570,6 +1757,8 @@ def _published_check_history_is_present(
         check_run_id=historical_locator["check_run_id"],
         conclusion="failure",
         details_url=historical["details_url"],
+        association_head=association_head,
+        association_base=association_base,
     )
     if not _same_required_check_locator(
         current_listed, current_locator
@@ -1587,6 +1776,8 @@ def _verify_published_recovery_check(
     lane_jobs: Sequence[Mapping[str, Any]],
     recorded: Mapping[str, Any],
     *,
+    association_head: str,
+    association_base: str,
     pull_request_state: str,
     work_actor: str,
     require_current_pr: bool = True,
@@ -1640,7 +1831,12 @@ def _verify_published_recovery_check(
         raise ApprovalError("Recovery required-check evidence changed")
     _verify_required_check_protection(client, config, contract)
     historical = _verify_historical_required_check(
-        client, config, contract, work_actor=work_actor
+        client,
+        config,
+        contract,
+        association_head=association_head,
+        association_base=association_base,
+        work_actor=work_actor,
     )
     current = client.get(_path(config.repository, f"check-runs/{check_run_id}"))
     checked = _validate_required_check_run(
@@ -1650,6 +1846,8 @@ def _verify_published_recovery_check(
         check_run_id=check_run_id,
         conclusion="success",
         details_url=canonical_details_url,
+        association_head=association_head,
+        association_base=association_base,
         external_id=external_id,
         output=expected_payload["output"],
     )
@@ -1665,7 +1863,14 @@ def _verify_published_recovery_check(
         latest = _check_runs_for_release(
             client, config, contract, filter_value="latest"
         )
-        if _published_check_is_current(latest, config, contract, checked):
+        if _published_check_is_current(
+            latest,
+            config,
+            contract,
+            checked,
+            association_head=association_head,
+            association_base=association_base,
+        ):
             break
         if attempt + 1 < RECOVERY_CHECK_POLLS:
             client.sleeper(RECOVERY_CHECK_POLL_SECONDS)
@@ -1678,6 +1883,7 @@ def _verify_published_recovery_check(
             contract,
             checked,
             pull_request_state=pull_request_state,
+            pull_request_head=association_head,
         )
     all_runs = []
     for attempt in range(RECOVERY_CHECK_POLLS):
@@ -1685,7 +1891,13 @@ def _verify_published_recovery_check(
             client, config, contract, filter_value="all"
         )
         if _published_check_history_is_present(
-            all_runs, config, contract, checked, historical
+            all_runs,
+            config,
+            contract,
+            checked,
+            historical,
+            association_head=association_head,
+            association_base=association_base,
         ):
             break
         if attempt + 1 < RECOVERY_CHECK_POLLS:
@@ -1706,20 +1918,35 @@ def _publish_recovery_check(
     work_actor: str,
 ) -> dict[str, Any]:
     required = _required_check_contract(contract)
+    association_head = config.release_commit
+    association_base = contract["publication_repair"]["base_commit"]
     _verify_required_check_protection(client, config, contract)
     historical = _verify_historical_required_check(
-        client, config, contract, work_actor=work_actor
+        client,
+        config,
+        contract,
+        association_head=association_head,
+        association_base=association_base,
+        work_actor=work_actor,
     )
     previous = _check_runs_for_release(
         client, config, contract, filter_value="latest"
     )
-    _verify_historical_check_is_current(previous, config, contract, historical)
+    _verify_historical_check_is_current(
+        previous,
+        config,
+        contract,
+        historical,
+        association_head=association_head,
+        association_base=association_base,
+    )
     _verify_exact_required_check_graphql(
         client,
         config,
         contract,
         historical,
         pull_request_state="OPEN",
+        pull_request_head=association_head,
     )
     payload, binding_digest, external_id = _recovery_check_payload(
         config, contract, attestation, artifact, lane_jobs
@@ -1741,6 +1968,8 @@ def _publish_recovery_check(
         check_run_id=check_run_id,
         conclusion="success",
         details_url=canonical_details_url,
+        association_head=association_head,
+        association_base=association_base,
         external_id=external_id,
         output=payload["output"],
     )
@@ -1769,6 +1998,8 @@ def _publish_recovery_check(
         artifact,
         lane_jobs,
         recorded,
+        association_head=association_head,
+        association_base=association_base,
         pull_request_state="OPEN",
         work_actor=work_actor,
     )
@@ -2152,6 +2383,8 @@ def _verify_partial_recovery_publication(
     contract: Mapping[str, Any],
     attestation: Mapping[str, Any],
     *,
+    association_head: str,
+    association_base: str,
     pull_request_state: str,
     work_actor: str,
     require_current_pr: bool = True,
@@ -2241,6 +2474,8 @@ def _verify_partial_recovery_publication(
         artifact,
         lane_jobs,
         required_check,
+        association_head=association_head,
+        association_base=association_base,
         pull_request_state=pull_request_state,
         work_actor=work_actor,
         require_current_pr=require_current_pr,
@@ -2788,7 +3023,14 @@ def ready_recovery(
     client = GitHubClient(
         config.api_url, token, transport=transport, sleeper=sleeper
     )
-    _get_pr(client, config, sync["pull_request"], "open")
+    _get_pr(
+        client,
+        config,
+        sync["pull_request"],
+        "open",
+        expected_head=release["commit"],
+        expected_base=publication_commit,
+    )
     if _read_ref(client, config, "main") != publication_commit:
         raise ApprovalError("Recovery publication repair is not the current main tip")
     _verify_release(client, config, sync=True)
@@ -2867,6 +3109,8 @@ def ready_recovery(
             config,
             contract,
             attestation,
+            association_head=release["commit"],
+            association_base=publication_commit,
             pull_request_state="OPEN",
             work_actor=work_actor,
         )
@@ -2914,6 +3158,8 @@ def ready_recovery(
             config,
             contract,
             attestation,
+            association_head=release["commit"],
+            association_base=publication_commit,
             pull_request_state="OPEN",
             work_actor=work_actor,
         )
@@ -2937,7 +3183,14 @@ def ready_recovery(
     if _read_ref(client, config, "main") != publication_commit:
         raise ApprovalError("Recovery publication repair moved after check verification")
     _verify_release(client, config, sync=True)
-    _get_pr(client, config, sync["pull_request"], "open")
+    _get_pr(
+        client,
+        config,
+        sync["pull_request"],
+        "open",
+        expected_head=release["commit"],
+        expected_base=publication_commit,
+    )
     validation_artifact = final_artifact
     if any(
         _marker_payload(item.get("body"), READY_PREFIX) is not None
@@ -3043,12 +3296,13 @@ def ready_recovery_update(
     output: Path,
     sync_update: Mapping[str, Any],
     sync_repair_readiness: Mapping[str, Any],
+    check_association_repair_readiness: Mapping[str, Any],
     work_actor: str = "",
     transport=None,
     sleeper: Callable[[float], None] = time.sleep,
     polls: int = SOURCE_CI_POLLS,
 ) -> dict[str, Any]:
-    """Supersede stale schema-7 readiness after one reviewed PR update."""
+    """Supersede schema-7 readiness after the reviewed second PR update."""
 
     release = contract["release"]
     sync = contract["sync"]
@@ -3066,6 +3320,7 @@ def ready_recovery_update(
         raise ApprovalError("Recovery repository does not match its contract")
     update = _sync_update_evidence(sync_update, contract)
     repair = update["sync_repair"]
+    association_repair = update["check_association_repair"]
     if update["sync_head_commit"] == release["commit"]:
         raise ApprovalError("Updated synchronization head still aliases the release commit")
     published_repair = _feature_readiness(
@@ -3074,6 +3329,15 @@ def ready_recovery_update(
         merge_source_commit=repair["sync_repair_commit"],
         expected_pull_request=repair["pull_request"],
         expected_feature_head=repair["feature_head"],
+    )
+    published_association_repair = _feature_readiness(
+        check_association_repair_readiness,
+        config,
+        merge_source_commit=association_repair[
+            "check_association_repair_commit"
+        ],
+        expected_pull_request=association_repair["pull_request"],
+        expected_feature_head=association_repair["feature_head"],
     )
     client = GitHubClient(config.api_url, token, transport=transport, sleeper=sleeper)
     comments = _comments(client, config, sync["pull_request"])
@@ -3086,10 +3350,19 @@ def ready_recovery_update(
         for item in comments
     ):
         raise ApprovalError("A current readiness marker already exists for this pull request")
-    if _read_ref(client, config, "main") != repair["sync_repair_commit"]:
+    if (
+        _read_ref(client, config, "main")
+        != association_repair["check_association_repair_commit"]
+    ):
         raise ApprovalError("Reviewed synchronization base is not current main")
     _verify_release(client, config, sync=False)
     _verify_sync_repair_remote(client, config, repair, work_actor=work_actor)
+    _verify_check_association_repair_remote(
+        client,
+        config,
+        association_repair,
+        work_actor=work_actor,
+    )
     repair_run = _main_ci_run(client, config, repair["sync_repair_commit"])
     _verify_main_run_for_commit(
         client,
@@ -3098,6 +3371,18 @@ def ready_recovery_update(
         repair_run["id"],
         repair_run["run_attempt"],
     )
+    association_repair_run = _main_ci_run(
+        client,
+        config,
+        association_repair["check_association_repair_commit"],
+    )
+    _verify_main_run_for_commit(
+        client,
+        config,
+        association_repair["check_association_repair_commit"],
+        association_repair_run["id"],
+        association_repair_run["run_attempt"],
+    )
     _verify_sync_update_remote(client, config, contract, update)
     _get_pr(
         client,
@@ -3105,7 +3390,7 @@ def ready_recovery_update(
         sync["pull_request"],
         "open",
         expected_head=update["sync_head_commit"],
-        expected_base=repair["sync_repair_commit"],
+        expected_base=association_repair["check_association_repair_commit"],
         require_mergeable=True,
     )
     _verify_historical_recovery_remote(
@@ -3113,6 +3398,9 @@ def ready_recovery_update(
         config,
         contract,
         historical_evidence,
+        association_head=update["sync_head_commit"],
+        association_base=association_repair["check_association_repair_commit"],
+        pull_request_state="OPEN",
         work_actor=work_actor,
     )
     source_run = _source_ci_run(
@@ -3129,13 +3417,17 @@ def ready_recovery_update(
         contract,
         number=sync["pull_request"],
         head_commit=update["sync_head_commit"],
+        base_commit=association_repair["check_association_repair_commit"],
         run_id=source_run["id"],
         run_attempt=source_run["run_attempt"],
         pull_request_state="OPEN",
     )
 
     # Re-read every mutable edge after the potentially long native-check poll.
-    if _read_ref(client, config, "main") != repair["sync_repair_commit"]:
+    if (
+        _read_ref(client, config, "main")
+        != association_repair["check_association_repair_commit"]
+    ):
         raise ApprovalError("Main advanced before updated recovery readiness")
     _verify_release(client, config, sync=False)
     _verify_sync_update_remote(client, config, contract, update)
@@ -3145,7 +3437,7 @@ def ready_recovery_update(
         sync["pull_request"],
         "open",
         expected_head=update["sync_head_commit"],
-        expected_base=repair["sync_repair_commit"],
+        expected_base=association_repair["check_association_repair_commit"],
         require_mergeable=True,
     )
     final_comments = _comments(client, config, sync["pull_request"])
@@ -3169,6 +3461,7 @@ def ready_recovery_update(
         contract,
         number=sync["pull_request"],
         head_commit=update["sync_head_commit"],
+        base_commit=association_repair["check_association_repair_commit"],
         run_id=source_run["id"],
         run_attempt=source_run["run_attempt"],
         pull_request_state="OPEN",
@@ -3190,6 +3483,14 @@ def ready_recovery_update(
         "preflight_run_id": historical_payload["preflight_run_id"],
         "pull_request": sync["pull_request"],
         "recovery_validation": {
+            "check_association_repair": association_repair,
+            "check_association_repair_readiness": published_association_repair,
+            "check_association_repair_validation_run_attempt": (
+                association_repair_run["run_attempt"]
+            ),
+            "check_association_repair_validation_run_id": association_repair_run[
+                "id"
+            ],
             "mode": "published-release-sync-update",
             "native_required_check": native_check,
             "sync_repair": repair,
@@ -3202,7 +3503,9 @@ def ready_recovery_update(
         "schema_version": CURRENT_RECOVERY_SCHEMA_VERSION,
         "source_commit": release["source_commit"],
         "supersedes": dict(contract["historical_readiness"]),
-        "sync_base_commit": repair["sync_repair_commit"],
+        "sync_base_commit": association_repair[
+            "check_association_repair_commit"
+        ],
         "sync_head_commit": update["sync_head_commit"],
         "sync_head_tree": update["sync_head_tree"],
         "sync_validation_run_attempt": source_run["run_attempt"],
@@ -3714,6 +4017,9 @@ def _verify_historical_recovery_remote(
     contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
     *,
+    association_head: str,
+    association_base: str,
+    pull_request_state: str,
     work_actor: str,
 ) -> dict[str, Any]:
     _verify_main_run(
@@ -3778,9 +4084,10 @@ def _verify_historical_recovery_remote(
         config,
         contract,
         evidence["attestation"],
-        pull_request_state="OPEN",
+        association_head=association_head,
+        association_base=association_base,
+        pull_request_state=pull_request_state,
         work_actor=work_actor,
-        require_current_pr=False,
     )
     if (
         artifact["id"] != evidence["artifact_id"]
@@ -3847,6 +4154,10 @@ def _validate_current_recovery_ready_payload(
     feature_readiness = _feature_readiness(payload.get("feature_readiness"), config)
     recovery = payload.get("recovery_validation")
     expected_recovery_keys = {
+        "check_association_repair",
+        "check_association_repair_readiness",
+        "check_association_repair_validation_run_attempt",
+        "check_association_repair_validation_run_id",
         "mode",
         "native_required_check",
         "sync_repair",
@@ -3859,7 +4170,14 @@ def _validate_current_recovery_ready_payload(
     if recovery.get("mode") != "published-release-sync-update":
         raise ApprovalError("Current recovery validation mode is invalid")
     sync_repair = _sync_repair_evidence(recovery.get("sync_repair"), contract)
-    if payload["sync_base_commit"] != sync_repair["sync_repair_commit"]:
+    association_repair = _check_association_repair_evidence(
+        recovery.get("check_association_repair"), contract
+    )
+    if (
+        payload["sync_base_commit"]
+        != association_repair["check_association_repair_commit"]
+        or association_repair["sync_repair"] != sync_repair
+    ):
         raise ApprovalError("Current recovery synchronization base changed")
     repair_readiness = _feature_readiness(
         recovery.get("sync_repair_readiness"),
@@ -3875,6 +4193,24 @@ def _validate_current_recovery_ready_payload(
     repair_attempt = _safe_int(
         "Sync-head repair Validate PR run attempt",
         recovery.get("sync_repair_validation_run_attempt"),
+        maximum=10**6,
+    )
+    association_repair_readiness = _feature_readiness(
+        recovery.get("check_association_repair_readiness"),
+        config,
+        merge_source_commit=association_repair[
+            "check_association_repair_commit"
+        ],
+        expected_pull_request=association_repair["pull_request"],
+        expected_feature_head=association_repair["feature_head"],
+    )
+    association_repair_run_id = _safe_int(
+        "Check-association repair Validate PR run ID",
+        recovery.get("check_association_repair_validation_run_id"),
+    )
+    association_repair_attempt = _safe_int(
+        "Check-association repair Validate PR run attempt",
+        recovery.get("check_association_repair_validation_run_attempt"),
         maximum=10**6,
     )
     sync_run_id = _safe_int(
@@ -3922,6 +4258,10 @@ def _validate_current_recovery_ready_payload(
         "main_attempt": contract["main_validation"]["run_attempt"],
         "main_run_id": contract["main_validation"]["run_id"],
         "mode": "published-release-sync-update",
+        "check_association_repair": association_repair,
+        "check_association_repair_attempt": association_repair_attempt,
+        "check_association_repair_readiness": association_repair_readiness,
+        "check_association_repair_run_id": association_repair_run_id,
         "native_required_check": dict(native),
         "preflight_artifact_digest": preflight["artifact_digest"],
         "preflight_artifact_id": preflight["artifact_id"],
@@ -4069,6 +4409,7 @@ def _verify_native_sync_validation(
     *,
     number: int,
     head_commit: str,
+    base_commit: str,
     run_id: int,
     run_attempt: int,
     pull_request_state: str,
@@ -4148,12 +4489,20 @@ def _verify_native_sync_validation(
         or not isinstance(suite, dict)
         or pull_request_state == "OPEN"
         and not _required_check_pull_matches(
-            associations, number=number, release_commit=head_commit
+            associations,
+            config,
+            number=number,
+            head_commit=head_commit,
+            base_commit=base_commit,
         )
         or pull_request_state == "MERGED"
         and associations != []
         and not _required_check_pull_matches(
-            associations, number=number, release_commit=head_commit
+            associations,
+            config,
+            number=number,
+            head_commit=head_commit,
+            base_commit=base_commit,
         )
     ):
         raise ApprovalError("Updated sync PR required check identity is invalid")
@@ -4165,7 +4514,7 @@ def _verify_native_sync_validation(
         contract,
         check,
         pull_request_state=pull_request_state,
-        head_commit=head_commit,
+        pull_request_head=head_commit,
     )
     return {
         "app_id": required["app_id"],
@@ -4298,10 +4647,19 @@ def _authorize_current_recovery(
 
     _verify_release(client, config, sync=False)
     repair = evidence["sync_repair"]
+    association_repair = evidence["check_association_repair"]
     _verify_sync_repair_remote(client, config, repair, work_actor=work_actor)
+    _verify_check_association_repair_remote(
+        client,
+        config,
+        association_repair,
+        work_actor=work_actor,
+    )
     update = {
         "base_commit": evidence["sync_base_commit"],
+        "check_association_repair": association_repair,
         "initial_head_commit": sync["initial_head_commit"],
+        "previous_head_commit": sync["prior_head_commit"],
         "pull_request": number,
         "release_commit": release["commit"],
         "sync_branch": sync["branch"],
@@ -4334,15 +4692,25 @@ def _authorize_current_recovery(
     _verify_main_run_for_commit(
         client,
         config,
-        evidence["sync_base_commit"],
+        repair["sync_repair_commit"],
         evidence["sync_repair_run_id"],
         evidence["sync_repair_attempt"],
+    )
+    _verify_main_run_for_commit(
+        client,
+        config,
+        association_repair["check_association_repair_commit"],
+        evidence["check_association_repair_run_id"],
+        evidence["check_association_repair_attempt"],
     )
     _verify_historical_recovery_remote(
         client,
         config,
         contract,
         historical_evidence,
+        association_head=sync_head_commit,
+        association_base=evidence["sync_base_commit"],
+        pull_request_state="MERGED",
         work_actor=work_actor,
     )
     native = _verify_native_sync_validation(
@@ -4351,6 +4719,7 @@ def _authorize_current_recovery(
         contract,
         number=number,
         head_commit=sync_head_commit,
+        base_commit=evidence["sync_base_commit"],
         run_id=evidence["sync_run_id"],
         run_attempt=evidence["sync_attempt"],
         pull_request_state="MERGED",
@@ -4689,6 +5058,8 @@ def authorize(
                 config,
                 contract,
                 evidence["attestation"],
+                association_head=release_commit,
+                association_base=evidence["publication_commit"],
                 pull_request_state="MERGED",
                 work_actor=work_actor,
             )
@@ -4824,6 +5195,8 @@ def authorize(
                 config,
                 contract,
                 evidence["attestation"],
+                association_head=release_commit,
+                association_base=evidence["publication_commit"],
                 pull_request_state="MERGED",
                 work_actor=work_actor,
             )
@@ -5059,6 +5432,9 @@ def _parser() -> argparse.ArgumentParser:
     recovery_update_parser.add_argument(
         "--sync-repair-readiness", type=Path, required=True
     )
+    recovery_update_parser.add_argument(
+        "--check-association-repair-readiness", type=Path, required=True
+    )
     recovery_update_parser.add_argument("--work-actor", default="")
     authorize_parser.add_argument("--actor", required=True)
     authorize_parser.add_argument("--triggering-actor", required=True)
@@ -5205,6 +5581,14 @@ def main(
             repair_readiness = json.loads(repair_readiness_raw)
             if repair_readiness_raw != _canonical(repair_readiness) + "\n":
                 raise ApprovalError("Sync-head repair readiness is not canonical")
+            association_readiness_raw = (
+                args.check_association_repair_readiness.read_text(encoding="ascii")
+            )
+            association_readiness = json.loads(association_readiness_raw)
+            if association_readiness_raw != _canonical(association_readiness) + "\n":
+                raise ApprovalError(
+                    "Check-association repair readiness is not canonical"
+                )
             report = ready_recovery_update(
                 contract,
                 token,
@@ -5215,6 +5599,7 @@ def main(
                 output=args.output,
                 sync_update=sync_update_report["sync_update"],
                 sync_repair_readiness=repair_readiness,
+                check_association_repair_readiness=association_readiness,
                 work_actor=args.work_actor,
             )
             output_values = report["ready"]

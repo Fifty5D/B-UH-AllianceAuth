@@ -1542,6 +1542,16 @@ class PlatformConfigurationContracts(TestCase):
         self.assertEqual(contract["repair"]["pull_request"], 55)
         self.assertEqual(contract["publication_repair"]["pull_request"], 56)
         self.assertEqual(
+            contract["check_association_repair"],
+            {
+                "allowed_paths": list(
+                    validation_recovery.CHECK_ASSOCIATION_REPAIR_PATHS
+                ),
+                "base_commit": "8795ebf2e82b0bc204047b0b7834ee23cd24edb6",
+                "pull_request": 59,
+            },
+        )
+        self.assertEqual(
             contract["publication_repair"]["base_commit"],
             "f064694cca7e9d1147a87b880636a94f5c5cbe94",
         )
@@ -1696,6 +1706,12 @@ class PlatformConfigurationContracts(TestCase):
                 "release_commit": "${{ steps.contract.outputs.release_commit }}",
                 "source_commit": "${{ steps.contract.outputs.source_commit }}",
                 "sync_head_commit": "${{ steps.contract.outputs.sync_head_commit }}",
+                "check_association_repair_commit": (
+                    "${{ steps.contract.outputs.check_association_repair_commit }}"
+                ),
+                "check_association_repair_feature_head": (
+                    "${{ steps.contract.outputs.check_association_repair_feature_head }}"
+                ),
                 "sync_repair_commit": "${{ steps.contract.outputs.sync_repair_commit }}",
                 "sync_repair_feature_head": (
                     "${{ steps.contract.outputs.sync_repair_feature_head }}"
@@ -1714,14 +1730,16 @@ class PlatformConfigurationContracts(TestCase):
         )
         for required in (
             "PUBLISH UPDATED V0.6.2 READINESS",
-            "sync-repair",
+            "check-association-repair",
             "sync-update",
             "pulls/52",
             '"6074b965cbd2e6ab2630cd539ee455b8d419aef6"',
             "platform_approval.py recover-ready-update",
             "--pull-request 57",
+            "--pull-request 59",
             "--sync-update build/sync-update.json",
             "--sync-repair-readiness build/sync-repair-readiness.json",
+            "--check-association-repair-readiness build/check-association-repair-readiness.json",
         ):
             self.assertIn(required, synchronized_text)
         self.assertNotIn("checks: write", synchronized_text)
@@ -1769,7 +1787,7 @@ class PlatformConfigurationContracts(TestCase):
             for step in reusable["jobs"]["release_ledger"]["steps"]
             if step["name"] == "Validate the release plan and change fragments"
         )
-        self.assertIn('report.get("schema_version") != 5', plan_step["run"])
+        self.assertIn('report.get("schema_version") != 6', plan_step["run"])
 
         automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
         fragment_step = next(
