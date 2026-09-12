@@ -3,6 +3,11 @@ name: Deploy Platform v2
 on:
   workflow_call:
     inputs:
+      approved_continuation:
+        description: Only the reviewed PR52 continuation in Deploy Production
+        required: false
+        default: false
+        type: boolean
       mode:
         description: Validate only, or perform the guarded production deployment
         required: true
@@ -182,6 +187,7 @@ jobs:
     steps:
       - name: Validate caller, mode, version, and immutable release ref
         env:
+          APPROVED_CONTINUATION: ${{ inputs.approved_continuation }}
           ACTOR: ${{ github.actor }}
           API_URL: ${{ github.api_url }}
           CONFIRMATION: ${{ inputs.confirmation }}
@@ -220,7 +226,15 @@ jobs:
           is_release_actor() {
             [[ "$1" == "${OWNER}" || (-n "${WORK_ACTOR}" && "$1" == "${WORK_ACTOR}") ]]
           }
-          case "${EVENT_NAME}:${MODE}" in
+          caller_event="${EVENT_NAME}"
+          if [[ "${APPROVED_CONTINUATION}" == "true" ]]; then
+            [[ "${EVENT_NAME}" == "workflow_dispatch" && "${MODE}" == "deploy" ]]
+            [[ "${GITHUB_WORKFLOW_REF}" == "${REPOSITORY}/.github/workflows/deploy-approved-platform-release.yml@refs/heads/main" ]]
+            [[ "${PLATFORM_VERSION}" == "0.6.2" ]]
+            [[ "${RELEASE_COMMIT}" == "6074b965cbd2e6ab2630cd539ee455b8d419aef6" ]]
+            caller_event=pull_request_target
+          fi
+          case "${caller_event}:${MODE}" in
             workflow_run:preflight)
               is_release_actor "${ACTOR}"
               is_release_actor "${TRIGGERING_ACTOR}"
@@ -322,9 +336,10 @@ jobs:
 
       - name: Stage the merge-owned approval verifier
         id: approval_source
-        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        if: ${{ (github.event_name == 'pull_request_target' || inputs.approved_continuation) && inputs.mode == 'deploy' }}
         env:
-          APPROVAL_SOURCE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+          APPROVED_CONTINUATION: ${{ inputs.approved_continuation }}
+          APPROVAL_SOURCE_COMMIT: ${{ github.sha }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           SYNC_HEAD_COMMIT: ${{ inputs.sync_head_commit }}
         run: |
@@ -337,12 +352,19 @@ jobs:
           [[ "$(git rev-parse FETCH_HEAD)" == "${APPROVAL_SOURCE_COMMIT}" ]]
           read -r -a parents <<<"$(git show -s --format='%P' "${APPROVAL_SOURCE_COMMIT}")"
           [[ "${#parents[@]}" -eq 2 ]]
-          [[ "${parents[1]}" == "${expected_sync_head}" ]]
+          if [[ "${APPROVED_CONTINUATION}" == "true" ]]; then
+            [[ "${parents[0]}" == "73569d32dc4f64fc1733cfc00b1d4c48928d5c5c" ]]
+          else
+            [[ "${parents[1]}" == "${expected_sync_head}" ]]
+          fi
 
           stage="${RUNNER_TEMP}/buh-platform-approval-source"
           [[ ! -e "${stage}" ]]
           mkdir "${stage}"
           required=(
+            ops/readiness.py
+            ops/release/approved_deployment_continuation.py
+            ops/release/deployment_evidence.py
             ops/release/buh_release.py
             ops/release/ledger.py
             ops/release/open_sync_pr.py
@@ -495,7 +517,7 @@ jobs:
           done
 
       - name: Reauthorize the queued production operation
-        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        if: ${{ (github.event_name == 'pull_request_target' || inputs.approved_continuation) && inputs.mode == 'deploy' }}
         env:
           APPROVAL_TOOL: ${{ steps.approval_source.outputs.tool }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -507,7 +529,7 @@ jobs:
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
-          python3 "${APPROVAL_TOOL}" authorize \
+          python3 "${APPROVAL_TOOL}" boundary \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
@@ -532,7 +554,7 @@ jobs:
             ' build/platform-deploy-boundary-initial.json >/dev/null
 
       - name: Download the still-retained production preflight artifact
-        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        if: ${{ (github.event_name == 'pull_request_target' || inputs.approved_continuation) && inputs.mode == 'deploy' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ inputs.preflight_artifact_id }}
@@ -543,7 +565,7 @@ jobs:
           merge-multiple: true
 
       - name: Reverify live feature readiness at the production boundary
-        if: ${{ github.event_name == 'pull_request_target' && inputs.mode == 'deploy' }}
+        if: ${{ (github.event_name == 'pull_request_target' || inputs.approved_continuation) && inputs.mode == 'deploy' }}
         env:
           APPROVAL_TOOL: ${{ steps.approval_source.outputs.tool }}
           EXPECTED_FEATURE_READINESS: ${{ inputs.feature_readiness }}
@@ -593,29 +615,12 @@ jobs:
               canonical + "\n", encoding="ascii"
           )
           PY
-          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
-          if [[ -n "${WORK_ACTOR}" ]]; then
-            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
-            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
-          fi
-          first_introduction=()
-          if [[ "${FEATURE_PR_NUMBER}" == "44" ]]; then
-            first_introduction=(--allow-first-introduction --first-introduction-pr 44)
-          fi
-          python3 ops/readiness.py published \
-            --repository "${REPOSITORY}" \
-            --pull-request "${FEATURE_PR_NUMBER}" \
-            --feature-head "${FEATURE_HEAD_SHA}" \
-            --merge-source-commit "${SOURCE_COMMIT}" \
-            "${allowed_mergers[@]}" \
-            "${first_introduction[@]}" \
-            --api-url "${GITHUB_API_URL}" \
-            --output "${current}" >/dev/null
-          cmp --silent "${expected}" "${current}"
+          # The staged boundary verifier owns the evidence policy. In particular,
+          # never execute the immutable release's older readiness CLI here.
           # This is deliberately the final remote read before SSH materialization.
           # It closes concurrency-queue, artifact deletion/expiry, and approval
           # replacement races after the potentially slower readiness verification.
-          python3 "${APPROVAL_TOOL}" authorize \
+          python3 "${APPROVAL_TOOL}" boundary \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
@@ -630,7 +635,7 @@ jobs:
             build/platform-deploy-boundary-initial.json \
             build/platform-deploy-boundary-final.json
           APPROVAL_PATH=build/platform-deploy-boundary-final.json \
-          CURRENT_PATH="${current}" python3 - <<'PY'
+          CURRENT_PATH="${expected}" python3 - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -713,7 +718,7 @@ jobs:
 
       - name: Collect post-operation observer diagnostics
         id: observer
-        if: always()
+        if: ${{ always() && steps.receiver.outcome != 'skipped' && steps.receiver.outcome != '' }}
         env:
           OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER || 'buh-observer' }}
           VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52' }}

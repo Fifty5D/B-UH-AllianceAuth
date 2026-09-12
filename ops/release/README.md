@@ -4,6 +4,71 @@ This directory contains a standard-library release planner and bundle verifier.
 It is deliberately separate from production deployment: it never edits an
 existing release directory and it never connects to the VPS.
 
+## Current v0.6.2 approved-deployment continuation (September 12)
+
+PR #52 is **already merged** at `73569d32dc4f64fc1733cfc00b1d4c48928d5c5c`.
+Its schema-8/v2 approval authorizes only immutable v0.6.2
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`, source
+`4f98e7cb559ee1a9b269ea1f94938678d2dac4df`, manifest
+`c9cf79d34c8b3f90556e405f338ee4c1e7818d9c686f0462eec7dca201b784f4`.
+Deploy Production `34679176355/1` failed in authorization; its deployment job
+was skipped. Preserve that failure history. Do not rerun it or merge/update #52.
+Older recovery/activation sequences below are historical, not instructions to
+repeat completed work.
+
+The temporary PR #51 readiness archive and both previews have expired. They are
+**not available** and are not re-created or relabeled. For this pinned recovery,
+the bot-published, approved release record retains their immutable identities and
+review digest as historical merge provenance. `deployment_evidence.py` rechecks
+the original feature's exact merge, pointer, validation and unchanged live review
+digest. It does not claim that old screenshots were inspected again. The exact
+release's retained full recovery validation, native synchronization validation,
+preflight, immutable refs, and original approval remain mandatory. Other releases
+still require ordinary live feature-readiness/preview verification. This narrow
+policy does not change `ready-for-work` or allow new feature merges without
+available previews.
+
+All retained artifacts required by release readiness or deployment must remain
+available, digest-matched, and have **more than 90 minutes remaining**. This exceeds
+the 65-minute production-job timeout. Missing/deleted/changed evidence, review
+revocation, a newer run, or queue delay fails closed before SSH. The pinned
+preflight `10083806725` expires `2026-09-16T01:07:13Z`: authorization must complete
+before `2026-09-15T23:37:13Z`, with additional time for queueing. Recovery artifact
+`10279641606` expires `2026-10-11T19:31:49Z`; failed-validation/publication evidence
+is also still required and rechecked. Expiry requires a separately reviewed fresh
+evidence path, never treating deleted bytes as retained or retrying production.
+
+Work continuation, after reviewing the corrective feature PR:
+
+1. Merge only `codex/complete-v062-approved-deployment` with the normal protected
+   merge-commit action directly onto the merged PR #52 commit. Its feature head
+   must have qualified trusted readiness and valid applicable previews. Leave
+   draft #58 separate. Wait for that exact main merge's Validate PR and Prepare
+   Release hold to pass. The merge itself does **not** deploy or build a release;
+   the narrowly extended hold preserves every unconsumed fragment and v0.6.3 hold.
+2. The single production continuation action is **Deploy Production → Run
+   workflow → branch `main` → `CONTINUE APPROVED V0.6.2`**, once, using Anthony's
+   repository-owner identity. This reviewed exception continues the existing
+   exact approval; it is not a new approval marker or the generic manual receiver
+   workflow. It rechecks the repair's full PR details, exact tested tree, allowed
+   paths, current readiness/preview, main validation, original failed/skipped
+   jobs, PR #52's still-matching merge approval, and all retained release evidence.
+   Any previous dispatch of this continuation (including failure/cancellation)
+   blocks another attempt and needs review. A newer main also blocks it.
+3. The reusable production workflow checks out **6074b965**, stages only the
+   reviewed approval tools from the corrective main merge, verifies their Git
+   hashes, and creates the archive using immutable v0.6.2's archive/runtime code.
+   The same evidence policy runs at the caller and queued/final boundaries;
+   immutable v0.6.2's older readiness CLI is never used as a second policy.
+   It then uses the protected production environment, separate forced-command
+   deploy/observer identities, verified backups, candidate switch, health checks,
+   stabilization and automatic application rollback. Monitor the result artifact
+   and PR #52 result comment; do not report success without runtime evidence.
+
+No receiver, Nginx, Discord, backup or journal maintenance is part of this path.
+Keep the release hold until production v0.6.2 is confirmed; retiring recovery is
+separate reviewed work. Codex implements/tests this path but never dispatches it.
+
 ## Inputs
 
 - `apps.toml` is the schema-versioned application registry.

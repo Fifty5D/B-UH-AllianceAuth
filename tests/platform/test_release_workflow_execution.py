@@ -439,6 +439,8 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             "Stage the merge-owned approval verifier",
         )
         required = (
+            "approved_deployment_continuation.py",
+            "deployment_evidence.py",
             "buh_release.py",
             "ledger.py",
             "open_sync_pr.py",
@@ -461,6 +463,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             )
             release_dir = origin / "ops/release"
             release_dir.mkdir(parents=True)
+            (origin / "ops/readiness.py").write_text("reviewed-readiness\n", encoding="utf-8")
             for name in required:
                 (release_dir / name).write_text(
                     f"source:{name}\n", encoding="utf-8"
@@ -526,6 +529,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                 checkout,
                 {
                     "APPROVAL_SOURCE_COMMIT": merge,
+                    "APPROVED_CONTINUATION": "false",
                     "GITHUB_OUTPUT": "../github-output.txt",
                     "RELEASE_COMMIT": published,
                     "RUNNER_TEMP": "../runner-temp",

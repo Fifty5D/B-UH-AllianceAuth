@@ -1,6 +1,13 @@
 name: Deploy Production
 
 on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: One reviewed continuation of PR52's existing approval; never a retry
+        required: true
+        type: choice
+        options: [CONTINUE APPROVED V0.6.2]
   pull_request_target:
     branches: [main]
     types: [closed]
@@ -19,7 +26,7 @@ defaults:
 jobs:
   authorize:
     name: Bind merge to ChatGPT approval and preflight
-    if: ${{ github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v') }}
+    if: ${{ (github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v')) || (github.event_name == 'workflow_dispatch' && inputs.confirmation == 'CONTINUE APPROVED V0.6.2') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -66,8 +73,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${{ github.sha }}" ]]
-          [[ "${{ github.sha }}" == "${{ github.event.pull_request.merge_commit_sha }}" ]]
-          python3 ops/release/platform_approval.py authorize \
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            [[ "${{ github.sha }}" == "${{ github.event.pull_request.merge_commit_sha }}" ]]
+          fi
+          python3 ops/release/platform_approval.py boundary \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
@@ -117,7 +126,7 @@ jobs:
           WORK_ACTOR: ${{ vars.BUH_CHATGPT_WORK_ACTOR }}
         run: |
           set -Eeuo pipefail
-          python3 ops/release/platform_approval.py authorize \
+          python3 ops/release/platform_approval.py boundary \
             --owner "${{ github.repository_owner }}" \
             --repository "${{ github.repository }}" \
             --actor "${{ github.actor }}" \
@@ -128,23 +137,6 @@ jobs:
             --api-url "${{ github.api_url }}" \
             --server-url "${{ github.server_url }}" \
             --output build/platform-deploy-approval-final.json >/dev/null
-          allowed_mergers=(--allowed-merger "${REPOSITORY_OWNER}")
-          if [[ -n "${WORK_ACTOR}" ]]; then
-            [[ "${WORK_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
-            allowed_mergers+=(--allowed-merger "${WORK_ACTOR}")
-          fi
-          first_introduction=()
-          if [[ "${FEATURE_PR_NUMBER}" == "44" ]]; then
-            first_introduction=(--allow-first-introduction --first-introduction-pr 44)
-          fi
-          python3 ops/readiness.py published \
-            --repository "${REPOSITORY}" \
-            --pull-request "${FEATURE_PR_NUMBER}" \
-            --feature-head "${FEATURE_HEAD_SHA}" \
-            --merge-source-commit "${SOURCE_COMMIT}" \
-            "${allowed_mergers[@]}" \
-            "${first_introduction[@]}" \
-            --output build/current-feature-readiness.json >/dev/null
           cmp --silent \
             build/platform-deploy-approval.json \
             build/platform-deploy-approval-final.json
@@ -153,25 +145,10 @@ jobs:
           import os
           from pathlib import Path
 
-          report_path = Path("build/platform-deploy-approval-final.json")
-          current_path = Path("build/current-feature-readiness.json")
-          report = json.loads(report_path.read_text(encoding="ascii"))
-          current_raw = current_path.read_text(encoding="ascii")
-          current = json.loads(current_raw)
-          canonical = json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n"
-          embedded = json.dumps(
-              report.get("feature_readiness"),
-              sort_keys=True,
-              separators=(",", ":"),
-          ) + "\n"
-          if current_raw != canonical:
-              raise SystemExit("Current feature readiness is not canonical")
-          if embedded != current_raw or report.get("feature_readiness") != current:
-              raise SystemExit("Current feature readiness differs from the approved record")
-          with Path(os.environ["GITHUB_OUTPUT"]).open(
-              "a", encoding="utf-8", newline="\n"
-          ) as output:
-              print(f"feature_readiness={canonical.rstrip()}", file=output)
+          report = json.loads(Path("build/platform-deploy-approval-final.json").read_text(encoding="ascii"))
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              value = json.dumps(report["feature_readiness"], sort_keys=True, separators=(",", ":"))
+              print(f"feature_readiness={value}", file=output)
           PY
 
   deploy:
@@ -180,6 +157,7 @@ jobs:
     uses: ./.github/workflows/deploy-platform-v2.yml
     with:
       mode: deploy
+      approved_continuation: ${{ github.event_name == 'workflow_dispatch' }}
       platform_version: ${{ needs.authorize.outputs.platform_version }}
       release_commit: ${{ needs.authorize.outputs.release_commit }}
       feature_pr_number: ${{ needs.authorize.outputs.feature_pr_number }}
@@ -210,7 +188,7 @@ jobs:
 
   report:
     name: Report deployment result for ChatGPT
-    if: ${{ always() && github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v') }}
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Sync platform release v'))) }}
     needs: [authorize, deploy]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -229,7 +207,7 @@ jobs:
           FEATURE_PR_NUMBER: ${{ needs.authorize.outputs.feature_pr_number }}
           GITHUB_TOKEN: ${{ github.token }}
           PLATFORM_VERSION: ${{ needs.authorize.outputs.platform_version }}
-          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          PULL_REQUEST: ${{ github.event.pull_request.number || 52 }}
           RELEASE_COMMIT: ${{ needs.authorize.outputs.release_commit }}
           REPOSITORY: ${{ github.repository }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
