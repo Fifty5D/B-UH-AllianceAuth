@@ -48,6 +48,7 @@ RUN python -m pip install \
 COPY platform/testauth/ /workspace/platform/testauth/
 COPY platform/baselines/ /workspace/platform/baselines/
 COPY tests/ /workspace/tests/
+COPY ops/ /workspace/ops/
 
 ENV PYTHONPATH=/workspace/platform/testauth \
     BUH_TEST_SETTINGS=testauth.settings.integration

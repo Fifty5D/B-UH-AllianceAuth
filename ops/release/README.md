@@ -6,6 +6,13 @@ existing release directory and it never connects to the VPS.
 
 ## Current v0.6.2 approved-deployment continuation (September 12)
 
+**Superseded by the post-migration failure:** PR #60 merged and dispatch
+`34713182347/1` reached the server. Its rollback verification failed on Celery
+worker names. The continuation below is consumed and must not be repeated. Use
+the [current worker recovery record](../deploy/WORKER-RECOVERY.md); release
+building remains held and another production action requires fresh review and
+approval after recovery is verified.
+
 PR #52 is **already merged** at `73569d32dc4f64fc1733cfc00b1d4c48928d5c5c`.
 Its schema-8/v2 approval authorizes only immutable v0.6.2
 `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, source

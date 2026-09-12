@@ -1567,7 +1567,7 @@ class DockerHostContracts(unittest.TestCase):
                                 "docker",
                                 "image",
                                 "tag",
-                                previous_image_pins[service],
+                                host.previous_images[service][0],
                                 f"aa-docker-{service}:latest",
                             ],
                             context=f"Previous image reference restoration for {service}",
@@ -2015,8 +2015,8 @@ class DockerHostContracts(unittest.TestCase):
                 nodes,
                 frozenset(
                     (
-                        "worker_" + containers[worker_services[0]][:12],
-                        "worker_services_" + containers[worker_services[1]][:12],
+                        "celery@worker_" + containers[worker_services[0]][:12],
+                        "celery@worker_services_" + containers[worker_services[1]][:12],
                     )
                 ),
             )
@@ -2313,6 +2313,8 @@ class DockerHostContracts(unittest.TestCase):
             with mock.patch.object(
                 host, "_capture_live_images", side_effect=capture_live
             ), mock.patch.object(
+                host, "_celery_health", side_effect=lambda: events.append("baseline-workers")
+            ), mock.patch.object(
                 host, "_capture_infrastructure_restart_baselines"
             ), mock.patch.object(
                 host, "_pin_previous_images"
@@ -2338,6 +2340,7 @@ class DockerHostContracts(unittest.TestCase):
                 host.prepare_candidate(make_bundle(root))
 
             self.assertLess(events.index("manifest"), events.index("previous"))
+            self.assertLess(events.index("baseline-workers"), events.index("manifest"))
             self.assertLess(events.index("previous"), events.index("build"))
 
     def test_collectstatic_routes_to_isolated_old_slots_and_rechecks_before_setup(self):

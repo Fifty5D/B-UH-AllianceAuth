@@ -556,7 +556,7 @@ jobs:
             trap - EXIT
             "${COMPOSE[@]}" ps -a >"${REPORT_DIR}/compose-ps.txt" 2>&1 || true
             "${COMPOSE[@]}" logs --no-color \
-              db redis fake-esi worker >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
+              db redis fake-esi worker worker_services >"${REPORT_DIR}/service-logs.txt" 2>&1 || true
             "${COMPOSE[@]}" down --volumes --remove-orphans \
               >"${REPORT_DIR}/teardown.log" 2>&1 || true
             exit "${result}"
@@ -578,9 +578,10 @@ jobs:
             python manage.py showmigrations --plan
           run_logged "${COMPOSE[@]}" run --rm test \
             python manage.py test --noinput --no-color tests.integration
-          run_logged "${COMPOSE[@]}" up -d --wait worker
+          run_logged "${COMPOSE[@]}" up -d --wait --scale worker=3 worker worker_services
           run_logged "${COMPOSE[@]}" run --rm test \
             python manage.py buh_test_celery --no-color
+          run_logged python3 tests/deploy/rehearse_celery_workers.py
 
       - name: Upload integration failure report
         if: failure()

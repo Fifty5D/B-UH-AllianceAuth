@@ -22,5 +22,6 @@ trap cleanup EXIT
 "${COMPOSE[@]}" run --rm test python manage.py showmigrations --plan
 "${COMPOSE[@]}" run --rm test python manage.py test --noinput --no-color \
     tests.integration
-"${COMPOSE[@]}" up -d --wait worker
+"${COMPOSE[@]}" up -d --wait --scale worker=3 worker worker_services
 "${COMPOSE[@]}" run --rm test python manage.py buh_test_celery --no-color
+python3 tests/deploy/rehearse_celery_workers.py

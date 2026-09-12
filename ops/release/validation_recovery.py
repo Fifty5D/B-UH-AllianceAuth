@@ -1712,6 +1712,38 @@ def validate_hold(
     """Hold v0.6.3 across the check-association repair and final sync."""
 
     current = _resolve(root, current_commit)
+    # PR #60's one-use continuation reached migrations and failed rollback
+    # verification. A reviewed receiver correction must not build v0.6.3 or
+    # consume fragments while that recovery remains unresolved. This is a hold
+    # only: it does not reopen the consumed production authorization.
+    worker_repair_base = "efdeebf9ff86a97cef18463605273a032403c4f0"
+    parents = _parents(root, current)
+    if parents[:1] == [worker_repair_base]:
+        permitted = {
+            "ops/deploy/docker_host.py", "ops/deploy/collect_worker_recovery.py",
+            "ops/deploy/worker_recovery.py", "tests/deploy/test_worker_completion.py",
+            "ops/deploy/README.md", "ops/deploy/WORKER-RECOVERY.md",
+            "ops/release/README.md", "ops/release/validation_recovery.py",
+            "changes/celery-worker-identity-recovery.toml",
+            "tests/deploy/test_docker_host.py", "tests/deploy/test_celery_identity.py",
+            "tests/deploy/test_worker_recovery.py", "tests/deploy/rehearse_celery_workers.py",
+            "tests/deploy/fixtures/celery-v062-workers.json",
+            "tests/integration/test_celery_nodenames.py",
+            "tests/release/test_worker_repair_hold.py",
+            "platform/testenv/compose.yml", "platform/testenv/Dockerfile",
+            "platform/testenv/run-integration.sh", ".github/workflows/reusable-source-tests.yml",
+        }
+        changed = set(_changed_paths(root, worker_repair_base, current))
+        if (
+            len(parents) != 2 or not changed or not changed <= permitted
+            or _tree(root, parents[1]) != _tree(root, current)
+        ):
+            raise ValidationRecoveryError("Worker identity repair is outside the bounded release hold")
+        previous = validate_hold(root, worker_repair_base, contract=contract)
+        return {**previous, "current_commit": current, "state": "worker-recovery-unverified-held",
+                "worker_repair": {"base_commit": worker_repair_base,
+                                  "feature_head": parents[1], "merge_commit": current},
+                "production_authorization": "consumed-requires-new-review-and-approval"}
     # The approved sync is now merged. Hold the next release across its one
     # reviewed, non-runtime deployment repair as well; never consume fragments.
     if _parents(root, current)[:1] == ["73569d32dc4f64fc1733cfc00b1d4c48928d5c5c"]:
