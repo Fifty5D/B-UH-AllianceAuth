@@ -1712,12 +1712,35 @@ def validate_hold(
     """Hold v0.6.3 across the check-association repair and final sync."""
 
     current = _resolve(root, current_commit)
+    # Continue the hold from the completed PR #61 merge; this log-reader repair
+    # does not authorize recovery, cleanup, a release build or a deployment.
+    log_repair_base = "4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc"
+    parents = _parents(root, current)
+    if parents[:1] == [log_repair_base]:
+        permitted = {
+            "ops/deploy/docker_host.py", "ops/deploy/worker_recovery.py",
+            "ops/deploy/WORKER-RECOVERY.md", "ops/release/validation_recovery.py",
+            "tests/deploy/test_docker_host.py", "tests/deploy/test_log_streaming.py",
+            "tests/deploy/test_worker_completion.py", "tests/deploy/test_log_reader_install.py",
+            "tests/platform/test_coordinated_recovery_rehearsal.py",
+            "tests/release/test_worker_repair_hold.py",
+            "changes/retained-recovery-log-streaming.toml",
+        }
+        changed = set(_changed_paths(root, log_repair_base, current))
+        if (
+            len(parents) != 2 or not changed or not changed <= permitted
+            or _tree(root, parents[1]) != _tree(root, current)
+        ):
+            raise ValidationRecoveryError("Retained log repair is outside the bounded release hold")
+        previous = validate_hold(root, log_repair_base, contract=contract)
+        return {**previous, "current_commit": current,
+                "retained_log_repair": {"base_commit": log_repair_base,
+                                        "feature_head": parents[1], "merge_commit": current}}
     # PR #60's one-use continuation reached migrations and failed rollback
     # verification. A reviewed receiver correction must not build v0.6.3 or
     # consume fragments while that recovery remains unresolved. This is a hold
     # only: it does not reopen the consumed production authorization.
     worker_repair_base = "efdeebf9ff86a97cef18463605273a032403c4f0"
-    parents = _parents(root, current)
     if parents[:1] == [worker_repair_base]:
         permitted = {
             "ops/deploy/docker_host.py", "ops/deploy/collect_worker_recovery.py",

@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -15,11 +16,14 @@ from ops.deploy.docker_host import DockerHost
 from ops.deploy.request_archive import build_archive
 from tests.deploy.test_celery_identity import workers
 from tests.deploy.test_docker_host import (
+    RETAINED_DISCORD_OWNER_LOG,
     make_config,
     prepare_upstream_backup,
     simulated_root_owned_lstat,
     write_host_files,
 )
+from tests.deploy import test_log_streaming as log_streaming
+from ops.release import recovery_policy
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -119,7 +123,15 @@ class WorkerCompletionTests(unittest.TestCase):
         extract_archive(output.read_bytes(), cls.payload)
 
     def test_exact_immutable_cold_plan_verify_complete_and_failures(self):
-        for failure in (None, "missing", "restart", "wrong-release", "missing-approval"):
+        for failure in (
+            None,
+            "missing",
+            "restart",
+            "wrong-release",
+            "missing-approval",
+            "fatal-log",
+            "incomplete-log",
+        ):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 config = plan(Path(tmp))
                 active = config.state_dir / "active-recovery.json"
@@ -143,6 +155,23 @@ class WorkerCompletionTests(unittest.TestCase):
                     }
 
                 events = []
+                real_popen = subprocess.Popen
+
+                def log_command(args, **kwargs):
+                    program = "import sys\n"
+                    if args[-1] == f"{6:064x}":  # services worker
+                        program += log_streaming.LogStreamingTests.noise()
+                        program += log_streaming.LogStreamingTests.output(
+                            RETAINED_DISCORD_OWNER_LOG.read_text()
+                        )
+                        if failure == "fatal-log":
+                            program += log_streaming.LogStreamingTests.output(
+                                "CRITICAL unrelated failure\n"
+                            )
+                        elif failure == "incomplete-log":
+                            program += "sys.stdout.write('INFO interrupted')"
+                    return real_popen([sys.executable, "-u", "-c", program], **kwargs)
+
                 with ExitStack() as stack:
                     stack.enter_context(
                         workers(
@@ -152,9 +181,48 @@ class WorkerCompletionTests(unittest.TestCase):
                     stack.enter_context(
                         mock.patch.object(host, "_capture_live_images", side_effect=capture)
                     )
+                    original_run = host._run
+
+                    def inspect(args, **kwargs):
+                        if "{{.State.Status}}|{{.Image}}|{{.RestartCount}}" in args:
+                            return "running|sha256:" + "a" * 64 + "|0"
+                        return original_run(args, **kwargs)
+
+                    def baseline(_bundle):
+                        owner = recovery_policy.load_policy()["host_baseline"][
+                            "discord_owner"
+                        ]
+                        host.recovery_baseline_verified = True
+                        host.recovery_discord_owner = (
+                            owner["guild_id"],
+                            owner["discord_user_id"],
+                            owner["auth_username"],
+                        )
+
+                    stack.enter_context(
+                        mock.patch.object(host, "_run", side_effect=inspect)
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            host, "_validate_recovery_host_baseline", side_effect=baseline
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch(
+                            "ops.deploy.docker_host.subprocess.Popen",
+                            side_effect=log_command,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            DockerHost,
+                            "compose_prefix",
+                            new_callable=mock.PropertyMock,
+                            return_value=["docker", "compose"],
+                        )
+                    )
                     for method in (
                         "_capture_infrastructure_restart_baselines",
-                        "_validate_recovery_host_baseline",
                         "_verify_previous_static_fallback",
                         "_verify_previous_static_manifest",
                         "_wait_for_slots",
@@ -182,9 +250,6 @@ class WorkerCompletionTests(unittest.TestCase):
                         mock.patch.object(
                             host, "_manage_live", return_value="[X] compatible"
                         )
-                    )
-                    stack.enter_context(
-                        mock.patch.object(host, "_scan_new_logs", return_value=())
                     )
                     stack.enter_context(
                         mock.patch.object(

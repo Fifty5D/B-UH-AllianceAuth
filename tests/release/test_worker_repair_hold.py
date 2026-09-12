@@ -22,6 +22,12 @@ def git(root, *args):
 
 class WorkerRepairHoldTests(unittest.TestCase):
     def test_receiver_repair_merge_preserves_release_and_fragments(self):
+        self.exercise_merge(BASE)
+
+    def test_retained_log_repair_merge_preserves_hold_from_merged_pr61(self):
+        self.exercise_merge("4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc")
+
+    def exercise_merge(self, base):
         with tempfile.TemporaryDirectory() as tmp:
             checkout = Path(tmp) / "checkout"
             git(
@@ -39,13 +45,13 @@ class WorkerRepairHoldTests(unittest.TestCase):
                 ("user.email", "worker@example.invalid"),
             ):
                 git(checkout, "config", key, value)
-            git(checkout, "checkout", "--quiet", "-b", "synthetic-worker-fix", BASE)
+            git(checkout, "checkout", "--quiet", "-b", "synthetic-worker-fix", base)
             file = checkout / "ops/deploy/docker_host.py"
             file.write_bytes((ROOT / "ops/deploy/docker_host.py").read_bytes())
             git(checkout, "add", "ops/deploy/docker_host.py")
             git(checkout, "commit", "--quiet", "-m", "synthetic receiver repair")
             head = git(checkout, "rev-parse", "HEAD")
-            git(checkout, "checkout", "--quiet", "-b", "synthetic-main", BASE)
+            git(checkout, "checkout", "--quiet", "-b", "synthetic-main", base)
             git(
                 checkout,
                 "merge",
@@ -69,7 +75,7 @@ class WorkerRepairHoldTests(unittest.TestCase):
                     checkout,
                     "diff",
                     "--name-only",
-                    BASE,
+                    base,
                     merge,
                     "--",
                     "releases",
@@ -86,7 +92,7 @@ class WorkerRepairHoldTests(unittest.TestCase):
             git(checkout, "add", "ops/readiness.py")
             git(checkout, "commit", "--quiet", "-m", "unrelated change")
             extra = git(checkout, "rev-parse", "HEAD")
-            git(checkout, "checkout", "--quiet", "-b", "synthetic-other-main", BASE)
+            git(checkout, "checkout", "--quiet", "-b", "synthetic-other-main", base)
             git(checkout, "merge", "--quiet", "--no-ff", extra, "-m", "unqualified merge")
             with self.assertRaisesRegex(
                 recovery.ValidationRecoveryError, "bounded release hold"

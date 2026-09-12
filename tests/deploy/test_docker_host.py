@@ -102,6 +102,7 @@ def owner_log_environment(
     changed_container: bool = False,
     changed_image: bool = False,
     rollback: bool = False,
+    streaming: bool = False,
 ):
     """Provide exact retained-container and per-container log boundaries."""
 
@@ -171,7 +172,14 @@ def owner_log_environment(
 
     if rollback:
         host.restart_baselines.clear()
-    with mock.patch.object(
+    transport = nullcontext() if streaming else mock.patch.object(
+        host, "_stream_log_lines",
+        side_effect=lambda args, **kwargs: fixture_log_stream(host, args, **kwargs),
+    )
+    with transport, mock.patch.object(
+        DockerHost, "compose_prefix", new_callable=mock.PropertyMock,
+        return_value=["docker", "compose"],
+    ), mock.patch.object(
         host, "_running_service_containers", side_effect=running
     ), mock.patch.object(host, "_run", side_effect=command), mock.patch.object(
         host, "_compose", return_value=""
@@ -356,7 +364,35 @@ def prepare_upstream_backup(host: DockerHost, config: ReceiverConfig) -> None:
     )
 
 
+def fixture_log_stream(host, args, *, deadline, context):
+    """Adapt legacy Docker string stubs, not the streaming reader or classifier.
+
+    test_log_streaming executes the actual subprocess/pipe boundary separately.
+    """
+    prefix = list(host.compose_prefix)
+    if list(args[:len(prefix)]) == prefix:
+        text = host._compose(*args[len(prefix):], bounded_output=True, context=context)
+    else:
+        text = host._run(args, bounded_output=True, context=context)
+    yield from text.splitlines()
+
+
 class DockerHostContracts(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.object(DockerHost, "_stream_log_lines", fixture_log_stream))
+        original_scan = DockerHost._scan_new_logs
+
+        def fixture_scan(host, *args, **kwargs):
+            # These legacy unit fixtures stub _compose and have no live .env.
+            # Keep Compose path/discovery tests outside this narrow adapter real.
+            with mock.patch.object(
+                DockerHost, "compose_prefix", new_callable=mock.PropertyMock,
+                return_value=["docker", "compose"],
+            ):
+                return original_scan(host, *args, **kwargs)
+
+        self.enterContext(mock.patch.object(DockerHost, "_scan_new_logs", fixture_scan))
+
     def test_database_restore_clone_cleanup_failure_blocks_backup_without_secret(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3104,7 +3140,10 @@ class DockerHostContracts(unittest.TestCase):
             config = make_config(Path(temporary))
             host = DockerHost(config)
             with mock.patch.object(
-                host, "_compose", return_value="CRITICAL nginx configuration failed\n"
+                host, "_compose", side_effect=lambda *args, **kwargs: (
+                    "CRITICAL nginx configuration failed\n"
+                    if args[-1] == config.redis_service else "INFO healthy\n"
+                )
             ) as compose, self.assertRaisesRegex(
                 DeploymentError, "nginx configuration failed"
             ):

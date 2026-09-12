@@ -1,9 +1,21 @@
-# Current worker-identity recovery — September 12, 2026
+# Current retained-log recovery — September 12, 2026
 
 This supersedes earlier deployment/receiver-maintenance sequences, not their
-evidence. PRs #52 and #60 are merged; main is
-`efdeebf9ff86a97cef18463605273a032403c4f0`. No code merge is a new production
+evidence. PRs #52, #60 and #61 are merged; the follow-up base is
+`4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc`. No code merge is a new production
 approval. The one-use `CONTINUE APPROVED V0.6.2` dispatch is **consumed**.
+
+Anthony has **already installed** PR #61's one-file worker repair, with result
+`receiver-file-repaired`. Do not replay its `worker_recovery install` command,
+the full receiver installer, or any receiver/Nginx maintenance. Its exact runtime
+is `c33fe29ed735e18f0c62bbbb31aecd7a6f3ee49a175a8c1c2ad8f33b90134ef8`;
+preserve `/etc/buh-platform-v2/WORKER-REPAIR.json` and its backup
+`/var/backups/buh-receiver-upgrade/worker-check-c33fe29ed735` unchanged.
+
+The next **verify**, not deploy, passed the corrected worker check but failed:
+`Retained owner-transition log scan for allianceauth_worker_services exceeded the bounded output limit`.
+Cleanup remains **not established**, with `preserve_resources: true`. This is
+not a new failed deployment or permission to remove safety resources.
 
 ## Established state and remaining evidence
 
@@ -31,9 +43,11 @@ approval. The one-use `CONTINUE APPROVED V0.6.2` dispatch is **consumed**.
   the phase as `invalid` because its display filter omitted digits; that display
   is not the plan's phase or evidence of corruption. The actual plan is parsed
   and hash-verified by the continuation, never reconstructed from that display.
-- Installed receiver source is `fc0229b71c50c1bcb15d37f3625189fd9a7cb495`;
-  `docker_host.py` SHA-256 is
-  `0aa449968b98038fd68aca1b093640bea76d3889c185dce298775943881f20fe`.
+- Base receiver source remains `fc0229b71c50c1bcb15d37f3625189fd9a7cb495`.
+  Its original `docker_host.py` SHA-256 was
+  `0aa449968b98038fd68aca1b093640bea76d3889c185dce298775943881f20fe`;
+  that file is retained in PR #61's backup, not currently installed. The installed
+  single-file override is the `c33fe29…` hash above.
   Original `INSTALL.json` is
   `d7b5c208f223720bfaf33525aff3bb3f116054b654015cbc7298e648fc959379`;
   original failed attempt journal is
@@ -55,6 +69,22 @@ blocker, not permission to retry or clean up.
 
 ## Corrected code and payload ownership
 
+The new log reader preserves the entire interval starting at
+`2026-09-12T19:09:32+00:00`. It streams Docker's complete output with a two-chunk
+queue, 64 KiB lines/batches and the existing per-command deadline (including
+classification); it neither tails logs nor changes the global 4 MiB command cap.
+Only possible owner records are temporarily spooled under a private `0700`
+directory, with a bounded SQLite cache. All records for the same source/second
+remain together, including out-of-order duplicated Celery/Alliance Auth output.
+No historical incident is forgotten when a read or batch boundary is crossed.
+The existing exact owner/guild/container/phase classifier remains authoritative.
+Individual owner records are bounded to 128 lines/64 KiB and one incident to
+512 KiB; ambiguity, overlong records, unfinished lines, read errors, nonzero exit,
+spool failure or deadline expiry fail verification and preserve resources.
+Temporary log data is removed on success/failure, never uploaded. Fatal-error
+detection and the narrow allowlist are unchanged. Linux pipe tests, late duplicate
+tests and the immutable-v0.6.2 cold-plan rehearsal cover these boundaries.
+
 Celery 5.6.3's worker CLI applies `host_format(default_nodename(value))`:
 `worker_%n` becomes `celery@worker_<short-hostname>`. The receiver now preserves
 that normalization order, explicit `name@host`, and supported host/process
@@ -71,9 +101,13 @@ The immutable archive builder packages only `REQUEST.json`, exact `release/`
 files and lineage manifests. It does not ship or execute `docker_host.py`.
 Checking out v0.6.2 on the runner therefore cannot repair the installed checker.
 
-The smallest release-preserving path is an explicitly approved **receiver-only
-correction**, with the reviewed `docker_host.py` and truthful installation
-provenance, followed by verified rollback completion. Application release bytes
+The smallest release-preserving path is a **second, separately approved one-file
+receiver correction**, using `worker_recovery install-logs`, never PR #61's
+`install`. The helper runs from a new exact reviewed root-owned source export;
+verification requires that staged `DockerHost` to match the newly installed file.
+Only `docker_host.py` is installed; `worker_recovery.py` is the reviewed staged
+continuation, not a receiver-library override. No runner/receiver-engine/archive
+substitution is involved. Application release bytes
 remain v0.6.2 at `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, source
 `4f98e7cb559ee1a9b269ea1f94938678d2dac4df`, manifest SHA-256
 `c9cf79d34c8b3f90556e405f338ee4c1e7818d9c686f0462eec7dca201b784f4`.
@@ -114,11 +148,18 @@ baseline/preflight command is not an activation shortcut for this changed host.
 
 ## Exact next Work action and payload preparation
 
-First review and merge **only this qualified repair PR**, preserving the v0.6.3
-hold. Do not dispatch deployment or a preflight. Ask Anthony for separate approval
-to install the one-file receiver correction; identify the reviewed commit and
-the SHA-256 of its Git blob `ops/deploy/docker_host.py`. Main/release bytes are not
-the receiver's activation identity. Do not repeat old receiver/Nginx maintenance.
+First review **only this qualified repair PR** and its trusted exact-head evidence,
+then Work may merge it with the v0.6.3 hold intact. Codex does not merge. Do not
+dispatch deployment or a preflight. Ask Anthony for a **new** approval to replace
+only installed `docker_host.py`, from `c33fe29…` to the reviewed log-reader hash.
+Approval must identify the qualified feature commit and this new Git-blob SHA-256:
+
+`d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9`
+
+The helper independently verifies the original `INSTALL.json`, old repair receipt
+and backup, original plan/journal/backup-manifest/config/upstream/engine/receiver
+pins, and installed `c33fe29…` bytes before activation. Any drift is a blocker,
+not permission to refresh pins, replay maintenance or discard a receipt.
 
 Prepare a fresh, clean LF checkout of the exact reviewed feature head (not the
 moving main ref). Run the required tests there. Export **only tracked files at
@@ -150,25 +191,41 @@ From that exact root-owned source directory, with `$RUNTIME_SHA256` and
 `$ARCHIVE_SHA256` set to the hashes just approved and `$ARCHIVE` the staged request:
 
 ```bash
-# Only after explicit receiver-file installation approval:
+# STOP unless Work/Anthony approved this exact new payload and source export.
+# Run under the same root-only, production-locked helper; do not use "install".
+set -euo pipefail
+RUNTIME_SHA256=d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9
+test "$(sha256sum ops/deploy/docker_host.py | cut -d' ' -f1)" = "$RUNTIME_SHA256"
+test "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" = "$ARCHIVE_SHA256"
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin PYTHONPATH="$PWD" \
-  /usr/bin/python3 -B -P -m ops.deploy.worker_recovery install \
+  /usr/bin/python3 -B -P -m ops.deploy.worker_recovery install-logs \
   --runtime-sha256 "$RUNTIME_SHA256" \
-  --confirm "INSTALL WORKER CHECK $RUNTIME_SHA256"
+  --confirm "INSTALL RETAINED LOG READER $RUNTIME_SHA256"
+```
 
-# Health verification; retains plans, backups, routes and safety slots:
+Require `receiver-log-reader-repaired`, matching old/new hashes and the additive
+receipt below. If installation fails, stop and inspect retained evidence; do not
+retry or delete its backup/receipt. After Work reviews successful activation,
+run the separately staged verification command (no preflight/cleanup/deploy):
+
+```bash
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin PYTHONPATH="$PWD" \
   /usr/bin/python3 -B -P -m ops.deploy.worker_recovery verify \
   --runtime-sha256 "$RUNTIME_SHA256" --archive "$ARCHIVE" \
   --archive-sha256 "$ARCHIVE_SHA256"
 ```
 
-The installer changes only the installed `docker_host.py`, atomically. It uses
-the production lock, verifies the confirmed original hashes, retains the original
-file and `INSTALL.json` in a new `worker-check-<hash-prefix>` receiver backup, and
-restores the old file on activation/verification failure. It does not claim a full
-receiver upgrade: original `INSTALL.json` stays unchanged, with an additive
-`/etc/buh-platform-v2/WORKER-REPAIR.json` describing the exact single-file override.
+The installer changes only installed `docker_host.py`, atomically. It uses the
+production lock, retains the installed **c33fe29…** file, original `INSTALL.json`
+and existing `WORKER-REPAIR.json` in a new
+`/var/backups/buh-receiver-upgrade/retained-logs-d75575649e7d` backup, and restores
+c33fe29… on activation failure. It never restores the older pre-PR-61 checker.
+Original `INSTALL.json`, PR #61's receipt and its backup are unchanged. A **new**
+`/etc/buh-platform-v2/RETAINED-LOG-REPAIR.json` binds both hashes, the new backup
+and the previous receipt's hash. Verify/complete require that intact receipt
+chain and both backups. A later health-verification failure leaves the approved
+log reader installed and preserves every recovery resource; it is not automatic
+permission to revert infrastructure or clean up.
 No wrapper, forced command, credentials, config, engine, release or service changes.
 
 Verification loads the actual retained plan and original immutable archive,

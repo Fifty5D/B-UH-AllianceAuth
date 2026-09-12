@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -884,6 +885,30 @@ def exercised_docker_boundary(
     def manage_container(_container: str, *arguments: str, **kwargs) -> str:
         return boundary.manage_runtime(*arguments, **kwargs)
 
+    real_stabilize = host.stabilize
+    real_health = host._functional_health
+    real_monotonic = time.monotonic
+
+    def health(*args, **kwargs):
+        with mock.patch("ops.deploy.docker_host.time.monotonic", real_monotonic):
+            return real_health(*args, **kwargs)
+
+    def stabilize(bundle):
+        # Advance only the synthetic stabilization window, not the independent
+        # deadlines used while reading/classifying complete retained logs.
+        with mock.patch("ops.deploy.docker_host.time.monotonic", side_effect=monotonic), mock.patch.object(
+            host, "_functional_health", side_effect=health
+        ):
+            return real_stabilize(bundle)
+
+    def log_stream(args, **kwargs):
+        prefix = list(host.compose_prefix)
+        if list(args[:len(prefix)]) == prefix:
+            text = boundary.compose(*args[len(prefix):], **kwargs)
+        else:
+            text = boundary.run(args, **kwargs)
+        yield from text.splitlines()
+
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(Path, "stat", synthetic_stat))
         stack.enter_context(
@@ -898,7 +923,7 @@ def exercised_docker_boundary(
             )
         )
         stack.enter_context(
-            mock.patch("ops.deploy.docker_host.time.monotonic", side_effect=monotonic)
+            mock.patch.object(host, "stabilize", side_effect=stabilize)
         )
         stack.enter_context(mock.patch("ops.deploy.docker_host.time.sleep"))
         stack.enter_context(
@@ -906,6 +931,9 @@ def exercised_docker_boundary(
         )
         stack.enter_context(mock.patch.object(host, "_compose", side_effect=boundary.compose))
         stack.enter_context(mock.patch.object(host, "_run", side_effect=boundary.run))
+        stack.enter_context(mock.patch.object(
+            host, "_stream_log_lines", side_effect=log_stream, create=True,
+        ))
         stack.enter_context(
             mock.patch.object(host, "_proxy_exec", side_effect=boundary.proxy)
         )
