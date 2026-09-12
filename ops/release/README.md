@@ -118,6 +118,256 @@ are installed or wheels are built. The canonical JSON report is pinned through
 candidate preparation and final publication so a remote-ledger change cannot be
 silently accepted midway through a run.
 
+## One-time published-v0.6.2 validation recovery
+
+`published-release-recovery-v0.6.2.json` is the executable, one-release recovery
+contract for immutable commit
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`. It pins its source and tree,
+release-manifest hash, synchronization PR #52, original main validation, every
+job in the original Prepare Release run, and the successful retained preflight
+artifact. It does not rebuild or change v0.6.2.
+
+PR #53 is the immutable original activation. It merged as
+`e0bd37fafcedee3135aa4c4d6bdfc7778d032d48`, with reviewed head
+`a8aaf10e03c35a5510f0a7e03a92d4f19e8be0e8`, onto exact source
+`4f98e7cb559ee1a9b269ea1f94938678d2dac4df`. Recovery run
+`34428188769` then failed only in the fast lane because its two-file harness
+imported approval helpers absent from the frozen release checkout. The contract
+retains that run's exact jobs and bounded failure artifact; it is historical
+evidence and must not be rerun or relabeled.
+
+PR #54 is the immutable first continuation from that merged activation. It
+merged as `57e0e29042bab3a989c80e5473ad552ec5b4505b`, with reviewed head
+`a743e222546371f386a629459ab8e7b209684905`, onto exact activation
+`e0bd37fafcedee3135aa4c4d6bdfc7778d032d48`; push validation `34440024442`
+passed. Recovery run `34440488685` then passed all eight source lanes and
+uploaded exact artifact `10137840766`, but its final publication job failed
+before its first GitHub request because the upload action's bare SHA-256 output
+was passed to a consumer that requires canonical `sha256:<digest>` form. The
+contract retains that run, every job, and its verified artifact as a second
+truthful failed attempt. It published neither a recovered check nor readiness.
+
+PR #55 is the immutable digest-handoff repair from PR #54's exact merge. It
+merged as `f064694cca7e9d1147a87b880636a94f5c5cbe94`, with reviewed head
+`e4ec240abce3736907d4708fe7fa984413d838b7`, onto exact continuation
+`57e0e29042bab3a989c80e5473ad552ec5b4505b`; push validation `34638360999`
+passed.
+
+Recovery run `34638993007/1` from that merge passed all eight source lanes and
+uploaded exact attestation artifact `10279641606` with repository digest
+`sha256:2890ce18bd66892972c732a92fbdd82aec22c899a752353375f5e91a8335c37b`.
+Its final job created successful required check `103395196156` on immutable
+v0.6.2, then failed while validating GitHub's response: GitHub returned the
+canonical check URL
+`https://github.com/Fifty5D/B-UH-AllianceAuth/runs/103395196156` rather than
+echoing the submitted workflow-run URL. The check is valid retained evidence,
+but the run did not publish a readiness comment on PR #52. The contract records
+that partial publication truthfully, including every job, the attestation byte
+hash, artifact, check node/suite, external binding, and canonical URL. It must
+not be rerun, relabeled, replaced, or treated as an entirely successful run.
+
+PR #56 is the only permitted publication-continuation repair from PR #55's
+exact merge. Its tree may change only the declared workflow, validation,
+approval, documentation, fixture, and test paths. After its reviewed merge,
+`Continue Published Release Recovery` reuses the exact artifact and already
+created check above. The continuation has `checks: read`; it cannot create,
+modify, or delete a check. It revalidates all historical and mutable boundaries
+and posts only the missing recovery-readiness comment. A different run,
+artifact, attestation, check, external binding, URL, app, context, release SHA,
+suite, node, or conflicting/superseding matching check fails closed.
+
+The recovered check's submitted `details_url` remains the exact recovery
+workflow URL for operator context, while GitHub's returned and reread identity
+is required to be the canonical repository/check-ID URL. The verifier checks
+that URL during creation, REST/list rereads, recorded readiness, GraphQL
+`CheckRun.isRequired`, and final authorization; arbitrary or wrong-ID URLs are
+not accepted. Branch protection is evaluated semantically: the exact context
+and GitHub Actions app `15368` must remain required with enforcement for
+everyone. Additional requirements are preserved and do not invalidate this
+evidence merely because GitHub returns a larger list. A newly created check node
+may be absent briefly from GraphQL; only an otherwise exact PR response with a
+null node is polled for a fixed bound. Errors, malformed responses, conflicting
+identity, and non-required nodes fail immediately.
+
+`validation_recovery.py ledger` accepts only the known stale-v0.6.2 ledger
+error and the exact reviewed recovery sequence. It constructs a disposable
+synthetic merge of the reviewed publication repair with the immutable release,
+runs the ordinary ledger verifier on that future tree, and requires the next
+plan to be v0.6.3 from v0.6.2. Every other ledger failure or main advance
+remains fatal.
+
+After the digest repair, `Validate Published Release Recovery` runs the complete
+reusable source suite against the exact published v0.6.2 commit. Only the fast
+lane replaces these two reviewed test fixtures from the digest-repair merge:
+
+- `tests/deploy/test_request_archive.py`
+- `tests/platform/test_coordinated_recovery_rehearsal.py`
+
+The approval portion of that rehearsal loads only the following attested support
+under `.buh-recovery-test-support`; it does not overwrite release/runtime code:
+
+- `.github/workflows/source-published-release-recovery.yml`
+- `ops/release/buh_release.py`
+- `ops/release/ledger.py`
+- `ops/release/open_sync_pr.py`
+- `ops/release/platform_approval.py`
+- `ops/release/published-release-recovery-v0.6.2.json`
+- `ops/release/recovery_policy.py`
+- `ops/release/validation_recovery.py`
+- `tests/release/test_platform_approval.py`
+
+The manifest records every staged path, source blob and SHA-256. Deployment,
+application, receiver, migration, browser and release bytes remain those of
+v0.6.2; the staged files exercise only activation-side readiness and approval.
+The continuation separately revalidates original feature PR #51, activation PR
+#53, continuation PR #54, digest-repair PR #55, publication-repair PR #56, all
+four push validations, all three failed recovery runs, the original failed
+release run, and the retained successful preflight before it may place recovery
+readiness on PR #52. Each
+merge is associated to its PR by GitHub's commit-to-PR endpoint, while author,
+merger, state, head, base and merge identity come from full PR detail.
+Authorization repeats the live checks and requires the order PR #53, PR #54,
+PR #55, PR #56, then PR #52.
+
+After all eight reusable-suite lanes pass, the recovery workflow records their
+exact job IDs and publishes one GitHub Actions check named
+`Source test suite / Required source checks` on immutable PR #52 head
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Its report distinguishes the
+unchanged release commit/tree, original activation, continuation, digest repair,
+two replaced fixtures, and isolated test support. Its report records the verified
+workflow path and run and binds repository, event, actors, head SHA, attempt, attestation
+artifact and every exact lane name and ID. GitHub's job `workflow_name` is a
+mutable display title, so it is diagnostic only and is never authorization.
+Before posting recovery readiness, the verifier requires main's
+protected context to remain bound to GitHub Actions app `15368`, confirms the
+original failed check remains historical evidence, and records the recovered check's
+exact REST ID, GraphQL node ID, check-suite ID, completion time, and evidence
+binding. GitHub's `filter=latest` check listing is latest per suite and may
+therefore retain older suites; it is not treated as one global winner. The new
+check must remain the latest row in its own suite, have no pending or newer
+conflicting matching suite, and GitHub GraphQL `CheckRun.isRequired` must report
+that exact node as required for PR #52. Authorization repeats the same query for
+the merged PR; a private comment or an arbitrary successful row cannot
+substitute for it. Failed runs `34428188769` and `34440488685` published no
+recovery check. Failed run `34638993007` published the one valid recovered check
+and the reviewed continuation later published historical readiness comment
+`5641670561`. That schema-7 comment remains audit history for immutable head
+`6074b965cbd2e6ab2630cd539ee455b8d419aef6`; it cannot authorize a changed PR
+head or base. The deployment workflow stages the recovery-aware verifier from
+the exact PR #52 merge before checking out v0.6.2, then uses that staged
+verifier at both queued authorization boundaries. The deployment archive and
+receiver still come only from the immutable release commit, never from the
+updated synchronization head.
+
+The recovery descriptor holds automatic release creation on the exact PR #57
+repair merge and the later, updated PR #52 synchronization merge. This is a
+deliberate, bounded continuation exception: main temporarily contains reviewed
+unconsumed platform fragments while the published release is not yet
+synchronized, but ordinary ledger validation is never disabled and no new
+release may start. Any other main advance, rebase, unexpected parent/tree,
+changed immutable ref, missing native check, missing artifact, or expired
+artifact fails closed.
+
+### Work activation sequence
+
+Work must perform these steps in order; none is an instruction for Codex or a
+routine operator to merge or deploy:
+
+1. Review follow-up PR #57's final head and this concrete continuation. Require
+   all required checks, applicable Preview UI evidence, trusted readiness, and
+   no `needs-codex`, then request Anthony's approval for this non-production
+   merge. Reconfirm that main is exactly
+   `9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb`, PRs #53–#56 full details match
+   their pinned identities, historical readiness comment `5641670561` is
+   unchanged, and PR #52 is open at
+   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Both
+   `release/platform-v0.6.2` and `sync/platform-v0.6.2` must still resolve to
+   that commit.
+2. After that approval, merge PR #57 with a merge commit, without squash or
+   rebase. Its ordered parents must be
+   `9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb` and the reviewed PR #57 head, and
+   its tree must equal that reviewed head. If main has moved,
+   stop; do not update the base or recovery contract opportunistically.
+3. Require the push-triggered `Validate PR` for that repair merge to
+   pass. Inspect the associated `Prepare Release` run and require the
+   `sync-head-repair-pending-update` hold result; it must not build or publish
+   v0.6.3.
+4. While retained preflight artifact `10083806725` and recovery artifact
+   `10279641606` are still present and unexpired, use PR #52's normal **Update
+   with merge commit** action exactly once. Do not rebase, force-push, add a
+   manual commit, edit PR #52 files, or move the immutable release ref. The new
+   sync head must have ordered parents: immutable release
+   `6074b965cbd2e6ab2630cd539ee455b8d419aef6`, then the exact PR #57 merge. Its
+   tree must equal Git's merge tree for those two commits. The release ref must
+   remain at the immutable commit; only `sync/platform-v0.6.2` may move to this
+   exact update commit.
+5. Wait for native `Validate PR` on that exact new sync head. Require the genuine
+   GitHub Actions aggregate `Source test suite / Required source checks` to
+   succeed, every additional protected requirement to be satisfied, and the PR
+   merge box to be clean. The failed check on the old immutable head and the
+   recovered successful check remain unmodified history; neither substitutes
+   for native validation of the new head.
+6. From the exact PR #57 merge on `main`, dispatch only the updated continuation
+   workflow once. Do not dispatch or rerun
+   `source-published-release-recovery.yml`, do not rerun a failed historical job,
+   and do not publish a check manually:
+
+   ```bash
+   gh workflow run continue-synchronized-release-recovery.yml \
+     --repo Fifty5D/B-UH-AllianceAuth \
+     --ref main \
+     --field confirmation='PUBLISH UPDATED V0.6.2 READINESS'
+   ```
+
+   Only the repository owner or exact `BUH_CHATGPT_WORK_ACTOR` may dispatch it.
+   Run attempt 1 must complete successfully. Confirm historical comment
+   `5641670561`, its schema-7 nonce, check `103395196156`, failed check
+   `102298823162`, artifact `10279641606`, and preflight artifact `10083806725`
+   are unchanged and reverified. Confirm exactly one new bot-authored
+   `buh-platform-ready-recovery:v2` comment is added. It must bind the exact PR
+   #57 merge, updated sync head and tree, native run/check, immutable release,
+   manifest, retained evidence, and schema-7 record it supersedes. A missing,
+   duplicate, stale, expired, or mismatched record blocks continuation.
+7. Present the updated native validation, unchanged release/manifest, retained
+   recovery/preflight evidence, and newly generated
+   `buh-chatgpt-approved-recovery:v2` marker to Anthony for the single production
+   approval. Immediately before approval, recheck that main is still the exact
+   PR #57 merge, PR #52's head and base still match the new record, the merge box
+   remains eligible, and both retained artifacts remain unexpired. The earlier
+   schema-7 approval template is ineligible. Before approval, do not merge PR
+   #52. After explicit approval, Work may use the normal protected merge-commit
+   action with the exact v2 marker. Its ordered parents must be the PR #57 merge
+   and the native-tested updated sync head; the merge tree must equal the tested
+   sync-head tree. Never use an admin bypass.
+8. The existing `Deploy Production` pull-request event must authorize the updated
+   synchronization identity but select, archive, and deploy only immutable
+   v0.6.2 commit `6074b965cbd2e6ab2630cd539ee455b8d419aef6`. Both queued
+   authorization checks must reproduce the same result. Do not manually
+   dispatch another deployment or retry a failed production run. Confirm its
+   retained evidence and final version through the normal reporting path.
+9. Keep the recovery contract and release hold in place until production v0.6.2
+   is confirmed. Retiring this one-time mechanism is a later reviewed PR; it
+   must preserve the still-unconsumed platform fragment so the next ordinary
+   release is planned as v0.6.3 from synchronized v0.6.2.
+
+Useful read-only checks before steps 2, 4, 6, and 7 are:
+
+```bash
+gh pr view 57 --repo Fifty5D/B-UH-AllianceAuth \
+  --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,labels
+gh pr view 52 --repo Fifty5D/B-UH-AllianceAuth \
+  --json headRefOid,baseRefOid,mergeStateStatus,isDraft,statusCheckRollup,state,title
+gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/release/platform-v0.6.2
+gh api repos/Fifty5D/B-UH-AllianceAuth/git/ref/heads/sync/platform-v0.6.2
+gh api repos/Fifty5D/B-UH-AllianceAuth/issues/52/comments --paginate
+```
+
+If preflight artifact `10083806725` (digest
+`sha256:d527be28e5f79972835cd2d12c92e6ce98f4c9f77f081e872df76908c6ca0510`)
+expires or any pinned identity differs, this continuation is blocked. Do not
+relabel old evidence or rebuild v0.6.2; a separately reviewed contract update
+must bind a truthful fresh no-change preflight for the same immutable release.
+
 The assembled directory contains `RELEASE.json`, `INSTALL_PLAN.json`, release
 notes, wheels, and strict SHA-256 sums. The reusable and manually dispatchable
 `build-platform-release.yml` workflow can optionally add the new directory,

@@ -23,6 +23,16 @@ ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "ops/deploy/request_archive.py"
 V061_RELEASE = "43234a8c0b6371fdfc62b59fa75a7980924ac3a5"
 POWERSHELL = shutil.which("pwsh")
+SYNTHETIC_RELEASE = Path(
+    ".request-archive-recovery-fixture/platform/v0.6.2"
+)
+SYNTHETIC_RECOVERY_FRAGMENT = """\
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Exercise the recovery request archive with complete Git history."
+deployment_predecessor = "0.5.6"
+"""
 
 
 def run(*arguments: object, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
@@ -80,11 +90,17 @@ class RequestArchiveExecutionTests(unittest.TestCase):
             )
             self.assertEqual(checked_out.returncode, 0, checked_out.stderr[-1200:])
 
+            synthetic_changes = base / "synthetic-release-intent"
+            synthetic_changes.mkdir()
+            (synthetic_changes / "request-archive-recovery.toml").write_text(
+                SYNTHETIC_RECOVERY_FRAGMENT,
+                encoding="utf-8",
+            )
             plan = buh_release.create_plan(
                 repo_root=builder,
                 registry_path=builder / "ops/release/apps.toml",
                 compatibility_path=builder / "platform/compatibility.toml",
-                changes_dir=builder / "changes",
+                changes_dir=synthetic_changes,
                 previous_manifest_path=(
                     builder / "releases/platform/v0.6.1/RELEASE.json"
                 ),
@@ -92,7 +108,7 @@ class RequestArchiveExecutionTests(unittest.TestCase):
                 test_run="workflow-checkout-regression",
             )
             self.assertEqual(plan["platform_version"], "0.6.2")
-            release_dir = builder / "releases/platform/v0.6.2"
+            release_dir = builder / SYNTHETIC_RELEASE
             buh_release.assemble_release(
                 plan=plan,
                 wheel_dir=base / "unused-wheels",
@@ -101,7 +117,12 @@ class RequestArchiveExecutionTests(unittest.TestCase):
                 repo_root=builder,
             )
             added = run(
-                "git", "add", "--", "releases/platform/v0.6.2", cwd=builder
+                "git",
+                "add",
+                "--force",
+                "--",
+                SYNTHETIC_RELEASE,
+                cwd=builder,
             )
             self.assertEqual(added.returncode, 0, added.stderr[-1200:])
             committed = run(
@@ -117,6 +138,22 @@ class RequestArchiveExecutionTests(unittest.TestCase):
                 cwd=builder,
             )
             self.assertEqual(branched.returncode, 0, branched.stderr[-1200:])
+            preserved_caller_state = run(
+                "git",
+                "diff",
+                "--exit-code",
+                source_commit,
+                release_commit,
+                "--",
+                "changes",
+                "releases/platform/v0.6.2",
+                cwd=builder,
+            )
+            self.assertEqual(
+                preserved_caller_state.returncode,
+                0,
+                preserved_caller_state.stderr[-1200:],
+            )
 
             def checkout(name: str, depth: int) -> Path:
                 destination = base / name
@@ -150,7 +187,7 @@ class RequestArchiveExecutionTests(unittest.TestCase):
             ):
                 request_archive.build_archive(
                     root=shallow,
-                    release_dir=shallow / "releases/platform/v0.6.2",
+                    release_dir=shallow / SYNTHETIC_RELEASE,
                     repository="Fifty5D/B-UH-AllianceAuth",
                     release_commit=release_commit,
                     mode="preflight",
@@ -163,7 +200,7 @@ class RequestArchiveExecutionTests(unittest.TestCase):
             output = base / "complete.tar.gz"
             metadata = request_archive.build_archive(
                 root=exact_checkout,
-                release_dir=exact_checkout / "releases/platform/v0.6.2",
+                release_dir=exact_checkout / SYNTHETIC_RELEASE,
                 repository="Fifty5D/B-UH-AllianceAuth",
                 release_commit=release_commit,
                 mode="preflight",

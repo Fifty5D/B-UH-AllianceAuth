@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Accept GitHub's canonical recovery check URL and safely continue readiness from the exact partially published v0.6.2 evidence."

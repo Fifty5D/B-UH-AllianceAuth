@@ -1,0 +1,33 @@
+{
+  "check_runs": [
+    {
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "conclusion": "success",
+      "head_sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+      "id": 103395196156,
+      "name": "Source test suite / Required source checks",
+      "status": "completed",
+      "check_suite": {
+        "id": 92911719432
+      }
+    },
+    {
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "conclusion": "failure",
+      "head_sha": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+      "id": 102298823162,
+      "name": "Source test suite / Required source checks",
+      "status": "completed",
+      "check_suite": {
+        "id": 92911719969
+      }
+    }
+  ],
+  "total_count": 2
+}

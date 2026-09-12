@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tomllib
@@ -9,6 +10,8 @@ from pathlib import Path
 from unittest import TestCase
 
 import yaml
+
+from ops.release import validation_recovery
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +24,9 @@ SOURCE_WORKFLOWS = (
     "source-supply-chain.yml",
     "ui-preview.yml",
     "invalidate-readiness.yml",
+    "source-published-release-recovery.yml",
+    "continue-published-release-recovery.yml",
+    "continue-synchronized-release-recovery.yml",
 )
 PRODUCTION_V2_WORKFLOWS = (
     "auto-platform-release.yml",
@@ -522,7 +528,7 @@ class PlatformConfigurationContracts(TestCase):
                             set(supplied_secrets),
                             "caller omits a required reusable-workflow secret",
                         )
-        self.assertEqual(calls, 5)
+        self.assertEqual(calls, 6)
 
     def test_local_reusable_workflow_callers_cover_callee_job_permissions(self):
         workflows = {
@@ -573,7 +579,7 @@ class PlatformConfigurationContracts(TestCase):
                                 permission_rank[required],
                                 "caller permission caps the called workflow job",
                             )
-        self.assertEqual(calls, 5)
+        self.assertEqual(calls, 6)
 
     def test_supply_chain_python_setup_uses_configuration_output(self):
         workflow = _load_workflow(WORKFLOWS / "source-supply-chain.yml")
@@ -1167,6 +1173,9 @@ class PlatformConfigurationContracts(TestCase):
             "feature_pr_number",
             "feature_head_sha",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "feature_readiness",
             "main_validation_run_id",
             "main_validation_run_attempt",
@@ -1246,19 +1255,21 @@ class PlatformConfigurationContracts(TestCase):
         self.assertLess(queued_authorize, queued_download)
         self.assertLess(queued_download, final_boundary)
         self.assertIn(
-            "platform_approval.py authorize", deploy["steps"][queued_authorize]["run"]
+            '"${APPROVAL_TOOL}" authorize',
+            deploy["steps"][queued_authorize]["run"],
         )
         self.assertIn(
-            "platform_approval.py authorize", deploy["steps"][final_boundary]["run"]
+            '"${APPROVAL_TOOL}" authorize',
+            deploy["steps"][final_boundary]["run"],
         )
         self.assertIn(
-            "platform_approval.py verify-artifact",
+            '"${APPROVAL_TOOL}" verify-artifact',
             deploy["steps"][final_boundary]["run"],
         )
         final_boundary_text = deploy["steps"][final_boundary]["run"]
         self.assertLess(
             final_boundary_text.rindex("ops/readiness.py published"),
-            final_boundary_text.rindex("platform_approval.py authorize"),
+            final_boundary_text.rindex('"${APPROVAL_TOOL}" authorize'),
         )
         self.assertIn(
             '[[ "${MANIFEST_SHA256}" == "${RELEASE_MANIFEST_SHA256}" ]]',
@@ -1278,6 +1289,9 @@ class PlatformConfigurationContracts(TestCase):
             "preflight_run_id",
             "release_commit",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "sync_validation_run_attempt",
             "sync_validation_run_id",
         ):
@@ -1445,6 +1459,368 @@ class PlatformConfigurationContracts(TestCase):
             r"(?m)^\s+mode:\s*deploy\s*$",
         )
 
+    def test_published_v062_recovery_is_exact_manual_validation_only(self):
+        path = WORKFLOWS / "source-published-release-recovery.yml"
+        workflow = _load_workflow(path)
+        text = path.read_text(encoding="utf-8")
+        triggers = workflow.get("on", workflow.get(True))
+        self.assertEqual(set(triggers), {"workflow_dispatch"})
+        confirmation = triggers["workflow_dispatch"]["inputs"]["confirmation"]
+        self.assertIs(confirmation["required"], True)
+        self.assertEqual(confirmation["type"], "string")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(
+            workflow["concurrency"],
+            {
+                "group": "buh-published-platform-v0.6.2-recovery",
+                "cancel-in-progress": False,
+            },
+        )
+        source_tests = workflow["jobs"]["source_tests"]
+        self.assertEqual(
+            source_tests["uses"], "./.github/workflows/reusable-source-tests.yml"
+        )
+        self.assertEqual(
+            source_tests["with"]["source_sha"],
+            "${{ needs.qualify.outputs.release_commit }}",
+        )
+        self.assertEqual(
+            source_tests["with"]["recovery_harness_sha"],
+            "${{ needs.qualify.outputs.repair_commit }}",
+        )
+        self.assertEqual(source_tests["permissions"], {"contents": "read"})
+        self.assertEqual(
+            workflow["jobs"]["ready"]["permissions"],
+            {
+                "actions": "read",
+                "checks": "write",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
+        for required in (
+            "VALIDATE PUBLISHED V0.6.2",
+            '[[ "${RUN_ATTEMPT}" == "1" ]]',
+            '[[ "${SELECTED_REF}" == "refs/heads/main" ]]',
+            "BUH_CHATGPT_WORK_ACTOR",
+            "activation",
+            "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+            '"${API_URL}/repos/${REPOSITORY}/pulls/52"',
+            "attest",
+            "retention-days: 30",
+            "ops/readiness.py published",
+            "--pull-request 53",
+            "--pull-request 54",
+            "--pull-request 55",
+            "--pull-request 51",
+            "Canonicalize the verified upload digest",
+            '[[ "${UPLOAD_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]',
+            "steps.digest.outputs.artifact_digest",
+            "platform_approval.py recover-ready",
+            "checks: write",
+        ):
+            self.assertIn(required, text)
+        self.assertLess(
+            text.index("ops/readiness.py published"),
+            text.index("platform_approval.py recover-ready"),
+        )
+        self.assertNotIn("environment: production", text)
+        self.assertNotIn("secrets.", text)
+
+        contract_path = (
+            ROOT / "ops/release/published-release-recovery-v0.6.2.json"
+        )
+        raw = contract_path.read_text(encoding="ascii")
+        contract = json.loads(raw)
+        self.assertEqual(
+            raw,
+            json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        self.assertEqual(contract["activation"]["pull_request"], 53)
+        self.assertEqual(contract["continuation"]["pull_request"], 54)
+        self.assertEqual(contract["repair"]["pull_request"], 55)
+        self.assertEqual(contract["publication_repair"]["pull_request"], 56)
+        self.assertEqual(
+            contract["publication_repair"]["base_commit"],
+            "f064694cca7e9d1147a87b880636a94f5c5cbe94",
+        )
+        self.assertEqual(
+            contract["activation"]["commit"],
+            "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48",
+        )
+        self.assertEqual(contract["sync"]["pull_request"], 52)
+        self.assertEqual(
+            contract["sync"]["initial_head_commit"],
+            "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+        )
+        self.assertEqual(
+            contract["sync_repair"],
+            {
+                "allowed_paths": list(validation_recovery.SYNC_REPAIR_PATHS),
+                "base_commit": "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb",
+                "pull_request": 57,
+            },
+        )
+        self.assertEqual(
+            contract["required_check"],
+            {
+                "app_id": 15368,
+                "app_slug": "github-actions",
+                "branch": "main",
+                "context": "Source test suite / Required source checks",
+                "historical_failure": {
+                    "check_run_id": 102298823162,
+                    "conclusion": "failure",
+                    "details_url": (
+                        "https://github.com/Fifty5D/B-UH-AllianceAuth/actions/"
+                        "runs/34297801831/job/102298823162"
+                    ),
+                    "run_attempt": 1,
+                    "workflow_run_id": 34297801831,
+                },
+                "required_lanes": [
+                    "Test configuration",
+                    "Immutable release ledger",
+                    "Immutable Moon Tax v0.3.3 recovery artifact",
+                    "Fast source checks",
+                    "MariaDB, Redis, Celery, and fake ESI",
+                    "Legacy schema upgrade and backup restore",
+                    "Browser tables, actions, and permissions",
+                    "Required source checks",
+                ],
+            },
+        )
+        self.assertEqual(
+            contract["release"],
+            {
+                "commit": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+                "manifest_sha256": (
+                    "c9cf79d34c8b3f90556e405f338ee4c1e7818d9c686f0462eec7dca201b784f4"
+                ),
+                "ref": "release/platform-v0.6.2",
+                "source_commit": "4f98e7cb559ee1a9b269ea1f94938678d2dac4df",
+                "source_tree": "83ab4b808ce44a0de99fef9d255aaceb10c89f21",
+                "tree": "cfcd1f21903d3609aef0bbd7b61950be5fef2aa5",
+            },
+        )
+        self.assertEqual(
+            contract["repair"]["harness_paths"],
+            [
+                "tests/deploy/test_request_archive.py",
+                "tests/platform/test_coordinated_recovery_rehearsal.py",
+            ],
+        )
+        self.assertEqual(
+            contract["repair"]["test_support_paths"],
+            [
+                ".github/workflows/source-published-release-recovery.yml",
+                "ops/release/buh_release.py",
+                "ops/release/ledger.py",
+                "ops/release/open_sync_pr.py",
+                "ops/release/platform_approval.py",
+                "ops/release/published-release-recovery-v0.6.2.json",
+                "ops/release/recovery_policy.py",
+                "ops/release/validation_recovery.py",
+                "tests/release/test_platform_approval.py",
+            ],
+        )
+        self.assertEqual(contract["failed_validation"]["run_id"], 34428188769)
+        self.assertEqual(contract["failed_publication"]["run_id"], 34440488685)
+        self.assertEqual(contract["partial_publication"]["run_id"], 34638993007)
+        self.assertEqual(
+            contract["partial_publication"]["artifact"]["id"], 10279641606
+        )
+        self.assertEqual(
+            contract["partial_publication"]["required_check"]["check_run_id"],
+            103395196156,
+        )
+        self.assertEqual(
+            contract["partial_publication"]["required_check"]["details_url"],
+            "https://github.com/Fifty5D/B-UH-AllianceAuth/runs/103395196156",
+        )
+
+        continuation_path = WORKFLOWS / "continue-published-release-recovery.yml"
+        continuation = _load_workflow(continuation_path)
+        continuation_text = continuation_path.read_text(encoding="utf-8")
+        continuation_triggers = continuation.get("on", continuation.get(True))
+        self.assertEqual(set(continuation_triggers), {"workflow_dispatch"})
+        self.assertEqual(
+            continuation["concurrency"], workflow["concurrency"]
+        )
+        self.assertEqual(
+            continuation["jobs"]["ready"]["permissions"],
+            {
+                "actions": "read",
+                "checks": "read",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
+        for job_name in ("qualify", "ready"):
+            checkout = next(
+                step
+                for step in continuation["jobs"][job_name]["steps"]
+                if str(step.get("uses", "")).startswith("actions/checkout@")
+            )
+            self.assertEqual(checkout["with"]["fetch-depth"], 0)
+            self.assertIs(checkout["with"]["persist-credentials"], False)
+        for required in (
+            "CONTINUE PUBLISHED V0.6.2",
+            "publication-repair",
+            "artifact-ids: 10279641606",
+            "run-id: 34638993007",
+            "--pull-request 56",
+            "--publication-repair",
+            "--publication-readiness",
+            "--validation-artifact-id 10279641606",
+            "--validation-artifact-digest sha256:2890ce18bd66892972c732a92fbdd82aec22c899a752353375f5e91a8335c37b",
+        ):
+            self.assertIn(required, continuation_text)
+        self.assertNotIn("checks: write", continuation_text)
+        self.assertNotIn("environment: production", continuation_text)
+        self.assertNotIn("secrets.", continuation_text)
+
+        synchronized_path = (
+            WORKFLOWS / "continue-synchronized-release-recovery.yml"
+        )
+        synchronized = _load_workflow(synchronized_path)
+        synchronized_text = synchronized_path.read_text(encoding="utf-8")
+        synchronized_triggers = synchronized.get("on", synchronized.get(True))
+        self.assertEqual(set(synchronized_triggers), {"workflow_dispatch"})
+        self.assertEqual(synchronized["concurrency"], workflow["concurrency"])
+        self.assertEqual(
+            synchronized["jobs"]["qualify"]["outputs"],
+            {
+                "release_commit": "${{ steps.contract.outputs.release_commit }}",
+                "source_commit": "${{ steps.contract.outputs.source_commit }}",
+                "sync_head_commit": "${{ steps.contract.outputs.sync_head_commit }}",
+                "sync_repair_commit": "${{ steps.contract.outputs.sync_repair_commit }}",
+                "sync_repair_feature_head": (
+                    "${{ steps.contract.outputs.sync_repair_feature_head }}"
+                ),
+            },
+        )
+        self.assertEqual(
+            synchronized["jobs"]["ready"]["permissions"],
+            {
+                "actions": "read",
+                "checks": "read",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        )
+        for required in (
+            "PUBLISH UPDATED V0.6.2 READINESS",
+            "sync-repair",
+            "sync-update",
+            "pulls/52",
+            '"6074b965cbd2e6ab2630cd539ee455b8d419aef6"',
+            "platform_approval.py recover-ready-update",
+            "--pull-request 57",
+            "--sync-update build/sync-update.json",
+            "--sync-repair-readiness build/sync-repair-readiness.json",
+        ):
+            self.assertIn(required, synchronized_text)
+        self.assertNotIn("checks: write", synchronized_text)
+        self.assertNotIn("environment: production", synchronized_text)
+        self.assertNotIn("secrets.", synchronized_text)
+
+    def test_recovery_ledger_exception_and_release_hold_are_bounded(self):
+        reusable = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
+        triggers = reusable.get("on", reusable.get(True))
+        harness = triggers["workflow_call"]["inputs"]["recovery_harness_sha"]
+        self.assertIs(harness["required"], False)
+        self.assertEqual(harness["default"], "")
+        overlay_steps = [
+            (job_name, step)
+            for job_name, job in reusable["jobs"].items()
+            for step in job.get("steps", [])
+            if "recovery_harness_sha" in str(step)
+        ]
+        self.assertEqual(len(overlay_steps), 1)
+        self.assertEqual(overlay_steps[0][0], "fast")
+        overlay = overlay_steps[0][1]
+        self.assertEqual(
+            overlay["if"], "${{ inputs.recovery_harness_sha != '' }}"
+        )
+        for required in (
+            '[[ "${SOURCE_SHA}" == "6074b965cbd2e6ab2630cd539ee455b8d419aef6" ]]',
+            'git fetch --no-tags origin "${HARNESS_SHA}"',
+            "git show \"${HARNESS_SHA}:ops/release/validation_recovery.py\"",
+            "apply-harness",
+            'support.get("root")',
+        ):
+            self.assertIn(required, overlay["run"])
+
+        ledger_step = next(
+            step
+            for step in reusable["jobs"]["release_ledger"]["steps"]
+            if step["name"] == "Require synchronized immutable release history"
+        )
+        self.assertIn("ops/release/ledger.py verify", ledger_step["run"])
+        self.assertIn("validation_recovery.py", ledger_step["run"])
+        self.assertIn("ledger", ledger_step["run"])
+
+        plan_step = next(
+            step
+            for step in reusable["jobs"]["release_ledger"]["steps"]
+            if step["name"] == "Validate the release plan and change fragments"
+        )
+        self.assertIn('report.get("schema_version") != 5', plan_step["run"])
+
+        automatic = _load_workflow(WORKFLOWS / "auto-platform-release.yml")
+        fragment_step = next(
+            step
+            for step in automatic["jobs"]["qualify"]["steps"]
+            if step["name"] == "Detect unconsumed release intent"
+        )
+        self.assertIn("validation_recovery.py", fragment_step["run"])
+        self.assertIn("hold", fragment_step["run"])
+        self.assertIn('echo "release_needed=false"', fragment_step["run"])
+
+    def test_deploy_reuses_the_sync_merge_approval_verifier_after_release_checkout(self):
+        workflow = _load_workflow(WORKFLOWS / "deploy-platform-v2.yml")
+        steps = workflow["jobs"]["deploy"]["steps"]
+        names = [step["name"] for step in steps]
+        checkout_index = names.index("Check out the exact published release commit")
+        stage_index = names.index("Stage the merge-owned approval verifier")
+        authorize_index = names.index("Reauthorize the queued production operation")
+        self.assertLess(checkout_index, stage_index)
+        self.assertLess(stage_index, authorize_index)
+        stage = steps[stage_index]
+        self.assertEqual(stage["id"], "approval_source")
+        self.assertIn("github.event.pull_request.merge_commit_sha", str(stage["env"]))
+        for required in (
+            'git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"',
+            'expected_sync_head="${SYNC_HEAD_COMMIT:-${RELEASE_COMMIT}}"',
+            '[[ "${parents[1]}" == "${expected_sync_head}" ]]',
+            "git archive --format=tar",
+            "ops/release/platform_approval.py",
+            "ops/release/validation_recovery.py",
+            "git hash-object",
+            "git rev-parse",
+        ):
+            self.assertIn(required, stage["run"])
+        guarded = [
+            step
+            for step in steps
+            if step["name"]
+            in {
+                "Reauthorize the queued production operation",
+                "Reverify live feature readiness at the production boundary",
+            }
+        ]
+        self.assertEqual(len(guarded), 2)
+        for step in guarded:
+            self.assertEqual(
+                step["env"]["APPROVAL_TOOL"],
+                "${{ steps.approval_source.outputs.tool }}",
+            )
+            self.assertIn('python3 "${APPROVAL_TOOL}"', step["run"])
+
     def test_only_an_exact_chatgpt_approved_merge_can_start_production(self):
         workflow = _load_workflow(
             WORKFLOWS / "deploy-approved-platform-release.yml"
@@ -1516,6 +1892,9 @@ class PlatformConfigurationContracts(TestCase):
             "feature_pr_number",
             "feature_head_sha",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "feature_readiness",
             "main_validation_run_id",
             "main_validation_run_attempt",

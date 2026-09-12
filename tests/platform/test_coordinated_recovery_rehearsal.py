@@ -1,12 +1,15 @@
-"""Execution rehearsal for the one bounded v0.5.6 release-gap recovery."""
+"""Execution rehearsal for the bounded immutable-v0.6.2 validation recovery."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
@@ -35,11 +38,111 @@ from tests.deploy.test_docker_host import (
     owner_log_environment,
     write_host_files,
 )
-from tests.release import test_platform_approval as approval_fixture
-
-
 ROOT = Path(__file__).resolve().parents[2]
+TEST_SUPPORT_ROOT = ROOT / ".buh-recovery-test-support"
+
+
+def load_approval_fixture():
+    """Load activation-side approval support without replacing release code."""
+
+    fixture_path = TEST_SUPPORT_ROOT / "tests/release/test_platform_approval.py"
+    if not fixture_path.is_file():
+        from tests.release import test_platform_approval
+
+        return test_platform_approval
+
+    support_modules = (
+        "buh_release",
+        "ledger",
+        "open_sync_pr",
+        "platform_approval",
+        "recovery_policy",
+        "validation_recovery",
+    )
+    saved = {name: sys.modules.pop(name, None) for name in support_modules}
+    support_release = str(TEST_SUPPORT_ROOT / "ops/release")
+    sys.path.insert(0, support_release)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_buh_recovery_approval_fixture", fixture_path
+        )
+        if spec is None or spec.loader is None:
+            raise AssertionError("recovery approval fixture loader is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(support_release)
+        for name in support_modules:
+            sys.modules.pop(name, None)
+            if saved[name] is not None:
+                sys.modules[name] = saved[name]
+
+
+approval_fixture = load_approval_fixture()
+
+
 V061_RELEASE = "43234a8c0b6371fdfc62b59fa75a7980924ac3a5"
+SYNTHETIC_RECOVERY_FRAGMENT = """\
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Exercise the bounded coordinated-recovery release rehearsal."
+deployment_predecessor = "0.5.6"
+"""
+
+
+def canonical_recovery_upload_digest(root: Path, bare_digest: str) -> str:
+    """Execute the reviewed workflow's upload-output canonicalization step."""
+
+    workflow_root = TEST_SUPPORT_ROOT if TEST_SUPPORT_ROOT.is_dir() else ROOT
+    workflow = yaml.safe_load(
+        (
+            workflow_root
+            / ".github/workflows/source-published-release-recovery.yml"
+        ).read_text(encoding="utf-8")
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["attest"]["steps"]
+        if item.get("name") == "Canonicalize the verified upload digest"
+    )
+    output = root / "recovery-digest-output.txt"
+    output_value = str(output.resolve())
+    if os.name == "nt":
+        resolved = output.resolve()
+        output_value = f"/{resolved.drive[0].lower()}{resolved.as_posix()[2:]}"
+    environment = {
+        **os.environ,
+        "GITHUB_OUTPUT": output_value,
+        "UPLOAD_ARTIFACT_DIGEST": bare_digest,
+    }
+    bash = shutil.which("bash")
+    if bash is None:
+        windows_bash = Path("C:/Program Files/Git/bin/bash.exe")
+        if windows_bash.is_file():
+            bash = str(windows_bash)
+    if bash is None:
+        raise AssertionError("bash is required for recovery workflow rehearsal")
+    completed = subprocess.run(
+        [bash, "-c", step["run"]],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "Recovery digest handoff failed: "
+            + (completed.stdout + completed.stderr)[-1200:]
+        )
+    key, separator, value = output.read_text(encoding="utf-8").strip().partition("=")
+    if key != "artifact_digest" or not separator:
+        raise AssertionError("Recovery digest handoff output is invalid")
+    return value
 
 
 def run(*arguments: object, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -50,6 +153,39 @@ def run(*arguments: object, cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         encoding="utf-8",
+    )
+
+
+def synthetic_recovery_plan(
+    checkout: Path,
+    fixture_root: Path,
+    source_commit: str,
+) -> dict[str, Any]:
+    """Plan the bounded recovery from fixture-owned intent."""
+
+    synthetic_changes = fixture_root / "synthetic-release-intent"
+    synthetic_changes.mkdir(parents=True)
+    (synthetic_changes / "coordinated-recovery-rehearsal.toml").write_text(
+        SYNTHETIC_RECOVERY_FRAGMENT,
+        encoding="utf-8",
+    )
+    return buh_release.create_plan(
+        repo_root=checkout,
+        registry_path=checkout / "ops/release/apps.toml",
+        compatibility_path=checkout / "platform/compatibility.toml",
+        changes_dir=synthetic_changes,
+        previous_manifest_path=(
+            checkout / "releases/platform/v0.6.1/RELEASE.json"
+        ),
+        source_commit=source_commit,
+        test_run="synthetic-coordinated-rehearsal",
+    )
+
+
+def release_fingerprint(release_dir: Path) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(release_dir.iterdir(), key=lambda item: item.name)
     )
 
 
@@ -925,6 +1061,105 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 schema_v1_host.validate(make_recovery_bundle(root))
             compose.assert_not_called()
 
+    def test_release_fixture_accepts_source_and_published_shapes(self) -> None:
+        """Run the planner/assembler with both caller release states."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            checkout = base / "caller-snapshot"
+            cloned = run(
+                "git",
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                "--no-hardlinks",
+                "--",
+                ROOT,
+                checkout,
+                cwd=ROOT,
+            )
+            self.assertEqual(cloned.returncode, 0, cloned.stderr[-1000:])
+            head = run("git", "rev-parse", "HEAD", cwd=ROOT).stdout.strip()
+            self.assertEqual(
+                run(
+                    "git", "config", "core.autocrlf", "false", cwd=checkout
+                ).returncode,
+                0,
+            )
+            checked_out = run(
+                "git", "checkout", "--quiet", "--detach", head, cwd=checkout
+            )
+            self.assertEqual(checked_out.returncode, 0, checked_out.stderr[-1000:])
+
+            source_plan = synthetic_recovery_plan(
+                checkout,
+                base / "source-shape",
+                head,
+            )
+            source_output = checkout / ".recovery-source-shape/platform/v0.6.2"
+            self.assertFalse(source_output.exists())
+            buh_release.assemble_release(
+                plan=source_plan,
+                wheel_dir=base / "unused-source-wheels",
+                previous_release_dir=checkout / "releases/platform/v0.6.1",
+                output_dir=source_output,
+                repo_root=checkout,
+            )
+            self.assertEqual(
+                buh_release.verify_release_dir(source_output)["platform_version"],
+                "0.6.2",
+            )
+
+            # Reproduce the release snapshot's two material properties inside
+            # this disposable checkout: source fragments are consumed and the
+            # immutable target directory already exists. Use the exact payload
+            # just assembled rather than a marker or mocked directory.
+            published_release = checkout / "releases/platform/v0.6.2"
+            if not published_release.exists():
+                buh_release.assemble_release(
+                    plan=source_plan,
+                    wheel_dir=base / "unused-published-wheels",
+                    previous_release_dir=checkout / "releases/platform/v0.6.1",
+                    output_dir=published_release,
+                    repo_root=checkout,
+                )
+            self.assertEqual(
+                buh_release.verify_release_dir(published_release)[
+                    "platform_version"
+                ],
+                "0.6.2",
+            )
+            for fragment in (checkout / "changes").glob("*.toml"):
+                fragment.unlink()
+            self.assertEqual(list((checkout / "changes").glob("*.toml")), [])
+            published_fingerprint = release_fingerprint(published_release)
+
+            published_plan = synthetic_recovery_plan(
+                checkout,
+                base / "published-shape",
+                head,
+            )
+            published_output = (
+                checkout / ".recovery-published-shape/platform/v0.6.2"
+            )
+            buh_release.assemble_release(
+                plan=published_plan,
+                wheel_dir=base / "unused-post-published-wheels",
+                previous_release_dir=checkout / "releases/platform/v0.6.1",
+                output_dir=published_output,
+                repo_root=checkout,
+            )
+            self.assertEqual(
+                buh_release.verify_release_dir(published_output)[
+                    "platform_version"
+                ],
+                "0.6.2",
+            )
+            self.assertEqual(
+                release_fingerprint(published_release),
+                published_fingerprint,
+            )
+
     def test_complete_recovery_and_next_release_sequence(self) -> None:
         policy = recovery_policy.load_policy()
         self.assertEqual(
@@ -1015,16 +1250,15 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 history_host._validate_release_transition(history_bundle)
             self.assertEqual(live["platform_version"], "0.5.6")
 
-            plan = buh_release.create_plan(
-                repo_root=checkout,
-                registry_path=checkout / "ops/release/apps.toml",
-                compatibility_path=checkout / "platform/compatibility.toml",
-                changes_dir=checkout / "changes",
-                previous_manifest_path=(
-                    checkout / "releases/platform/v0.6.1/RELEASE.json"
-                ),
-                source_commit=head,
-                test_run="synthetic-coordinated-rehearsal",
+            # Keep the synthetic release intent independent of whether the
+            # caller is the feature source (fragment present, v0.6.2 absent) or
+            # the already-published release snapshot (fragment consumed,
+            # immutable v0.6.2 present). The real planner still validates every
+            # source input and the reviewed v0.6.1 recovery predecessor.
+            plan = synthetic_recovery_plan(
+                checkout,
+                base / "complete-sequence",
+                head,
             )
             self.assertEqual(plan["platform_version"], "0.6.2")
             self.assertEqual(plan["previous_platform_version"], "0.6.1")
@@ -1036,10 +1270,17 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 policy["published_releases"][1:],
             )
 
-            # Assemble and commit the eventual release exactly as the release
-            # workflow will: the immutable release commit has the reviewed
-            # feature source as its sole parent and reuses unchanged wheels.
-            next_release = checkout / "releases/platform/v0.6.2"
+            # Assemble the same release payload under a fixture-only path. The
+            # commit still has the reviewed source as its sole parent and
+            # reuses the exact prior wheels, while never colliding with or
+            # editing a caller's already-published v0.6.2 directory.
+            next_release = (
+                checkout / ".recovery-rehearsal-output/platform/v0.6.2"
+            )
+            self.assertNotEqual(
+                next_release,
+                checkout / "releases/platform/v0.6.2",
+            )
             buh_release.assemble_release(
                 plan=plan,
                 wheel_dir=base / "unused-wheels",
@@ -1049,7 +1290,12 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             )
             self.assertEqual(
                 run(
-                    "git", "add", "--", "releases/platform/v0.6.2", cwd=checkout
+                    "git",
+                    "add",
+                    "--force",
+                    "--",
+                    ".recovery-rehearsal-output/platform/v0.6.2",
+                    cwd=checkout,
                 ).returncode,
                 0,
             )
@@ -1066,6 +1312,22 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             self.assertEqual(
                 run("git", "show", "-s", "--format=%P", release_commit, cwd=checkout).stdout.strip(),
                 head,
+            )
+            preserved_caller_state = run(
+                "git",
+                "diff",
+                "--exit-code",
+                head,
+                release_commit,
+                "--",
+                "changes",
+                "releases/platform/v0.6.2",
+                cwd=checkout,
+            )
+            self.assertEqual(
+                preserved_caller_state.returncode,
+                0,
+                preserved_caller_state.stderr[-1000:],
             )
             production_archive = base / "production-recovery.tar.gz"
             production_metadata = request_archive.build_archive(
@@ -1349,74 +1611,256 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
             ).hexdigest()
             preflight_artifact = "platform-v2-preflight-6000002-1"
 
-            # Bind publication and later authorization to evidence produced by
-            # this recovery rehearsal, rather than to an unrelated canned
-            # release fixture.
+            # Rehearse the one published-release recovery protocol and carry
+            # its authorization output into the existing deployment handoff.
+            # The immutable release and source are this test's real assembled
+            # objects; activation/workflow identities remain synthetic remote
+            # evidence and are kept explicitly separate.
+            activation = "a" * 40
+            activation_head = "b" * 40
+            activation_tree = "c" * 40
+            activation_run = 6000003
+            recovery_run = 6000004
+            continuation = "d" * 40
+            continuation_head = "e" * 40
+            continuation_tree = "f" * 40
+            continuation_run = 6000005
+            repair = "7" * 40
+            repair_head = "8" * 40
+            repair_tree = "9" * 40
+            repair_run = 6000006
+            publication = "01" * 20
+            publication_head = "02" * 20
+            publication_tree = "03" * 20
+            publication_run = 6000007
+            recovery_artifact_digest = canonical_recovery_upload_digest(
+                base,
+                hashlib.sha256(
+                    b"synthetic exact-release validation artifact"
+                ).hexdigest(),
+            )
+            recovery_artifact = (
+                f"platform-validation-recovery-v{target['platform_version']}-"
+                f"{release_commit[:12]}-{recovery_run}-1"
+            )
             with mock.patch.multiple(
                 approval_fixture,
+                ACTIVATION=activation,
+                ACTIVATION_HEAD=activation_head,
+                ACTIVATION_RUN=activation_run,
+                ACTIVATION_TREE=activation_tree,
                 ARTIFACT=preflight_artifact,
                 ARTIFACT_DIGEST=preflight_digest,
                 FIRST_PARENT=head,
+                CONTINUATION=continuation,
+                CONTINUATION_HEAD=continuation_head,
+                CONTINUATION_RUN=continuation_run,
+                CONTINUATION_TREE=continuation_tree,
                 MANIFEST=target["manifest_sha256"],
                 PREFLIGHT_RUN=6000002,
+                PUBLICATION=publication,
+                PUBLICATION_HEAD=publication_head,
+                PUBLICATION_RUN=publication_run,
+                PUBLICATION_TREE=publication_tree,
+                RECOVERY_ARTIFACT=recovery_artifact,
+                RECOVERY_ARTIFACT_DIGEST=recovery_artifact_digest,
+                RECOVERY_RUN=recovery_run,
+                REPAIR=repair,
+                REPAIR_HEAD=repair_head,
+                REPAIR_RUN=repair_run,
+                REPAIR_TREE=repair_tree,
                 RELEASE=release_commit,
                 SOURCE=head,
+                SYNC_HEAD="07" * 20,
+                SYNC_HEAD_TREE="08" * 20,
+                SYNC_MERGE="09" * 20,
+                SYNC_NATIVE_CHECK=7000010,
+                SYNC_NATIVE_RUN=7000009,
+                SYNC_NATIVE_SUITE=7000011,
+                SYNC_REPAIR="04" * 20,
+                SYNC_REPAIR_HEAD="05" * 20,
+                SYNC_REPAIR_RUN=7000008,
+                SYNC_REPAIR_TREE="06" * 20,
                 VERSION=target["platform_version"],
             ):
-                ready_config = approval_fixture.approval._config(
+                contract = approval_fixture._recovery_contract()
+                attestation = approval_fixture._recovery_attestation()
+                ready_report = approval_fixture.approval.ready_recovery(
+                    contract,
+                    approval_fixture.TOKEN,
                     owner=approval_fixture.OWNER,
                     repository=approval_fixture.REPOSITORY,
-                    version=target["platform_version"],
-                    source_commit=head,
-                    release_commit=release_commit,
                     api_url="https://api.github.com",
                     server_url="https://github.com",
-                    output=base / "ready.json",
-                )
-                ready_report = approval_fixture.approval.ready(
-                    ready_config,
-                    approval_fixture.TOKEN,
-                    number=approval_fixture.PR_NUMBER,
-                    feature_readiness=approval_fixture._published_readiness(),
-                    main_validation_run_id=approval_fixture.MAIN_RUN,
-                    main_validation_run_attempt=1,
-                    manifest_sha256=approval_fixture.MANIFEST,
-                    preflight_run_id=approval_fixture.PREFLIGHT_RUN,
-                    preflight_run_attempt=1,
-                    preflight_artifact=approval_fixture.ARTIFACT,
-                    transport=approval_fixture.ReadyTransport(),
+                    output=base / "recovery-ready.json",
+                    feature_readiness=approval_fixture._published_readiness(
+                        merge_source_commit=head
+                    ),
+                    activation_readiness=approval_fixture._published_readiness(
+                        pull_request=53,
+                        feature_head=activation_head,
+                        merge_source_commit=activation,
+                    ),
+                    continuation_readiness=approval_fixture._published_readiness(
+                        pull_request=54,
+                        feature_head=continuation_head,
+                        merge_source_commit=continuation,
+                    ),
+                    repair_readiness=approval_fixture._published_readiness(
+                        pull_request=55,
+                        feature_head=repair_head,
+                        merge_source_commit=repair,
+                    ),
+                    publication_repair=(
+                        approval_fixture._publication_repair_evidence()
+                    ),
+                    publication_readiness=approval_fixture._published_readiness(
+                        pull_request=56,
+                        feature_head=publication_head,
+                        merge_source_commit=publication,
+                    ),
+                    validation_attestation=attestation,
+                    validation_artifact_id=(
+                        approval_fixture.RECOVERY_ARTIFACT_ID
+                    ),
+                    validation_artifact_name=recovery_artifact,
+                    validation_artifact_digest=recovery_artifact_digest,
+                    transport=approval_fixture.RecoveryTransport(ready=True),
                     sleeper=lambda _: None,
-                    polls=1,
                 )
                 self.assertTrue(
                     ready_report["approval_marker"].startswith(
-                        approval_fixture.approval.APPROVAL_PREFIX
+                        approval_fixture.approval.RECOVERY_APPROVAL_PREFIX
                     )
                 )
-                with self.assertRaises(approval_fixture.sync.SyncPrError):
-                    approval_fixture.approval.ready(
-                        ready_config,
-                        approval_fixture.TOKEN,
-                        number=approval_fixture.PR_NUMBER,
-                        feature_readiness=approval_fixture._published_readiness(),
-                        main_validation_run_id=approval_fixture.MAIN_RUN,
-                        main_validation_run_attempt=1,
-                        manifest_sha256=target["manifest_sha256"],
-                        preflight_run_id=6000002,
-                        preflight_run_attempt=1,
-                        preflight_artifact=preflight_artifact,
-                        transport=approval_fixture.DeniedReadyTransport(),
-                        sleeper=lambda _: None,
-                        polls=1,
-                    )
+                self.assertEqual(
+                    ready_report["ready"]["recovery_validation"]["attestation"][
+                        "release"
+                    ]["commit"],
+                    release_commit,
+                )
+                self.assertEqual(
+                    ready_report["ready"]["recovery_validation"]["attestation"][
+                        "harness"
+                    ]["commit"],
+                    repair,
+                )
 
                 authorization_index = 0
 
                 def authorize(transport):
                     nonlocal authorization_index
                     authorization_index += 1
-                    return approval_fixture.approval.authorize(
-                        approval_fixture._event(),
+                    with mock.patch.object(
+                        approval_fixture.approval.validation_recovery,
+                        "load_contract",
+                        return_value=contract,
+                    ):
+                        return approval_fixture.approval.authorize(
+                            approval_fixture._recovery_event(),
+                            owner=approval_fixture.OWNER,
+                            repository=approval_fixture.REPOSITORY,
+                            actor=approval_fixture.OWNER,
+                            triggering_actor=approval_fixture.OWNER,
+                            run_attempt=1,
+                            api_url="https://api.github.com",
+                            server_url="https://github.com",
+                            output=base / f"approval-{authorization_index}.json",
+                            token=approval_fixture.TOKEN,
+                            transport=transport,
+                            sleeper=lambda _: None,
+                        )
+
+                with self.assertRaisesRegex(
+                    approval_fixture.approval.ApprovalError,
+                    "lacks the ChatGPT approval marker",
+                ):
+                    authorize(
+                        approval_fixture.RecoveryTransport(
+                            ready=False,
+                            payload=ready_report["ready"],
+                            include_merge_marker=False
+                        )
+                    )
+                authorized = authorize(
+                    approval_fixture.RecoveryTransport(
+                        ready=False, payload=ready_report["ready"]
+                    )
+                )
+                self.assertEqual(
+                    authorized["validation_mode"], "published-release-recovery"
+                )
+                self.assertEqual(authorized["release_commit"], release_commit)
+                self.assertEqual(authorized["source_commit"], head)
+                self.assertEqual(
+                    authorized["manifest_sha256"],
+                    deployment_bundle.request.manifest_sha256,
+                )
+                changed_evidence = approval_fixture.RecoveryTransport(
+                    ready=False, payload=ready_report["ready"]
+                )
+                changed_evidence.recovery_run_conclusion = "success"
+                with self.assertRaisesRegex(
+                    approval_fixture.approval.ApprovalError,
+                    "did not complete successfully",
+                ):
+                    authorize(changed_evidence)
+
+                # Simulate the reviewed ordering after the repair merge:
+                # update PR #52 with a merge commit, require native CI on that
+                # new head, supersede (without deleting) schema-7 readiness,
+                # and authorize the final merge while selecting only the same
+                # immutable release assembled above.
+                current_contract = approval_fixture._current_recovery_contract(
+                    ready_report["ready"]
+                )
+                with mock.patch.object(
+                    approval_fixture.approval.validation_recovery,
+                    "load_contract",
+                    return_value=current_contract,
+                ):
+                    current_ready = (
+                        approval_fixture.approval.ready_recovery_update(
+                            current_contract,
+                            approval_fixture.TOKEN,
+                            owner=approval_fixture.OWNER,
+                            repository=approval_fixture.REPOSITORY,
+                            api_url="https://api.github.com",
+                            server_url="https://github.com",
+                            output=base / "updated-sync-ready.json",
+                            sync_update=approval_fixture._sync_update_report(),
+                            sync_repair_readiness=(
+                                approval_fixture._published_readiness(
+                                    pull_request=57,
+                                    feature_head=approval_fixture.SYNC_REPAIR_HEAD,
+                                    merge_source_commit=approval_fixture.SYNC_REPAIR,
+                                )
+                            ),
+                            transport=(
+                                approval_fixture.UpdatedRecoveryTransport(
+                                    ready=True,
+                                    historical_payload=ready_report["ready"],
+                                )
+                            ),
+                            sleeper=lambda _: None,
+                            polls=1,
+                        )
+                    )
+                    final_transport = (
+                        approval_fixture.UpdatedRecoveryTransport(
+                            ready=False,
+                            current_payload=current_ready["ready"],
+                            historical_payload=ready_report["ready"],
+                        )
+                    )
+                    final_event = {
+                        "action": "closed",
+                        "number": approval_fixture.PR_NUMBER,
+                        "pull_request": final_transport._sync_pr(),
+                        "sender": {"login": approval_fixture.OWNER},
+                    }
+                    current_authorized = approval_fixture.approval.authorize(
+                        final_event,
                         owner=approval_fixture.OWNER,
                         repository=approval_fixture.REPOSITORY,
                         actor=approval_fixture.OWNER,
@@ -1424,29 +1868,29 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                         run_attempt=1,
                         api_url="https://api.github.com",
                         server_url="https://github.com",
-                        output=base / f"approval-{authorization_index}.json",
+                        output=base / "updated-sync-authorization.json",
                         token=approval_fixture.TOKEN,
-                        transport=transport,
+                        transport=final_transport,
                         sleeper=lambda _: None,
                     )
-
-                with self.assertRaisesRegex(
-                    approval_fixture.approval.ApprovalError,
-                    "lacks the ChatGPT approval marker",
-                ):
-                    authorize(
-                        approval_fixture.ApprovalTransport(
-                            include_merge_marker=False
-                        )
-                    )
-                authorized = authorize(approval_fixture.ApprovalTransport())
-                self.assertEqual(authorized["release_commit"], release_commit)
-                changed_evidence = approval_fixture.ApprovalTransport()
-                changed_evidence.artifact_digest = "sha256:" + "a" * 64
-                with self.assertRaisesRegex(
-                    approval_fixture.approval.ApprovalError, "artifact digest"
-                ):
-                    authorize(changed_evidence)
+                self.assertEqual(
+                    current_authorized["validation_mode"],
+                    "published-release-sync-update",
+                )
+                self.assertEqual(
+                    current_authorized["release_commit"], release_commit
+                )
+                self.assertNotEqual(
+                    current_authorized["sync_head_commit"], release_commit
+                )
+                self.assertEqual(
+                    deployment_bundle.request.release_commit,
+                    current_authorized["release_commit"],
+                )
+                self.assertEqual(
+                    deployment_bundle.request.manifest_sha256,
+                    current_authorized["manifest_sha256"],
+                )
 
             failed_host, failed_boundary = prepare_real_recovery_host(
                 base / "failed-host",
