@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "evidence": {
+    "deployment_run": 34713182347,
+    "deployment_artifact": 10304410685,
+    "deployment_digest": "sha256:9420e3a1d9f0083e0d06c121f5c0c1cbd2510717f42db47c97cdaf70568d8842",
+    "observer_run": 34715589893,
+    "observer_artifact": 10304648161,
+    "observer_digest": "sha256:d61c4027b6fe69af32b1c4aeaea700dc8ac7d5e263e13e94de787d12da2c5e9f",
+    "note": "Names transcribed from sanitized observer replies; patterns from Work's confirmed reproduction. Pong/queue/task bodies in tests are synthetic, not production task payloads."
+  },
+  "workers": [
+    {"service": "allianceauth_worker", "hostname": "a070340df7f1", "pattern": "worker_%n", "node": "celery@worker_a070340df7f1"},
+    {"service": "allianceauth_worker", "hostname": "6630641cfa6e", "pattern": "worker_%n", "node": "celery@worker_6630641cfa6e"},
+    {"service": "allianceauth_worker", "hostname": "498d7b5c98c7", "pattern": "worker_%n", "node": "celery@worker_498d7b5c98c7"},
+    {"service": "allianceauth_worker", "hostname": "ed4eeeb9b4b8", "pattern": "worker_%n", "node": "celery@worker_ed4eeeb9b4b8"},
+    {"service": "allianceauth_worker", "hostname": "7ce03388a47a", "pattern": "worker_%n", "node": "celery@worker_7ce03388a47a"},
+    {"service": "allianceauth_worker_services", "hostname": "ae112c87f04f", "pattern": "worker_services_%n", "node": "celery@worker_services_ae112c87f04f"}
+  ]
+}

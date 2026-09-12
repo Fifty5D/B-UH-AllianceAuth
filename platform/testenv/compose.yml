@@ -104,13 +104,27 @@ services:
       - worker
       - --pool=solo
       - --loglevel=WARNING
-      - --hostname=buh-ci@%h
+      - --hostname=worker_%n
     healthcheck:
       test:
         - CMD-SHELL
         - >-
           celery --app=testauth inspect ping
-          --destination=buh-ci@$$HOSTNAME --timeout=2 | grep -q pong
+          --destination=celery@worker_$$HOSTNAME --timeout=2 | grep -q pong
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  worker_services:
+    <<: *auth-image
+    environment: *test-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      fake-esi: {condition: service_healthy}
+    command: ["celery", "--app=testauth", "worker", "--pool=solo", "--loglevel=WARNING", "--hostname=worker_services_%n", "--queues=services"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app=testauth inspect ping --destination=celery@worker_services_$$HOSTNAME --timeout=2 | grep -q pong"]
       interval: 5s
       timeout: 5s
       retries: 30

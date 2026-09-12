@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Match pinned Celery worker identities before mutation and across rollback; rehearse real workers and unchanged v0.6.2, with a pinned receiver-only repair and separately approved retained-recovery verification and completion."

@@ -110,6 +110,63 @@ IMAGE_PROVENANCE_LABELS = {
 RECOVERY_PLAN_SCHEMA_VERSION = 1
 RECOVERY_PLAN_NAME = "active-recovery.json"
 MAX_RECOVERY_PLAN_BYTES = 256 * 1024
+CELERY_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}@[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def celery_nodename(pattern: str, hostname: str) -> str:
+    """Celery 5.6.3 Hostname.convert semantics, without a host Celery dependency.
+
+    Normalize BEFORE formatting: bare ``worker_%n`` means ``celery@worker_%n``.
+    The required real-worker rehearsal compares this with Celery's own
+    host_format(default_nodename(...)) and actual broker replies.
+    https://github.com/celery/celery/blob/v5.6.3/celery/bin/worker.py
+    """
+    if (
+        not isinstance(pattern, str) or not 1 <= len(pattern) <= 200
+        or not re.fullmatch(r"[A-Za-z0-9_.:@%\-]+", pattern)
+        or pattern.count("@") > 1
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", hostname)
+    ):
+        raise DeploymentError("Celery worker has an unsafe nodename input")
+    if "@" in pattern:
+        name, host = pattern.split("@", 1)
+        node = f"{name or 'celery'}@{host or hostname}"
+    else:
+        node = f"celery@{pattern}"
+    short, _, domain = hostname.partition(".")
+    # Hostname conversion happens in the parent worker, before pool processes.
+    fields = {"h": hostname, "n": short, "d": domain, "i": "0", "I": "", "%": "%"}
+
+    def expand(match: re.Match[str]) -> str:
+        if match[1] not in fields:
+            raise DeploymentError("Celery worker uses an unsupported nodename placeholder")
+        return fields[match[1]]
+
+    node = re.sub(r"%([\w%])", expand, node)
+    if len(node) > 200 or CELERY_NODE_RE.fullmatch(node) is None:
+        raise DeploymentError("Celery worker has an unsafe resolved nodename")
+    return node
+
+
+def _celery_identity_failure(command: str, expected: frozenset[str], observed: Sequence[str]) -> str:
+    """Only bounded worker identifiers cross diagnostics, never reply values."""
+    actual = set(observed)
+
+    def names(values: set[str] | frozenset[str]) -> str:
+        safe = []
+        for name in sorted(values)[:2]:
+            if len(name) <= 200 and CELERY_NODE_RE.fullmatch(name):
+                safe.append(redact_sensitive_text(name)[:36])
+            else:
+                safe.append("<invalid-name>")
+        suffix = f",+{len(values) - 2}" if len(values) > 2 else ""
+        return "[" + ",".join(safe) + suffix + "]"
+
+    return (
+        f"Celery {command} did not return every expected worker; "
+        f"expected={names(expected)} observed={names(actual)} "
+        f"missing={names(expected - actual)} unexpected={names(actual - expected)}"
+    )
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -535,8 +592,8 @@ class DockerHost:
                 os.close(directory)
 
     @classmethod
-    def recover_incomplete_plan(cls, config: ReceiverConfig) -> str | None:
-        """Consume one durable plan after a prior receiver died mid-attempt."""
+    def load_incomplete_plan(cls, config: ReceiverConfig) -> tuple[DockerHost, dict] | None:
+        """Validate and hydrate a retained plan without recovering or cleaning up."""
 
         active = config.state_dir / RECOVERY_PLAN_NAME
         try:
@@ -749,6 +806,24 @@ class DockerHost:
             host.static_assets_backup = backup / "static-assets.previous.tar"
         for name, item in flags.items():
             setattr(host, name, item)
+        return host, value
+
+    @classmethod
+    def recover_incomplete_plan(cls, config: ReceiverConfig) -> str | None:
+        """Consume one durable plan after a prior receiver died mid-attempt."""
+
+        loaded = cls.load_incomplete_plan(config)
+        if loaded is None:
+            return None
+        host, value = loaded
+        attempt_id = value["attempt_id"]
+        if attempt_id == "gh-34713182347-1":
+            # This failed, post-migration attempt has a separately reviewed
+            # verification/cleanup path. A preflight must not implicitly retry it.
+            raise DeploymentError(
+                "Retained worker failure requires explicit worker-recovery verification "
+                "and separately approved completion; no new archive was read"
+            )
 
         attempt_path = config.state_dir / "attempts" / f"{attempt_id}.json"
         if attempt_path.is_file() and not attempt_path.is_symlink():
@@ -2255,7 +2330,9 @@ class DockerHost:
                         )
                     continue
                 restored_references[reference] = image_id
-                source = self.previous_image_pins.get(service, image_id)
+                # The original failed rollback may already have removed its
+                # temporary tag. The immutable image ID remains authoritative.
+                source = image_id
                 self._run(
                     ["docker", "image", "tag", source, reference],
                     context=f"Previous image reference restoration for {service}",
@@ -2275,10 +2352,14 @@ class DockerHost:
                     raise DeploymentError(
                         f"Previous image reference for {service} was not restored"
                     )
-        self._discard_previous_image_pins()
         return True
 
     def prepare_candidate(self, bundle: ValidatedBundle) -> None:
+        # Read-only baseline gate before backups, image tags, static collection,
+        # traffic switches, or migrations. Candidate and rollback use this same
+        # identity/queue/task check; an unhealthy baseline must not be mutated.
+        self._capture_live_images()
+        self._celery_health()
         self.log_since = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.backup_path = self.config.backup_dir / bundle.request.attempt_id
         self.backup_path.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -2312,7 +2393,6 @@ class DockerHost:
         self._capture_platform_current()
         self._capture_deployment_current()
 
-        self._capture_live_images()
         self._validate_recovery_host_baseline(bundle)
         self._capture_infrastructure_restart_baselines()
         self._capture_static_manifest()
@@ -3929,20 +4009,7 @@ class DockerHost:
                     raise DeploymentError(
                         f"Celery service {service} must declare one explicit nodename"
                     )
-                short_hostname, separator, domain = hostname.partition(".")
-                node = patterns[0]
-                placeholder = "\x00"
-                node = node.replace("%%", placeholder)
-                node = node.replace("%h", hostname)
-                node = node.replace("%n", short_hostname)
-                node = node.replace("%d", domain if separator else "")
-                node = node.replace(placeholder, "%")
-                if "%" in node or not re.fullmatch(
-                    r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,199}", node
-                ):
-                    raise DeploymentError(
-                        f"Celery service {service} has an unsafe resolved nodename"
-                    )
+                node = celery_nodename(patterns[0], hostname)
                 if node in nodes:
                     raise DeploymentError("Celery worker nodenames are not unique")
                 nodes.add(node)
@@ -3956,23 +4023,30 @@ class DockerHost:
     def _celery_inspect(
         self, command: str, *, expected_nodes: frozenset[str]
     ) -> dict[str, Any]:
-        output = self._compose(
-            "exec",
-            "-T",
-            self.config.worker_service,
-            "celery",
-            "--app=myauth",
-            "inspect",
-            command,
-            "--timeout=5",
-            "--json",
-            context=f"Celery {command} inspection",
-        )
+        try:
+            output = self._compose(
+                "exec", "-T", self.config.worker_service, "celery", "--app=myauth",
+                "inspect", command, "--timeout=5", "--json",
+                context=f"Celery {command} inspection",
+            )
+        except DeploymentError as exc:
+            raise DeploymentError(
+                _celery_identity_failure(command, expected_nodes, ())
+                + "; inspection command failed"
+            ) from exc
         start = output.find("{")
         if start < 0:
             raise DeploymentError(f"Celery {command} did not return JSON")
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise DeploymentError(f"Celery {command} returned duplicate JSON keys")
+                value[key] = item
+            return value
+
         try:
-            result = json.loads(output[start:])
+            result = json.loads(output[start:], object_pairs_hook=unique_object)
         except json.JSONDecodeError as exc:
             raise DeploymentError(f"Celery {command} returned malformed JSON") from exc
         if (
@@ -3981,12 +4055,14 @@ class DockerHost:
             or set(result) != expected_nodes
             or any(
                 not isinstance(name, str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,199}", name)
+                or len(name) > 200 or CELERY_NODE_RE.fullmatch(name) is None
                 for name in result
             )
         ):
             raise DeploymentError(
-                f"Celery {command} did not return every expected worker"
+                _celery_identity_failure(
+                    command, expected_nodes, tuple(result) if isinstance(result, dict) else ()
+                )
             )
         return result
 
@@ -3994,10 +4070,13 @@ class DockerHost:
         expected_nodes = self._expected_celery_nodes()
         ping = self._celery_inspect("ping", expected_nodes=expected_nodes)
         if any(
-            not isinstance(value, dict) or value.get("ok") != "pong"
+            value != {"ok": "pong"}
             for value in ping.values()
         ):
-            raise DeploymentError("Celery workers did not return a heartbeat")
+            raise DeploymentError(
+                "Celery workers did not return a heartbeat; "
+                + _celery_identity_failure("ping", expected_nodes, tuple(ping))
+            )
 
         queue_report = self._celery_inspect(
             "active_queues", expected_nodes=expected_nodes
@@ -5054,6 +5133,7 @@ class DockerHost:
             self._remove_web_slots(
                 (*self.candidate_web_slots, *self.previous_web_slots)
             )
+            self._discard_previous_image_pins()
             self.complete_recovery_plan()
             traffic = (
                 "Traffic was switched back first"
@@ -5068,6 +5148,7 @@ class DockerHost:
         self._remove_web_slots(
             (*self.candidate_web_slots, *self.previous_web_slots)
         )
+        self._discard_previous_image_pins()
         self.complete_recovery_plan()
         return (
             "Candidate slots and configuration were removed without replacing live "

@@ -1,5 +1,9 @@
 # Platform v2 production receiver
 
+Current post-migration worker-identity incident and approval boundaries:
+[September 12 worker recovery](WORKER-RECOVERY.md). Earlier one-time maintenance
+commands below must not be repeated against its retained active recovery plan.
+
 This directory contains the separately gated Platform v2 deployment path. It
 does not replace or modify the legacy Moon Tax receiver during repository tests,
 release building, or installation. Production activation is a distinct,
