@@ -84,6 +84,19 @@ HISTORICAL_REQUIRED_NODE = "CR_historical_required_check"
 RECOVERED_REQUIRED_NODE = "CR_recovered_required_check"
 HISTORICAL_REQUIRED_COMPLETED_AT = "2026-09-09T01:09:38Z"
 RECOVERED_REQUIRED_COMPLETED_AT = "2026-09-09T12:05:00Z"
+SYNC_REPAIR = "04" * 20
+SYNC_REPAIR_HEAD = "05" * 20
+SYNC_REPAIR_TREE = "06" * 20
+SYNC_HEAD = "07" * 20
+SYNC_HEAD_TREE = "08" * 20
+SYNC_MERGE = "09" * 20
+SYNC_REPAIR_RUN = 675
+SYNC_NATIVE_RUN = 676
+SYNC_NATIVE_CHECK = 1001
+SYNC_NATIVE_SUITE = 1002
+SYNC_NATIVE_NODE = "CR_updated_sync_required_check"
+SYNC_NATIVE_COMPLETED_AT = "2026-09-12T12:05:00Z"
+PREFLIGHT_EXPIRES_AT = "2099-09-16T01:07:13Z"
 
 
 def _response(value: Any) -> sync.HttpResponse:
@@ -276,6 +289,7 @@ def _recovery_contract() -> dict[str, Any]:
             "artifact_digest": ARTIFACT_DIGEST,
             "artifact_id": ARTIFACT_ID,
             "artifact_name": ARTIFACT,
+            "expires_at": PREFLIGHT_EXPIRES_AT,
             "failed_job": {"id": 803, "name": "Publish approval"},
             "jobs": jobs,
             "passed_job": {"id": 802, "name": "Preflight"},
@@ -312,7 +326,24 @@ def _recovery_contract() -> dict[str, Any]:
         },
         "repository": REPOSITORY,
         "schema_version": approval.validation_recovery.SCHEMA_VERSION,
-        "sync": {"branch": f"sync/platform-v{VERSION}", "pull_request": PR_NUMBER},
+        "historical_readiness": {
+            "approval_nonce": "0" * 64,
+            "comment_id": 704,
+            "created_at": "2026-09-09T12:02:00Z",
+            "schema_version": approval.RECOVERY_SCHEMA_VERSION,
+            "sync_base_commit": PUBLICATION,
+            "sync_head_commit": RELEASE,
+        },
+        "sync": {
+            "branch": f"sync/platform-v{VERSION}",
+            "initial_head_commit": RELEASE,
+            "pull_request": PR_NUMBER,
+        },
+        "sync_repair": {
+            "allowed_paths": list(approval.validation_recovery.SYNC_REPAIR_PATHS),
+            "base_commit": PUBLICATION,
+            "pull_request": 57,
+        },
     }
     attestation = _recovery_attestation()
     lanes = _recovery_lane_records()
@@ -384,6 +415,57 @@ def _recovery_contract() -> dict[str, Any]:
         "run_id": RECOVERY_RUN,
     }
     return contract
+
+
+def _current_recovery_contract(
+    historical: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a fixture whose historical identity binds the real v1 payload."""
+
+    contract = _recovery_contract()
+    historical = historical or _recovery_ready_payload()
+    contract["historical_readiness"] = {
+        "approval_nonce": historical["approval_nonce"],
+        "comment_id": 704,
+        "created_at": "2026-09-09T12:02:00Z",
+        "schema_version": approval.RECOVERY_SCHEMA_VERSION,
+        "sync_base_commit": PUBLICATION,
+        "sync_head_commit": RELEASE,
+    }
+    return contract
+
+
+def _sync_repair_report() -> dict[str, Any]:
+    return {
+        "base_commit": PUBLICATION,
+        "feature_head": SYNC_REPAIR_HEAD,
+        "paths": [
+            {
+                "git_blob_sha": f"{index + 701:040x}",
+                "path": path,
+                "sha256": f"{index + 701:064x}",
+            }
+            for index, path in enumerate(
+                approval.validation_recovery.SYNC_REPAIR_PATHS
+            )
+        ],
+        "pull_request": 57,
+        "sync_repair_commit": SYNC_REPAIR,
+        "sync_repair_tree": SYNC_REPAIR_TREE,
+    }
+
+
+def _sync_update_report() -> dict[str, Any]:
+    return {
+        "base_commit": SYNC_REPAIR,
+        "initial_head_commit": RELEASE,
+        "pull_request": PR_NUMBER,
+        "release_commit": RELEASE,
+        "sync_branch": f"sync/platform-v{VERSION}",
+        "sync_head_commit": SYNC_HEAD,
+        "sync_head_tree": SYNC_HEAD_TREE,
+        "sync_repair": _sync_repair_report(),
+    }
 
 
 def _recovery_attestation() -> dict[str, Any]:
@@ -796,6 +878,7 @@ class ApprovalTransport:
                             "id": self.artifact_id,
                             "name": ARTIFACT,
                             "digest": self.artifact_digest,
+                            "expires_at": PREFLIGHT_EXPIRES_AT,
                             "size_in_bytes": 4096,
                             "workflow_run": self.artifact_workflow_run,
                         }
@@ -1608,6 +1691,7 @@ class RecoveryTransport(ApprovalTransport):
                         {
                             "digest": ARTIFACT_DIGEST,
                             "expired": False,
+                            "expires_at": PREFLIGHT_EXPIRES_AT,
                             "id": ARTIFACT_ID,
                             "name": ARTIFACT,
                             "size_in_bytes": 4096,
@@ -1797,6 +1881,335 @@ class RecoveryTransport(ApprovalTransport):
         for key, expected in expected_without_filter.items():
             if query.get(key) != [expected]:
                 raise AssertionError(f"unexpected {key} query: {query}")
+
+
+class UpdatedRecoveryTransport(RecoveryTransport):
+    """GitHub fixture for an updated PR #52 head and immutable v0.6.2."""
+
+    def __init__(
+        self,
+        *,
+        ready: bool,
+        current_payload: dict[str, Any] | None = None,
+        historical_payload: dict[str, Any] | None = None,
+        merge_payload: dict[str, Any] | None = None,
+        include_merge_marker: bool = True,
+    ) -> None:
+        super().__init__(ready=ready)
+        self.current_payload = current_payload
+        self.historical_payload = historical_payload or _recovery_ready_payload()
+        self.merge_payload = merge_payload or current_payload
+        self.include_merge_marker = include_merge_marker
+        self.main_tip = SYNC_REPAIR if ready else SYNC_MERGE
+        self.sync_ref = SYNC_HEAD
+        self.pr_mergeable = True
+        self.pr_mergeable_state = "clean"
+        self.native_run_conclusion = "success"
+        self.native_check_conclusion = "success"
+        self.native_check_head = SYNC_HEAD
+        self.native_check_tree = SYNC_HEAD_TREE
+        self.sync_repair_run = {
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": SYNC_REPAIR,
+            "id": SYNC_REPAIR_RUN,
+            "path": ".github/workflows/source-ci.yml@refs/heads/main",
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 88,
+            "status": "completed",
+        }
+
+    @staticmethod
+    def _sync_repair_pr() -> dict[str, Any]:
+        return {
+            "base": {
+                "ref": "main",
+                "repo": {"full_name": REPOSITORY},
+                "sha": PUBLICATION,
+            },
+            "draft": False,
+            "head": {
+                "ref": "codex/separate-sync-release-identity",
+                "repo": {"full_name": REPOSITORY},
+                "sha": SYNC_REPAIR_HEAD,
+            },
+            "html_url": f"https://github.com/{REPOSITORY}/pull/57",
+            "merge_commit_sha": SYNC_REPAIR,
+            "merged_at": "2026-09-12T11:00:00Z",
+            "merged_by": {"login": OWNER},
+            "number": 57,
+            "state": "closed",
+            "title": "Separate sync and immutable release identities",
+            "user": {"login": OWNER},
+        }
+
+    def _sync_pr(self) -> dict[str, Any]:
+        merged = not self.ready_mode
+        return {
+            "base": {
+                "ref": "main",
+                "repo": {"full_name": REPOSITORY},
+                "sha": SYNC_REPAIR,
+            },
+            "draft": False,
+            "head": {
+                "ref": f"sync/platform-v{VERSION}",
+                "repo": {"full_name": REPOSITORY},
+                "sha": SYNC_HEAD,
+            },
+            "html_url": f"https://github.com/{REPOSITORY}/pull/{PR_NUMBER}",
+            "merge_commit_sha": SYNC_MERGE if merged else None,
+            "mergeable": self.pr_mergeable,
+            "mergeable_state": self.pr_mergeable_state,
+            "merged": merged,
+            "merged_at": "2026-09-12T12:20:00Z" if merged else None,
+            "merged_by": {"login": OWNER} if merged else None,
+            "number": PR_NUMBER,
+            "state": "closed" if merged else "open",
+            "title": f"Sync platform release v{VERSION}",
+            "user": {"login": OWNER},
+        }
+
+    def _native_run(self) -> dict[str, Any]:
+        return {
+            "conclusion": self.native_run_conclusion,
+            "event": "pull_request",
+            "head_branch": f"sync/platform-v{VERSION}",
+            "head_repository": {"full_name": REPOSITORY},
+            "head_sha": SYNC_HEAD,
+            "id": SYNC_NATIVE_RUN,
+            "path": ".github/workflows/source-ci.yml@refs/pull/52/merge",
+            "pull_requests": [{"number": PR_NUMBER}],
+            "repository": {"full_name": REPOSITORY},
+            "run_attempt": 1,
+            "run_number": 89,
+            "status": "completed",
+        }
+
+    def _native_check(self) -> dict[str, Any]:
+        return {
+            "app": {
+                "id": approval.validation_recovery.REQUIRED_CHECK_APP_ID,
+                "slug": approval.validation_recovery.REQUIRED_CHECK_APP_SLUG,
+            },
+            "check_suite": {"id": SYNC_NATIVE_SUITE},
+            "completed_at": SYNC_NATIVE_COMPLETED_AT,
+            "conclusion": self.native_check_conclusion,
+            "details_url": (
+                f"https://github.com/{REPOSITORY}/actions/runs/"
+                f"{SYNC_NATIVE_RUN}/job/{SYNC_NATIVE_CHECK}"
+            ),
+            "external_id": "updated-sync-native-required-job",
+            "head_sha": self.native_check_head,
+            "id": SYNC_NATIVE_CHECK,
+            "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
+            "node_id": SYNC_NATIVE_NODE,
+            "pull_requests": [
+                {
+                    "base": {"ref": "main"},
+                    "head": {"sha": SYNC_HEAD},
+                    "number": PR_NUMBER,
+                }
+            ],
+            "started_at": "2026-09-12T12:04:00Z",
+            "status": "completed",
+        }
+
+    def request(self, method, url, headers, body, timeout):
+        parsed = urllib.parse.urlsplit(url)
+        suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        if parsed.path == "/graphql" and body is not None:
+            request = json.loads(body)
+            variables = request.get("variables", {})
+            if variables.get("checkRunId") != SYNC_NATIVE_NODE:
+                return super().request(method, url, headers, body, timeout)
+            self.calls.append((method, parsed.path))
+            check = self._native_check()
+            return _response(
+                {
+                    "data": {
+                        "node": {
+                            "__typename": "CheckRun",
+                            "checkSuite": {
+                                "commit": {"oid": self.native_check_head},
+                                "databaseId": SYNC_NATIVE_SUITE,
+                            },
+                            "conclusion": str(check["conclusion"]).upper(),
+                            "databaseId": SYNC_NATIVE_CHECK,
+                            "detailsUrl": check["details_url"],
+                            "externalId": check["external_id"],
+                            "isRequired": True,
+                            "name": check["name"],
+                            "repository": {"nameWithOwner": REPOSITORY},
+                            "status": "COMPLETED",
+                        },
+                        "repository": {
+                            "nameWithOwner": REPOSITORY,
+                            "pullRequest": {
+                                "headRefOid": SYNC_HEAD,
+                                "number": PR_NUMBER,
+                                "state": "OPEN" if self.ready_mode else "MERGED",
+                            },
+                        },
+                    }
+                }
+            )
+        handled = True
+        if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
+            response = _response(self._sync_pr())
+        elif suffix == "pulls/57" and method == "GET":
+            response = _response(self._sync_repair_pr())
+        elif suffix == f"commits/{SYNC_REPAIR}":
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": SYNC_REPAIR_TREE}},
+                    "parents": [
+                        {"sha": PUBLICATION},
+                        {"sha": SYNC_REPAIR_HEAD},
+                    ],
+                    "sha": SYNC_REPAIR,
+                }
+            )
+        elif suffix == f"commits/{SYNC_REPAIR_HEAD}":
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": SYNC_REPAIR_TREE}},
+                    "parents": [{"sha": PUBLICATION}],
+                    "sha": SYNC_REPAIR_HEAD,
+                }
+            )
+        elif suffix == f"commits/{SYNC_REPAIR}/pulls":
+            association = self._sync_repair_pr()
+            association.pop("merged_by")
+            response = _response([association])
+        elif suffix == f"commits/{SYNC_HEAD}":
+            response = _response(
+                {
+                    "commit": {"tree": {"sha": self.native_check_tree}},
+                    "parents": [{"sha": RELEASE}, {"sha": SYNC_REPAIR}],
+                    "sha": SYNC_HEAD,
+                }
+            )
+        elif suffix == f"commits/{SYNC_MERGE}":
+            message = f"Sync platform release v{VERSION}"
+            if self.include_merge_marker and self.merge_payload is not None:
+                message += "\n\n" + approval.marker(
+                    approval.CURRENT_RECOVERY_APPROVAL_PREFIX,
+                    approval.approval_payload(self.merge_payload),
+                )
+            response = _response(
+                {
+                    "commit": {
+                        "message": message,
+                        "tree": {"sha": self.native_check_tree},
+                    },
+                    "parents": [{"sha": SYNC_REPAIR}, {"sha": SYNC_HEAD}],
+                    "sha": SYNC_MERGE,
+                }
+            )
+        elif suffix == f"git/ref/heads/sync/platform-v{VERSION}":
+            response = _response(
+                {
+                    "ref": f"refs/heads/sync/platform-v{VERSION}",
+                    "object": {"sha": self.sync_ref, "type": "commit"},
+                }
+            )
+        elif suffix == "git/ref/heads/main":
+            response = _response(
+                {
+                    "ref": "refs/heads/main",
+                    "object": {"sha": self.main_tip, "type": "commit"},
+                }
+            )
+        elif suffix == f"actions/runs/{SYNC_REPAIR_RUN}":
+            response = _response(self.sync_repair_run)
+        elif suffix == f"actions/runs/{SYNC_NATIVE_RUN}":
+            response = _response(self._native_run())
+        elif suffix == f"actions/runs/{SYNC_NATIVE_RUN}/jobs":
+            check = self._native_check()
+            response = _response(
+                {
+                    "jobs": [
+                        {
+                            "conclusion": self.native_check_conclusion,
+                            "head_sha": SYNC_HEAD,
+                            "html_url": check["details_url"],
+                            "id": SYNC_NATIVE_CHECK,
+                            "name": approval.validation_recovery.REQUIRED_CHECK_CONTEXT,
+                            "run_attempt": 1,
+                            "run_id": SYNC_NATIVE_RUN,
+                            "status": "completed",
+                            "workflow_name": "Validate PR",
+                        }
+                    ],
+                    "total_count": 1,
+                }
+            )
+        elif suffix == f"check-runs/{SYNC_NATIVE_CHECK}":
+            response = _response(self._native_check())
+        elif suffix == "actions/workflows/source-ci.yml/runs":
+            query = urllib.parse.parse_qs(parsed.query)
+            head_sha = query.get("head_sha", [None])[0]
+            if head_sha == SYNC_REPAIR:
+                runs = [self.sync_repair_run]
+            elif head_sha == SYNC_HEAD:
+                runs = [self._native_run()]
+            else:
+                return super().request(method, url, headers, body, timeout)
+            response = _response({"total_count": len(runs), "workflow_runs": runs})
+        elif suffix == f"issues/{PR_NUMBER}/comments":
+            comments = [
+                {
+                    "body": approval.marker(
+                        approval.RECOVERY_READY_PREFIX, self.historical_payload
+                    ),
+                    "created_at": "2026-09-09T12:02:00Z",
+                    "id": 704,
+                    "user": {"login": approval.BOT_LOGIN},
+                }
+            ]
+            if method == "GET":
+                if self.current_payload is not None:
+                    comments.append(
+                        {
+                            "body": approval.marker(
+                                approval.CURRENT_RECOVERY_READY_PREFIX,
+                                self.current_payload,
+                            ),
+                            "created_at": "2026-09-12T12:10:00Z",
+                            "id": 705,
+                            "user": {"login": approval.BOT_LOGIN},
+                        }
+                    )
+                response = _response(comments)
+            elif method == "POST" and body is not None:
+                posted = json.loads(body)
+                response = sync.HttpResponse(
+                    201,
+                    (
+                        json.dumps(
+                            {
+                                "body": posted["body"],
+                                "id": 705,
+                                "user": {"login": approval.BOT_LOGIN},
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode(),
+                )
+            else:
+                raise AssertionError(f"unexpected comments request: {method}")
+        else:
+            handled = False
+            response = None
+        if not handled:
+            return super().request(method, url, headers, body, timeout)
+        self.calls.append((method, parsed.path))
+        return response
 
 
 class PlatformApprovalTests(unittest.TestCase):
@@ -3349,6 +3762,250 @@ class PlatformApprovalTests(unittest.TestCase):
                 transport=transport,
                 sleeper=lambda _: None,
             )
+
+    def test_retained_same_context_checks_do_not_qualify_a_behind_head(self):
+        fixtures = PROJECT_ROOT / "tests/release/fixtures"
+        behind = json.loads(
+            (fixtures / "github-pr-52-behind.json").read_text(encoding="utf-8")
+        )
+        history = json.loads(
+            (
+                fixtures / "github-required-check-history-6074b965.json"
+            ).read_text(encoding="utf-8")
+        )
+        checks = history["check_runs"]
+        self.assertEqual(history["total_count"], 2)
+        self.assertEqual(
+            {item["conclusion"] for item in checks}, {"failure", "success"}
+        )
+        self.assertEqual(
+            {item["check_suite"]["id"] for item in checks},
+            {92911719432, 92911719969},
+        )
+        self.assertEqual(
+            {item["name"] for item in checks},
+            {approval.validation_recovery.REQUIRED_CHECK_CONTEXT},
+        )
+        config = approval._config(
+            owner=OWNER,
+            repository=REPOSITORY,
+            version="0.6.2",
+            source_commit="4f98e7cb559ee1a9b269ea1f94938678d2dac4df",
+            release_commit=(
+                "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
+            ),
+            api_url="https://api.github.com",
+            server_url="https://github.com",
+            output=Path("unused-behind-report.json"),
+        )
+        with self.assertRaisesRegex(
+            approval.ApprovalError,
+            "Synchronization PR identity does not match the release",
+        ):
+            approval._validate_pr(
+                behind,
+                config,
+                52,
+                state="open",
+                expected_head=config.release_commit,
+                expected_base=(
+                    "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb"
+                ),
+                require_mergeable=True,
+            )
+
+    def test_updated_sync_head_readiness_and_authorization_keep_v062_immutable(self):
+        with patch(f"{__name__}.VERSION", "0.6.2"):
+            contract = _current_recovery_contract()
+            ready_transport = UpdatedRecoveryTransport(ready=True)
+            with tempfile.TemporaryDirectory() as temp, patch.object(
+                approval.validation_recovery,
+                "load_contract",
+                return_value=contract,
+            ):
+                ready_report = approval.ready_recovery_update(
+                    contract,
+                    TOKEN,
+                    owner=OWNER,
+                    repository=REPOSITORY,
+                    api_url="https://api.github.com",
+                    server_url="https://github.com",
+                    output=Path(temp) / "current-ready.json",
+                    sync_update=_sync_update_report(),
+                    sync_repair_readiness=_published_readiness(
+                        pull_request=57,
+                        feature_head=SYNC_REPAIR_HEAD,
+                        merge_source_commit=SYNC_REPAIR,
+                    ),
+                    transport=ready_transport,
+                    sleeper=lambda _: None,
+                    polls=1,
+                )
+                ready = ready_report["ready"]
+                self.assertEqual(
+                    ready_report["schema_version"],
+                    approval.CURRENT_RECOVERY_SCHEMA_VERSION,
+                )
+                self.assertEqual(ready["release_commit"], RELEASE)
+                self.assertEqual(ready["sync_base_commit"], SYNC_REPAIR)
+                self.assertEqual(ready["sync_head_commit"], SYNC_HEAD)
+                self.assertNotEqual(
+                    ready["release_commit"], ready["sync_head_commit"]
+                )
+                self.assertEqual(
+                    ready["supersedes"], contract["historical_readiness"]
+                )
+                self.assertIn(
+                    (
+                        "POST",
+                        f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments",
+                    ),
+                    ready_transport.calls,
+                )
+
+                authorization_transport = UpdatedRecoveryTransport(
+                    ready=False, current_payload=ready
+                )
+                event = {
+                    "action": "closed",
+                    "number": PR_NUMBER,
+                    "pull_request": authorization_transport._sync_pr(),
+                    "sender": {"login": OWNER},
+                }
+                authorized = approval.authorize(
+                    event,
+                    owner=OWNER,
+                    repository=REPOSITORY,
+                    actor=OWNER,
+                    triggering_actor=OWNER,
+                    run_attempt=1,
+                    api_url="https://api.github.com",
+                    server_url="https://github.com",
+                    output=Path(temp) / "authorization.json",
+                    token=TOKEN,
+                    transport=authorization_transport,
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(
+                authorized["validation_mode"],
+                "published-release-sync-update",
+            )
+            self.assertEqual(authorized["release_commit"], RELEASE)
+            self.assertEqual(authorized["sync_head_commit"], SYNC_HEAD)
+            self.assertEqual(authorized["merge_commit"], SYNC_MERGE)
+            self.assertEqual(
+                authorized["manifest_sha256"], contract["release"]["manifest_sha256"]
+            )
+
+    def test_updated_sync_handoff_rejects_behind_stale_and_conflicting_state(self):
+        with patch(f"{__name__}.VERSION", "0.6.2"):
+            contract = _current_recovery_contract()
+            repair_readiness = _published_readiness(
+                pull_request=57,
+                feature_head=SYNC_REPAIR_HEAD,
+                merge_source_commit=SYNC_REPAIR,
+            )
+            with patch.object(
+                approval.validation_recovery,
+                "load_contract",
+                return_value=contract,
+            ):
+                behind = UpdatedRecoveryTransport(ready=True)
+                behind.pr_mergeable_state = "behind"
+                with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
+                    approval.ApprovalError, "Synchronization PR identity"
+                ):
+                    approval.ready_recovery_update(
+                        contract,
+                        TOKEN,
+                        owner=OWNER,
+                        repository=REPOSITORY,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=Path(temp) / "behind.json",
+                        sync_update=_sync_update_report(),
+                        sync_repair_readiness=repair_readiness,
+                        transport=behind,
+                        sleeper=lambda _: None,
+                        polls=1,
+                    )
+                self.assertNotIn(
+                    (
+                        "POST",
+                        f"/repos/{REPOSITORY}/issues/{PR_NUMBER}/comments",
+                    ),
+                    behind.calls,
+                )
+
+                wrong_tree = copy.deepcopy(_sync_update_report())
+                wrong_tree["sync_head_tree"] = "f" * 40
+                with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(
+                    approval.ApprovalError,
+                    "Synchronization update commit identity is invalid",
+                ):
+                    approval.ready_recovery_update(
+                        contract,
+                        TOKEN,
+                        owner=OWNER,
+                        repository=REPOSITORY,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=Path(temp) / "wrong-tree.json",
+                        sync_update=wrong_tree,
+                        sync_repair_readiness=repair_readiness,
+                        transport=UpdatedRecoveryTransport(ready=True),
+                        sleeper=lambda _: None,
+                        polls=1,
+                    )
+
+                with tempfile.TemporaryDirectory() as temp:
+                    valid_report = approval.ready_recovery_update(
+                        contract,
+                        TOKEN,
+                        owner=OWNER,
+                        repository=REPOSITORY,
+                        api_url="https://api.github.com",
+                        server_url="https://github.com",
+                        output=Path(temp) / "valid.json",
+                        sync_update=_sync_update_report(),
+                        sync_repair_readiness=repair_readiness,
+                        transport=UpdatedRecoveryTransport(ready=True),
+                        sleeper=lambda _: None,
+                        polls=1,
+                    )
+                    current = valid_report["ready"]
+                    stale = copy.deepcopy(current)
+                    stale["sync_base_commit"] = PUBLICATION
+                    stale["approval_nonce"] = approval._nonce(stale)
+                    rejected = UpdatedRecoveryTransport(
+                        ready=False,
+                        current_payload=current,
+                        merge_payload=stale,
+                    )
+                    event = {
+                        "action": "closed",
+                        "number": PR_NUMBER,
+                        "pull_request": rejected._sync_pr(),
+                        "sender": {"login": OWNER},
+                    }
+                    with self.assertRaisesRegex(
+                        approval.ApprovalError,
+                        "approval does not match current readiness",
+                    ):
+                        approval.authorize(
+                            event,
+                            owner=OWNER,
+                            repository=REPOSITORY,
+                            actor=OWNER,
+                            triggering_actor=OWNER,
+                            run_attempt=1,
+                            api_url="https://api.github.com",
+                            server_url="https://github.com",
+                            output=Path(temp) / "stale-approval.json",
+                            token=TOKEN,
+                            transport=rejected,
+                            sleeper=lambda _: None,
+                        )
 
     def test_ready_reports_denied_comment_publication_without_response_data(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

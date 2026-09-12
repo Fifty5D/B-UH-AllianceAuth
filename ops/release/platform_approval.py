@@ -37,12 +37,15 @@ import validation_recovery
 
 SCHEMA_VERSION = 2
 RECOVERY_SCHEMA_VERSION = 7
+CURRENT_RECOVERY_SCHEMA_VERSION = 8
 FEATURE_READINESS_SCHEMA_VERSION = 1
 PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 1
 READY_PREFIX = "<!-- buh-platform-ready:v2 "
 APPROVAL_PREFIX = "<!-- buh-chatgpt-approved:v2 "
 RECOVERY_READY_PREFIX = "<!-- buh-platform-ready-recovery:v1 "
 RECOVERY_APPROVAL_PREFIX = "<!-- buh-chatgpt-approved-recovery:v1 "
+CURRENT_RECOVERY_READY_PREFIX = "<!-- buh-platform-ready-recovery:v2 "
+CURRENT_RECOVERY_APPROVAL_PREFIX = "<!-- buh-chatgpt-approved-recovery:v2 "
 MARKER_SUFFIX = " -->"
 BOT_LOGIN = "github-actions[bot]"
 MAX_PAGES = 100
@@ -206,12 +209,16 @@ def _validate_pr(
     number: int,
     *,
     state: str,
+    expected_head: str | None = None,
+    expected_base: str | None = None,
+    require_mergeable: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(pr, dict):
         raise ApprovalError("GitHub returned a malformed synchronization PR")
     head = pr.get("head")
     base = pr.get("base")
     expected_url = f"{config.server_url}/{config.repository}/pull/{number}"
+    expected_head_commit = config.release_commit if expected_head is None else expected_head
     if (
         pr.get("number") != number
         or pr.get("state") != state
@@ -221,22 +228,38 @@ def _validate_pr(
         or _login(pr.get("user")) != config.owner
         or not isinstance(head, dict)
         or head.get("ref") != config.sync_branch
-        or head.get("sha") != config.release_commit
+        or head.get("sha") != expected_head_commit
         or _repo_name(head.get("repo")) != config.repository
         or not isinstance(base, dict)
         or base.get("ref") != "main"
         or _repo_name(base.get("repo")) != config.repository
+        or expected_base is not None
+        and base.get("sha") != expected_base
+        or require_mergeable
+        and (pr.get("mergeable") is not True or pr.get("mergeable_state") != "clean")
     ):
         raise ApprovalError("Synchronization PR identity does not match the release")
     return pr
 
 
-def _get_pr(client: GitHubClient, config: SyncConfig, number: int, state: str):
+def _get_pr(
+    client: GitHubClient,
+    config: SyncConfig,
+    number: int,
+    state: str,
+    *,
+    expected_head: str | None = None,
+    expected_base: str | None = None,
+    require_mergeable: bool = False,
+):
     return _validate_pr(
         client.get(_path(config.repository, f"pulls/{number}")),
         config,
         number,
         state=state,
+        expected_head=expected_head,
+        expected_base=expected_base,
+        require_mergeable=require_mergeable,
     )
 
 
@@ -285,13 +308,15 @@ def _source_ci_run(
     *,
     sleeper: Callable[[float], None],
     polls: int = SOURCE_CI_POLLS,
+    head_commit: str | None = None,
 ) -> dict[str, Any]:
+    expected_head = config.release_commit if head_commit is None else head_commit
     for poll in range(polls):
         payload = client.get(
             _path(config.repository, "actions/workflows/source-ci.yml/runs"),
             {
                 "event": "pull_request",
-                "head_sha": config.release_commit,
+                "head_sha": expected_head,
                 "per_page": "100",
             },
         )
@@ -303,7 +328,7 @@ def _source_ci_run(
             for run in runs
             if isinstance(run, dict)
             and run.get("event") == "pull_request"
-            and run.get("head_sha") == config.release_commit
+            and run.get("head_sha") == expected_head
             and run.get("head_branch") == config.sync_branch
             and _workflow_path(run) == ".github/workflows/source-ci.yml"
             and _repo_name(run.get("head_repository")) == config.repository
@@ -675,6 +700,131 @@ def _publication_repair_evidence(
         "publication_repair_tree": tree,
         "pull_request": publication["pull_request"],
     }
+
+
+def _sync_repair_evidence(
+    value: Any,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "base_commit",
+        "feature_head",
+        "paths",
+        "pull_request",
+        "sync_repair_commit",
+        "sync_repair_tree",
+    }:
+        raise ApprovalError("Synchronization-head repair evidence is invalid")
+    repair = contract["sync_repair"]
+    paths = value.get("paths")
+    if (
+        value.get("base_commit") != repair["base_commit"]
+        or value.get("pull_request") != repair["pull_request"]
+        or not isinstance(value.get("feature_head"), str)
+        or COMMIT_RE.fullmatch(value["feature_head"]) is None
+        or not isinstance(value.get("sync_repair_commit"), str)
+        or COMMIT_RE.fullmatch(value["sync_repair_commit"]) is None
+        or not isinstance(value.get("sync_repair_tree"), str)
+        or COMMIT_RE.fullmatch(value["sync_repair_tree"]) is None
+        or not isinstance(paths, list)
+        or [item.get("path") for item in paths if isinstance(item, dict)]
+        != list(validation_recovery.SYNC_REPAIR_PATHS)
+    ):
+        raise ApprovalError("Synchronization-head repair identity changed")
+    for item in paths:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"git_blob_sha", "path", "sha256"}
+            or not isinstance(item.get("git_blob_sha"), str)
+            or COMMIT_RE.fullmatch(item["git_blob_sha"]) is None
+            or not isinstance(item.get("sha256"), str)
+            or NONCE_RE.fullmatch(item["sha256"]) is None
+        ):
+            raise ApprovalError("Synchronization-head repair path evidence changed")
+    return {
+        "base_commit": repair["base_commit"],
+        "feature_head": value["feature_head"],
+        "paths": [dict(item) for item in paths],
+        "pull_request": repair["pull_request"],
+        "sync_repair_commit": value["sync_repair_commit"],
+        "sync_repair_tree": value["sync_repair_tree"],
+    }
+
+
+def _sync_update_evidence(
+    value: Any,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "base_commit",
+        "initial_head_commit",
+        "pull_request",
+        "release_commit",
+        "sync_branch",
+        "sync_head_commit",
+        "sync_head_tree",
+        "sync_repair",
+    }:
+        raise ApprovalError("Synchronization update evidence is invalid")
+    repair = _sync_repair_evidence(value.get("sync_repair"), contract)
+    sync = contract["sync"]
+    release = contract["release"]
+    if (
+        value.get("base_commit") != repair["sync_repair_commit"]
+        or value.get("initial_head_commit") != sync["initial_head_commit"]
+        or value.get("pull_request") != sync["pull_request"]
+        or value.get("release_commit") != release["commit"]
+        or value.get("sync_branch") != sync["branch"]
+        or not isinstance(value.get("sync_head_commit"), str)
+        or COMMIT_RE.fullmatch(value["sync_head_commit"]) is None
+        or not isinstance(value.get("sync_head_tree"), str)
+        or COMMIT_RE.fullmatch(value["sync_head_tree"]) is None
+    ):
+        raise ApprovalError("Synchronization update identity changed")
+    return {**value, "sync_repair": repair}
+
+
+def _verify_sync_repair_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    identity: Mapping[str, Any],
+    *,
+    work_actor: str,
+) -> dict[str, Any]:
+    return _verify_review_merge_remote(
+        client,
+        config,
+        identity,
+        commit_field="sync_repair_commit",
+        tree_field="sync_repair_tree",
+        first_parent=identity["base_commit"],
+        label="synchronization-head repair",
+        state="closed",
+        work_actor=work_actor,
+    )
+
+
+def _verify_sync_update_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> None:
+    sync_head = identity["sync_head_commit"]
+    commit = _read_commit(client, config, sync_head)
+    parents = commit.get("parents")
+    if (
+        not isinstance(parents, list)
+        or len(parents) != 2
+        or not all(isinstance(parent, dict) for parent in parents)
+        or parents[0].get("sha") != config.release_commit
+        or parents[1].get("sha") != identity["base_commit"]
+        or _commit_tree(commit, context="Synchronization update")
+        != identity["sync_head_tree"]
+    ):
+        raise ApprovalError("Synchronization update commit identity is invalid")
+    if _read_ref(client, config, config.sync_branch) != sync_head:
+        raise ApprovalError("Synchronization branch moved after validation")
 
 
 def _required_check_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -1254,6 +1404,7 @@ def _verify_exact_required_check_graphql(
     check: Mapping[str, Any],
     *,
     pull_request_state: str,
+    head_commit: str | None = None,
 ) -> None:
     owner, repository = config.repository.split("/", 1)
     locator = _required_check_locator(check)
@@ -1263,6 +1414,7 @@ def _verify_exact_required_check_graphql(
         "repository": repository,
         "pullRequest": contract["sync"]["pull_request"],
     }
+    expected_head = config.release_commit if head_commit is None else head_commit
     for attempt in range(RECOVERY_CHECK_POLLS):
         payload = _graphql_read(
             client,
@@ -1285,7 +1437,7 @@ def _verify_exact_required_check_graphql(
             or not isinstance(pull, dict)
             or pull.get("number") != contract["sync"]["pull_request"]
             or pull.get("state") != pull_request_state
-            or pull.get("headRefOid") != config.release_commit
+            or pull.get("headRefOid") != expected_head
         ):
             raise ApprovalError(
                 "Exact recovery check does not satisfy the protected pull-request requirement"
@@ -1317,7 +1469,7 @@ def _verify_exact_required_check_graphql(
             or not isinstance(suite, dict)
             or suite.get("databaseId") != locator["check_suite_id"]
             or not isinstance(commit, dict)
-            or commit.get("oid") != config.release_commit
+            or commit.get("oid") != expected_head
             or not isinstance(check_repository, dict)
             or check_repository.get("nameWithOwner") != config.repository
         ):
@@ -1437,6 +1589,7 @@ def _verify_published_recovery_check(
     *,
     pull_request_state: str,
     work_actor: str,
+    require_current_pr: bool = True,
 ) -> dict[str, Any]:
     required = _required_check_contract(contract)
     expected_payload, binding_digest, external_id = _recovery_check_payload(
@@ -1518,13 +1671,14 @@ def _verify_published_recovery_check(
             client.sleeper(RECOVERY_CHECK_POLL_SECONDS)
     else:
         raise ApprovalError("Recovered required check is not a current suite result")
-    _verify_exact_required_check_graphql(
-        client,
-        config,
-        contract,
-        checked,
-        pull_request_state=pull_request_state,
-    )
+    if require_current_pr:
+        _verify_exact_required_check_graphql(
+            client,
+            config,
+            contract,
+            checked,
+            pull_request_state=pull_request_state,
+        )
     all_runs = []
     for attempt in range(RECOVERY_CHECK_POLLS):
         all_runs = _check_runs_for_release(
@@ -1799,6 +1953,7 @@ def _artifact(
     head_sha: str | None = None,
     expected_id: int | None = None,
     expected_digest: str | None = None,
+    expected_expires_at: str | None = None,
 ) -> dict[str, Any]:
     expected_head = config.source_sha if head_sha is None else head_sha
     payload = client.get(
@@ -1838,6 +1993,12 @@ def _artifact(
         raise ApprovalError("Retained preflight artifact ID changed")
     if expected_digest is not None and digest != expected_digest:
         raise ApprovalError("Retained preflight artifact digest changed")
+    if expected_expires_at is not None:
+        expires_at = _timestamp("Retained artifact expiry", artifact.get("expires_at"))
+        if artifact.get("expires_at") != expected_expires_at:
+            raise ApprovalError("Retained preflight artifact expiry changed")
+        if expires_at <= dt.datetime.now(dt.timezone.utc):
+            raise ApprovalError("Retained preflight artifact has expired")
     return artifact
 
 
@@ -1993,6 +2154,7 @@ def _verify_partial_recovery_publication(
     *,
     pull_request_state: str,
     work_actor: str,
+    require_current_pr: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Verify and reuse the exact successful check from the failed final step."""
 
@@ -2081,6 +2243,7 @@ def _verify_partial_recovery_publication(
         required_check,
         pull_request_state=pull_request_state,
         work_actor=work_actor,
+        require_current_pr=require_current_pr,
     )
     return artifact, lane_jobs, required_check
 
@@ -2272,12 +2435,20 @@ def _nonce(fields: Mapping[str, Any]) -> str:
 
 
 def approval_payload(ready: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "approval_nonce": ready["approval_nonce"],
         "platform_version": ready["platform_version"],
         "release_commit": ready["release_commit"],
         "schema_version": ready["schema_version"],
     }
+    if ready.get("schema_version") == CURRENT_RECOVERY_SCHEMA_VERSION:
+        payload.update(
+            {
+                "sync_base_commit": ready["sync_base_commit"],
+                "sync_head_commit": ready["sync_head_commit"],
+            }
+        )
+    return payload
 
 
 def marker(prefix: str, payload: Mapping[str, Any]) -> str:
@@ -2320,8 +2491,23 @@ def _post_ready_comment(
     *,
     recovery: bool = False,
 ) -> dict[str, Any]:
-    ready_prefix = RECOVERY_READY_PREFIX if recovery else READY_PREFIX
-    approval_prefix = RECOVERY_APPROVAL_PREFIX if recovery else APPROVAL_PREFIX
+    current_recovery = (
+        recovery and ready.get("schema_version") == CURRENT_RECOVERY_SCHEMA_VERSION
+    )
+    ready_prefix = (
+        CURRENT_RECOVERY_READY_PREFIX
+        if current_recovery
+        else RECOVERY_READY_PREFIX
+        if recovery
+        else READY_PREFIX
+    )
+    approval_prefix = (
+        CURRENT_RECOVERY_APPROVAL_PREFIX
+        if current_recovery
+        else RECOVERY_APPROVAL_PREFIX
+        if recovery
+        else APPROVAL_PREFIX
+    )
     approval = marker(approval_prefix, approval_payload(ready))
     explanation = (
         "The reviewed published-release recovery validation and retained "
@@ -2846,6 +3032,196 @@ def ready_recovery(
     }
 
 
+def ready_recovery_update(
+    contract: Mapping[str, Any],
+    token: str,
+    *,
+    owner: str,
+    repository: str,
+    api_url: str,
+    server_url: str,
+    output: Path,
+    sync_update: Mapping[str, Any],
+    sync_repair_readiness: Mapping[str, Any],
+    work_actor: str = "",
+    transport=None,
+    sleeper: Callable[[float], None] = time.sleep,
+    polls: int = SOURCE_CI_POLLS,
+) -> dict[str, Any]:
+    """Supersede stale schema-7 readiness after one reviewed PR update."""
+
+    release = contract["release"]
+    sync = contract["sync"]
+    config = _config(
+        owner=owner,
+        repository=repository,
+        version=contract["platform_version"],
+        source_commit=release["source_commit"],
+        release_commit=release["commit"],
+        api_url=api_url,
+        server_url=server_url,
+        output=output,
+    )
+    if repository != contract["repository"]:
+        raise ApprovalError("Recovery repository does not match its contract")
+    update = _sync_update_evidence(sync_update, contract)
+    repair = update["sync_repair"]
+    if update["sync_head_commit"] == release["commit"]:
+        raise ApprovalError("Updated synchronization head still aliases the release commit")
+    published_repair = _feature_readiness(
+        sync_repair_readiness,
+        config,
+        merge_source_commit=repair["sync_repair_commit"],
+        expected_pull_request=repair["pull_request"],
+        expected_feature_head=repair["feature_head"],
+    )
+    client = GitHubClient(config.api_url, token, transport=transport, sleeper=sleeper)
+    comments = _comments(client, config, sync["pull_request"])
+    historical_comment, historical_payload, historical_evidence = (
+        _historical_recovery_comment(comments, config, contract)
+    )
+    if any(
+        _marker_payload(item.get("body"), READY_PREFIX) is not None
+        or _marker_payload(item.get("body"), CURRENT_RECOVERY_READY_PREFIX) is not None
+        for item in comments
+    ):
+        raise ApprovalError("A current readiness marker already exists for this pull request")
+    if _read_ref(client, config, "main") != repair["sync_repair_commit"]:
+        raise ApprovalError("Reviewed synchronization base is not current main")
+    _verify_release(client, config, sync=False)
+    _verify_sync_repair_remote(client, config, repair, work_actor=work_actor)
+    repair_run = _main_ci_run(client, config, repair["sync_repair_commit"])
+    _verify_main_run_for_commit(
+        client,
+        config,
+        repair["sync_repair_commit"],
+        repair_run["id"],
+        repair_run["run_attempt"],
+    )
+    _verify_sync_update_remote(client, config, contract, update)
+    _get_pr(
+        client,
+        config,
+        sync["pull_request"],
+        "open",
+        expected_head=update["sync_head_commit"],
+        expected_base=repair["sync_repair_commit"],
+        require_mergeable=True,
+    )
+    _verify_historical_recovery_remote(
+        client,
+        config,
+        contract,
+        historical_evidence,
+        work_actor=work_actor,
+    )
+    source_run = _source_ci_run(
+        client,
+        config,
+        sync["pull_request"],
+        sleeper=sleeper,
+        polls=polls,
+        head_commit=update["sync_head_commit"],
+    )
+    native_check = _verify_native_sync_validation(
+        client,
+        config,
+        contract,
+        number=sync["pull_request"],
+        head_commit=update["sync_head_commit"],
+        run_id=source_run["id"],
+        run_attempt=source_run["run_attempt"],
+        pull_request_state="OPEN",
+    )
+
+    # Re-read every mutable edge after the potentially long native-check poll.
+    if _read_ref(client, config, "main") != repair["sync_repair_commit"]:
+        raise ApprovalError("Main advanced before updated recovery readiness")
+    _verify_release(client, config, sync=False)
+    _verify_sync_update_remote(client, config, contract, update)
+    _get_pr(
+        client,
+        config,
+        sync["pull_request"],
+        "open",
+        expected_head=update["sync_head_commit"],
+        expected_base=repair["sync_repair_commit"],
+        require_mergeable=True,
+    )
+    final_comments = _comments(client, config, sync["pull_request"])
+    final_historical_comment, final_historical_payload, _ = (
+        _historical_recovery_comment(final_comments, config, contract)
+    )
+    if (
+        final_historical_comment != historical_comment
+        or final_historical_payload != historical_payload
+        or any(
+            _marker_payload(item.get("body"), READY_PREFIX) is not None
+            or _marker_payload(item.get("body"), CURRENT_RECOVERY_READY_PREFIX)
+            is not None
+            for item in final_comments
+        )
+    ):
+        raise ApprovalError("Readiness history changed during current publication")
+    native_check = _verify_native_sync_validation(
+        client,
+        config,
+        contract,
+        number=sync["pull_request"],
+        head_commit=update["sync_head_commit"],
+        run_id=source_run["id"],
+        run_attempt=source_run["run_attempt"],
+        pull_request_state="OPEN",
+    )
+    fields: dict[str, Any] = {
+        "feature_readiness": historical_payload["feature_readiness"],
+        "main_validation_run_attempt": historical_payload[
+            "main_validation_run_attempt"
+        ],
+        "main_validation_run_id": historical_payload["main_validation_run_id"],
+        "manifest_sha256": release["manifest_sha256"],
+        "platform_version": contract["platform_version"],
+        "preflight_artifact": historical_payload["preflight_artifact"],
+        "preflight_artifact_digest": historical_payload[
+            "preflight_artifact_digest"
+        ],
+        "preflight_artifact_id": historical_payload["preflight_artifact_id"],
+        "preflight_run_attempt": historical_payload["preflight_run_attempt"],
+        "preflight_run_id": historical_payload["preflight_run_id"],
+        "pull_request": sync["pull_request"],
+        "recovery_validation": {
+            "mode": "published-release-sync-update",
+            "native_required_check": native_check,
+            "sync_repair": repair,
+            "sync_repair_readiness": published_repair,
+            "sync_repair_validation_run_attempt": repair_run["run_attempt"],
+            "sync_repair_validation_run_id": repair_run["id"],
+        },
+        "release_commit": release["commit"],
+        "repository": contract["repository"],
+        "schema_version": CURRENT_RECOVERY_SCHEMA_VERSION,
+        "source_commit": release["source_commit"],
+        "supersedes": dict(contract["historical_readiness"]),
+        "sync_base_commit": repair["sync_repair_commit"],
+        "sync_head_commit": update["sync_head_commit"],
+        "sync_head_tree": update["sync_head_tree"],
+        "sync_validation_run_attempt": source_run["run_attempt"],
+        "sync_validation_run_id": source_run["id"],
+    }
+    fields["approval_nonce"] = _nonce(fields)
+    comment = _post_ready_comment(
+        client, config, sync["pull_request"], fields, recovery=True
+    )
+    return {
+        "approval_marker": marker(
+            CURRENT_RECOVERY_APPROVAL_PREFIX, approval_payload(fields)
+        ),
+        "comment_id": comment["id"],
+        "ready": fields,
+        "schema_version": CURRENT_RECOVERY_SCHEMA_VERSION,
+    }
+
+
 READY_KEYS = {
     "approval_nonce",
     "feature_readiness",
@@ -2867,9 +3243,17 @@ READY_KEYS = {
     "sync_validation_run_id",
 }
 RECOVERY_READY_KEYS = READY_KEYS | {"recovery_validation"}
+CURRENT_RECOVERY_READY_KEYS = RECOVERY_READY_KEYS | {
+    "supersedes",
+    "sync_base_commit",
+    "sync_head_commit",
+    "sync_head_tree",
+}
 
 
 def _validate_ready_payload(payload: Mapping[str, Any], config: SyncConfig, number: int):
+    if payload.get("schema_version") == CURRENT_RECOVERY_SCHEMA_VERSION:
+        return _validate_current_recovery_ready_payload(payload, config, number)
     if payload.get("schema_version") == RECOVERY_SCHEMA_VERSION:
         return _validate_recovery_ready_payload(payload, config, number)
     if set(payload) != READY_KEYS or payload.get("schema_version") != SCHEMA_VERSION:
@@ -3294,13 +3678,277 @@ def _validate_recovery_ready_payload(
     }
 
 
+def _historical_recovery_comment(
+    comments: Sequence[Mapping[str, Any]],
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    historical = contract["historical_readiness"]
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for value in comments:
+        payload = _marker_payload(value.get("body"), RECOVERY_READY_PREFIX)
+        if payload is not None:
+            matches.append((dict(value), payload))
+    if len(matches) != 1:
+        raise ApprovalError("Exactly one historical recovery readiness marker is required")
+    comment, payload = matches[0]
+    if (
+        _safe_int("Historical readiness comment ID", comment.get("id"))
+        != historical["comment_id"]
+        or _login(comment.get("user")) != BOT_LOGIN
+        or comment.get("created_at") != historical["created_at"]
+        or payload.get("schema_version") != historical["schema_version"]
+        or payload.get("approval_nonce") != historical["approval_nonce"]
+        or payload.get("release_commit") != historical["sync_head_commit"]
+    ):
+        raise ApprovalError("Historical recovery readiness marker changed")
+    evidence = _validate_recovery_ready_payload(
+        payload, config, contract["sync"]["pull_request"]
+    )
+    return comment, payload, evidence
+
+
+def _verify_historical_recovery_remote(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    work_actor: str,
+) -> dict[str, Any]:
+    _verify_main_run(
+        client, config, evidence["main_run_id"], evidence["main_attempt"]
+    )
+    _verify_activation_remote(
+        client,
+        config,
+        evidence["attestation"],
+        state="closed",
+        work_actor=work_actor,
+    )
+    _verify_continuation_remote(
+        client,
+        config,
+        evidence["attestation"],
+        state="closed",
+        work_actor=work_actor,
+    )
+    _verify_repair_remote(
+        client,
+        config,
+        evidence["attestation"],
+        state="closed",
+        work_actor=work_actor,
+    )
+    _verify_publication_repair_remote(
+        client,
+        config,
+        evidence["publication_repair"],
+        state="closed",
+        work_actor=work_actor,
+    )
+    for commit, run_id, attempt in (
+        (
+            evidence["activation_commit"],
+            evidence["activation_run_id"],
+            evidence["activation_attempt"],
+        ),
+        (
+            evidence["continuation_commit"],
+            evidence["continuation_run_id"],
+            evidence["continuation_attempt"],
+        ),
+        (
+            evidence["repair_commit"],
+            evidence["repair_run_id"],
+            evidence["repair_attempt"],
+        ),
+        (
+            evidence["publication_commit"],
+            evidence["publication_run_id"],
+            evidence["publication_attempt"],
+        ),
+    ):
+        _verify_main_run_for_commit(client, config, commit, run_id, attempt)
+    _verify_recovery_preflight(client, config, contract, work_actor=work_actor)
+    _verify_failed_recovery_validation(client, config, contract, work_actor=work_actor)
+    _verify_failed_recovery_publication(client, config, contract, work_actor=work_actor)
+    artifact, lanes, check = _verify_partial_recovery_publication(
+        client,
+        config,
+        contract,
+        evidence["attestation"],
+        pull_request_state="OPEN",
+        work_actor=work_actor,
+        require_current_pr=False,
+    )
+    if (
+        artifact["id"] != evidence["artifact_id"]
+        or artifact["digest"] != evidence["artifact_digest"]
+        or lanes != evidence["required_lanes"]
+        or check != evidence["required_check"]
+    ):
+        raise ApprovalError("Historical recovery evidence changed")
+    preflight = contract["preflight"]
+    return _artifact(
+        client,
+        config,
+        preflight["run_id"],
+        preflight["artifact_name"],
+        expected_id=preflight["artifact_id"],
+        expected_digest=preflight["artifact_digest"],
+        expected_expires_at=preflight["expires_at"],
+    )
+
+
+def _validate_current_recovery_ready_payload(
+    payload: Mapping[str, Any], config: SyncConfig, number: int
+) -> dict[str, Any]:
+    contract = validation_recovery.load_contract()
+    if set(payload) != CURRENT_RECOVERY_READY_KEYS:
+        raise ApprovalError("Current recovery readiness marker schema is invalid")
+    release = contract["release"]
+    sync = contract["sync"]
+    if (
+        number != sync["pull_request"]
+        or payload.get("schema_version") != CURRENT_RECOVERY_SCHEMA_VERSION
+        or payload.get("repository") != config.repository
+        or payload.get("pull_request") != number
+        or payload.get("platform_version") != config.version
+        or payload.get("source_commit") != release["source_commit"]
+        or payload.get("release_commit") != release["commit"]
+        or payload.get("manifest_sha256") != release["manifest_sha256"]
+        or not isinstance(payload.get("sync_base_commit"), str)
+        or COMMIT_RE.fullmatch(payload["sync_base_commit"]) is None
+        or not isinstance(payload.get("sync_head_commit"), str)
+        or COMMIT_RE.fullmatch(payload["sync_head_commit"]) is None
+        or not isinstance(payload.get("sync_head_tree"), str)
+        or COMMIT_RE.fullmatch(payload["sync_head_tree"]) is None
+        or payload.get("supersedes") != contract["historical_readiness"]
+        or not isinstance(payload.get("approval_nonce"), str)
+        or NONCE_RE.fullmatch(payload["approval_nonce"]) is None
+    ):
+        raise ApprovalError("Current recovery readiness does not match the release and sync head")
+    if (
+        payload.get("main_validation_run_id") != contract["main_validation"]["run_id"]
+        or payload.get("main_validation_run_attempt")
+        != contract["main_validation"]["run_attempt"]
+    ):
+        raise ApprovalError("Current recovery main validation evidence changed")
+    preflight = contract["preflight"]
+    if (
+        payload.get("preflight_run_id") != preflight["run_id"]
+        or payload.get("preflight_run_attempt") != preflight["run_attempt"]
+        or payload.get("preflight_artifact") != preflight["artifact_name"]
+        or payload.get("preflight_artifact_id") != preflight["artifact_id"]
+        or payload.get("preflight_artifact_digest") != preflight["artifact_digest"]
+    ):
+        raise ApprovalError("Current recovery preflight evidence changed")
+    feature_readiness = _feature_readiness(payload.get("feature_readiness"), config)
+    recovery = payload.get("recovery_validation")
+    expected_recovery_keys = {
+        "mode",
+        "native_required_check",
+        "sync_repair",
+        "sync_repair_readiness",
+        "sync_repair_validation_run_attempt",
+        "sync_repair_validation_run_id",
+    }
+    if not isinstance(recovery, dict) or set(recovery) != expected_recovery_keys:
+        raise ApprovalError("Current recovery validation evidence schema is invalid")
+    if recovery.get("mode") != "published-release-sync-update":
+        raise ApprovalError("Current recovery validation mode is invalid")
+    sync_repair = _sync_repair_evidence(recovery.get("sync_repair"), contract)
+    if payload["sync_base_commit"] != sync_repair["sync_repair_commit"]:
+        raise ApprovalError("Current recovery synchronization base changed")
+    repair_readiness = _feature_readiness(
+        recovery.get("sync_repair_readiness"),
+        config,
+        merge_source_commit=sync_repair["sync_repair_commit"],
+        expected_pull_request=sync_repair["pull_request"],
+        expected_feature_head=sync_repair["feature_head"],
+    )
+    repair_run_id = _safe_int(
+        "Sync-head repair Validate PR run ID",
+        recovery.get("sync_repair_validation_run_id"),
+    )
+    repair_attempt = _safe_int(
+        "Sync-head repair Validate PR run attempt",
+        recovery.get("sync_repair_validation_run_attempt"),
+        maximum=10**6,
+    )
+    sync_run_id = _safe_int(
+        "Updated sync Validate PR run ID", payload.get("sync_validation_run_id")
+    )
+    sync_attempt = _safe_int(
+        "Updated sync Validate PR run attempt",
+        payload.get("sync_validation_run_attempt"),
+        maximum=10**6,
+    )
+    native = recovery.get("native_required_check")
+    native_keys = {
+        "app_id",
+        "app_slug",
+        "check_run_id",
+        "check_run_node_id",
+        "check_suite_id",
+        "completed_at",
+        "context",
+        "details_url",
+        "head_sha",
+        "run_attempt",
+        "run_id",
+    }
+    required = _required_check_contract(contract)
+    if (
+        not isinstance(native, dict)
+        or set(native) != native_keys
+        or native.get("app_id") != required["app_id"]
+        or native.get("app_slug") != required["app_slug"]
+        or native.get("context") != required["context"]
+        or native.get("head_sha") != payload["sync_head_commit"]
+        or native.get("run_id") != sync_run_id
+        or native.get("run_attempt") != sync_attempt
+    ):
+        raise ApprovalError("Current native required-check evidence changed")
+    _safe_int("Current native check ID", native.get("check_run_id"))
+    _safe_int("Current native check suite ID", native.get("check_suite_id"))
+    _opaque_check_node_id(native.get("check_run_node_id"))
+    _timestamp("Current native check completion", native.get("completed_at"))
+    if payload["approval_nonce"] != _nonce(payload):
+        raise ApprovalError("Current recovery readiness marker nonce is invalid")
+    return {
+        "feature_readiness": feature_readiness,
+        "main_attempt": contract["main_validation"]["run_attempt"],
+        "main_run_id": contract["main_validation"]["run_id"],
+        "mode": "published-release-sync-update",
+        "native_required_check": dict(native),
+        "preflight_artifact_digest": preflight["artifact_digest"],
+        "preflight_artifact_id": preflight["artifact_id"],
+        "preflight_attempt": preflight["run_attempt"],
+        "preflight_run_id": preflight["run_id"],
+        "sync_attempt": sync_attempt,
+        "sync_base_commit": payload["sync_base_commit"],
+        "sync_head_commit": payload["sync_head_commit"],
+        "sync_head_tree": payload["sync_head_tree"],
+        "sync_repair": sync_repair,
+        "sync_repair_attempt": repair_attempt,
+        "sync_repair_readiness": repair_readiness,
+        "sync_repair_run_id": repair_run_id,
+        "sync_run_id": sync_run_id,
+    }
+
+
 def _verify_source_run(
     client: GitHubClient,
     config: SyncConfig,
     number: int,
     run_id: int,
     attempt: int,
+    *,
+    head_commit: str | None = None,
 ) -> None:
+    expected_head = config.release_commit if head_commit is None else head_commit
     run = client.get(_path(config.repository, f"actions/runs/{run_id}"))
     if (
         not isinstance(run, dict)
@@ -3309,7 +3957,7 @@ def _verify_source_run(
         or run.get("status") != "completed"
         or run.get("conclusion") != "success"
         or run.get("event") != "pull_request"
-        or run.get("head_sha") != config.release_commit
+        or run.get("head_sha") != expected_head
         or run.get("head_branch") != config.sync_branch
         or _workflow_path(run) != ".github/workflows/source-ci.yml"
         or _repo_name(run.get("head_repository")) != config.repository
@@ -3326,7 +3974,7 @@ def _verify_source_run(
     # approval-bearing merge. Use the durable commit-to-PR association only here;
     # never relax readiness or accept a missing, malformed, or conflicting list.
     pulls = _pages(
-        client, _path(config.repository, f"commits/{config.release_commit}/pulls")
+        client, _path(config.repository, f"commits/{expected_head}/pulls")
     )
     matches = [
         pr for pr in pulls
@@ -3334,7 +3982,9 @@ def _verify_source_run(
     ]
     if len(matches) != 1:
         raise ApprovalError("Source CI release lacks one exact merged PR association")
-    merged_pr = _validate_pr(matches[0], config, number, state="closed")
+    merged_pr = _validate_pr(
+        matches[0], config, number, state="closed", expected_head=expected_head
+    )
     _timestamp("Source CI associated PR merge timestamp", merged_pr.get("merged_at"))
 
 
@@ -3344,14 +3994,17 @@ def _verify_newest_source_run(
     number: int,
     run_id: int,
     attempt: int,
+    *,
+    head_commit: str | None = None,
 ) -> None:
     """Reject a superseded sync-PR run even when its head SHA is unchanged."""
 
+    expected_head = config.release_commit if head_commit is None else head_commit
     payload = client.get(
         _path(config.repository, "actions/workflows/source-ci.yml/runs"),
         {
             "event": "pull_request",
-            "head_sha": config.release_commit,
+            "head_sha": expected_head,
             "per_page": "100",
         },
     )
@@ -3370,7 +4023,7 @@ def _verify_newest_source_run(
             raise ApprovalError("Sync PR Source CI run list is malformed")
         if (
             item.get("event") != "pull_request"
-            or item.get("head_sha") != config.release_commit
+            or item.get("head_sha") != expected_head
             or item.get("head_branch") != config.sync_branch
             or _workflow_path(item) != ".github/workflows/source-ci.yml"
             or _repo_name(item.get("head_repository")) != config.repository
@@ -3409,14 +4062,138 @@ def _verify_newest_source_run(
         raise ApprovalError("Newest exact sync PR Source CI did not pass")
 
 
+def _verify_native_sync_validation(
+    client: GitHubClient,
+    config: SyncConfig,
+    contract: Mapping[str, Any],
+    *,
+    number: int,
+    head_commit: str,
+    run_id: int,
+    run_attempt: int,
+    pull_request_state: str,
+) -> dict[str, Any]:
+    """Verify the genuine required aggregate for the updated PR head."""
+
+    _verify_source_run(
+        client,
+        config,
+        number,
+        run_id,
+        run_attempt,
+        head_commit=head_commit,
+    )
+    _verify_newest_source_run(
+        client,
+        config,
+        number,
+        run_id,
+        run_attempt,
+        head_commit=head_commit,
+    )
+    payload = client.get(
+        _path(config.repository, f"actions/runs/{run_id}/jobs"),
+        {"filter": "latest", "per_page": "100"},
+    )
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    if (
+        not isinstance(jobs, list)
+        or type(total) is not int
+        or total != len(jobs)
+        or total > 100
+    ):
+        raise ApprovalError("Updated sync PR Validate PR job list is malformed")
+    expected_name = _required_check_contract(contract)["context"]
+    matches = [
+        item
+        for item in jobs
+        if isinstance(item, dict) and item.get("name") == expected_name
+    ]
+    if len(matches) != 1:
+        raise ApprovalError("Updated sync PR required aggregate is unavailable")
+    job = matches[0]
+    job_id = _safe_int("Updated sync PR required job ID", job.get("id"))
+    expected_url = (
+        f"{config.server_url}/{config.repository}/actions/runs/{run_id}/job/{job_id}"
+    )
+    if (
+        job.get("run_id") != run_id
+        or job.get("run_attempt") != run_attempt
+        or job.get("head_sha") != head_commit
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+        or job.get("workflow_name") != "Validate PR"
+        or job.get("html_url") != expected_url
+    ):
+        raise ApprovalError("Updated sync PR required aggregate did not pass")
+
+    required = _required_check_contract(contract)
+    check = client.get(_path(config.repository, f"check-runs/{job_id}"))
+    app_id, app_slug = _required_check_app(
+        check.get("app") if isinstance(check, dict) else None
+    )
+    suite = check.get("check_suite") if isinstance(check, dict) else None
+    associations = check.get("pull_requests") if isinstance(check, dict) else None
+    if (
+        not isinstance(check, dict)
+        or check.get("id") != job_id
+        or check.get("name") != expected_name
+        or check.get("head_sha") != head_commit
+        or check.get("status") != "completed"
+        or check.get("conclusion") != "success"
+        or check.get("details_url") != expected_url
+        or app_id != required["app_id"]
+        or app_slug != required["app_slug"]
+        or not isinstance(suite, dict)
+        or pull_request_state == "OPEN"
+        and not _required_check_pull_matches(
+            associations, number=number, release_commit=head_commit
+        )
+        or pull_request_state == "MERGED"
+        and associations != []
+        and not _required_check_pull_matches(
+            associations, number=number, release_commit=head_commit
+        )
+    ):
+        raise ApprovalError("Updated sync PR required check identity is invalid")
+    locator = _required_check_locator(check)
+    _verify_required_check_protection(client, config, contract)
+    _verify_exact_required_check_graphql(
+        client,
+        config,
+        contract,
+        check,
+        pull_request_state=pull_request_state,
+        head_commit=head_commit,
+    )
+    return {
+        "app_id": required["app_id"],
+        "app_slug": required["app_slug"],
+        "check_run_id": locator["check_run_id"],
+        "check_run_node_id": locator["check_run_node_id"],
+        "check_suite_id": locator["check_suite_id"],
+        "completed_at": check["completed_at"],
+        "context": expected_name,
+        "details_url": expected_url,
+        "head_sha": head_commit,
+        "run_attempt": run_attempt,
+        "run_id": run_id,
+    }
+
+
 def _verify_merge_commit(
     client: GitHubClient,
     config: SyncConfig,
     merge_commit: str,
     *,
     first_parent: str | None = None,
+    second_parent: str | None = None,
 ) -> dict[str, Any]:
     expected_first_parent = config.source_sha if first_parent is None else first_parent
+    expected_second_parent = (
+        config.release_commit if second_parent is None else second_parent
+    )
     merge = _read_commit(client, config, merge_commit)
     parents = merge.get("parents")
     if (
@@ -3424,7 +4201,7 @@ def _verify_merge_commit(
         or len(parents) != 2
         or not all(isinstance(item, dict) for item in parents)
         or parents[0].get("sha") != expected_first_parent
-        or parents[1].get("sha") != config.release_commit
+        or parents[1].get("sha") != expected_second_parent
     ):
         raise ApprovalError(
             "Synchronization PR was not merged with a merge commit directly "
@@ -3433,6 +4210,213 @@ def _verify_merge_commit(
     if _read_ref(client, config, "main") != merge_commit:
         raise ApprovalError("Synchronization merge is no longer the current main tip")
     return merge
+
+
+def _authorize_current_recovery(
+    event: Mapping[str, Any],
+    *,
+    owner: str,
+    repository: str,
+    version: str,
+    number: int,
+    sync_head_commit: str,
+    actor: str,
+    triggering_actor: str,
+    run_attempt: int,
+    api_url: str,
+    server_url: str,
+    output: Path,
+    token: str,
+    work_actor: str,
+    transport,
+    sleeper: Callable[[float], None],
+) -> dict[str, Any]:
+    """Authorize an updated sync head while selecting only immutable v0.6.2."""
+
+    contract = validation_recovery.load_contract()
+    release = contract["release"]
+    sync = contract["sync"]
+    if (
+        version != contract["platform_version"]
+        or repository != contract["repository"]
+        or number != sync["pull_request"]
+    ):
+        raise ApprovalError("Updated recovery event is outside the reviewed contract")
+    config = _config(
+        owner=owner,
+        repository=repository,
+        version=version,
+        source_commit=release["source_commit"],
+        release_commit=release["commit"],
+        api_url=api_url,
+        server_url=server_url,
+        output=output,
+    )
+    client = GitHubClient(api_url, token, transport=transport, sleeper=sleeper)
+    pr = event["pull_request"]
+    _validate_pr(
+        pr,
+        config,
+        number,
+        state="closed",
+        expected_head=sync_head_commit,
+    )
+    merged_at = _timestamp("PR merge timestamp", pr.get("merged_at"))
+    merge_commit = pr.get("merge_commit_sha")
+    if not isinstance(merge_commit, str) or COMMIT_RE.fullmatch(merge_commit) is None:
+        raise ApprovalError("Synchronization merge commit is invalid")
+
+    comments = _comments(client, config, number)
+    historical_comment, historical_payload, historical_evidence = (
+        _historical_recovery_comment(comments, config, contract)
+    )
+    current_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for comment in comments:
+        if _marker_payload(comment.get("body"), READY_PREFIX) is not None:
+            raise ApprovalError("Ordinary readiness cannot authorize recovery")
+        payload = _marker_payload(comment.get("body"), CURRENT_RECOVERY_READY_PREFIX)
+        if payload is not None:
+            current_matches.append((comment, payload))
+    if len(current_matches) != 1:
+        raise ApprovalError("Exactly one current recovery readiness marker is required")
+    ready_comment, ready_payload = current_matches[0]
+    ready_comment_id = _safe_int("Current readiness comment ID", ready_comment.get("id"))
+    if _login(ready_comment.get("user")) != BOT_LOGIN:
+        raise ApprovalError("Current readiness marker was not created by GitHub Actions")
+    ready_at = _timestamp("Current readiness timestamp", ready_comment.get("created_at"))
+    historical_at = _timestamp(
+        "Historical readiness timestamp", historical_comment.get("created_at")
+    )
+    if ready_at <= historical_at or ready_at > merged_at:
+        raise ApprovalError("Synchronization PR was not merged after current readiness")
+    evidence = _validate_current_recovery_ready_payload(ready_payload, config, number)
+    if (
+        evidence["sync_head_commit"] != sync_head_commit
+        or pr.get("base", {}).get("sha") != evidence["sync_base_commit"]
+    ):
+        raise ApprovalError("Merged synchronization PR differs from current readiness")
+
+    _verify_release(client, config, sync=False)
+    repair = evidence["sync_repair"]
+    _verify_sync_repair_remote(client, config, repair, work_actor=work_actor)
+    update = {
+        "base_commit": evidence["sync_base_commit"],
+        "initial_head_commit": sync["initial_head_commit"],
+        "pull_request": number,
+        "release_commit": release["commit"],
+        "sync_branch": sync["branch"],
+        "sync_head_commit": sync_head_commit,
+        "sync_head_tree": evidence["sync_head_tree"],
+        "sync_repair": repair,
+    }
+    _verify_sync_update_remote(client, config, contract, update)
+    merge = _verify_merge_commit(
+        client,
+        config,
+        merge_commit,
+        first_parent=evidence["sync_base_commit"],
+        second_parent=sync_head_commit,
+    )
+    if _commit_tree(merge, context="Synchronization PR merge") != evidence[
+        "sync_head_tree"
+    ]:
+        raise ApprovalError("Synchronization PR merge tree differs from its tested head")
+    commit_data = merge.get("commit")
+    commit_message = commit_data.get("message") if isinstance(commit_data, dict) else None
+    approved = _marker_payload(commit_message, CURRENT_RECOVERY_APPROVAL_PREFIX)
+    expected_approval = approval_payload(ready_payload)
+    if approved is None or set(approved) != set(expected_approval) or approved != expected_approval:
+        raise ApprovalError("ChatGPT recovery approval does not match current readiness")
+
+    _verify_main_run(
+        client, config, evidence["main_run_id"], evidence["main_attempt"]
+    )
+    _verify_main_run_for_commit(
+        client,
+        config,
+        evidence["sync_base_commit"],
+        evidence["sync_repair_run_id"],
+        evidence["sync_repair_attempt"],
+    )
+    _verify_historical_recovery_remote(
+        client,
+        config,
+        contract,
+        historical_evidence,
+        work_actor=work_actor,
+    )
+    native = _verify_native_sync_validation(
+        client,
+        config,
+        contract,
+        number=number,
+        head_commit=sync_head_commit,
+        run_id=evidence["sync_run_id"],
+        run_attempt=evidence["sync_attempt"],
+        pull_request_state="MERGED",
+    )
+    if native != evidence["native_required_check"]:
+        raise ApprovalError("Current native required-check evidence changed")
+
+    # Close both queue-time races before returning a deployable identity.
+    _verify_release(client, config, sync=False)
+    _verify_sync_update_remote(client, config, contract, update)
+    if _read_ref(client, config, "main") != merge_commit:
+        raise ApprovalError("Synchronization merge is no longer current main")
+    final_comments = _comments(client, config, number)
+    final_historical, final_historical_payload, _ = _historical_recovery_comment(
+        final_comments, config, contract
+    )
+    final_current = [
+        (comment, payload)
+        for comment in final_comments
+        if (
+            payload := _marker_payload(
+                comment.get("body"), CURRENT_RECOVERY_READY_PREFIX
+            )
+        )
+        is not None
+    ]
+    if (
+        final_historical != historical_comment
+        or final_historical_payload != historical_payload
+        or len(final_current) != 1
+        or _safe_int("Current readiness comment ID", final_current[0][0].get("id"))
+        != ready_comment_id
+        or final_current[0][1] != ready_payload
+    ):
+        raise ApprovalError("Live recovery readiness changed during authorization")
+
+    report = {
+        "approval_record": "merge-commit",
+        "approval_nonce": ready_payload["approval_nonce"],
+        "feature_readiness": evidence["feature_readiness"],
+        "feature_pr_number": evidence["feature_readiness"]["feature_pr"]["number"],
+        "feature_head_sha": evidence["feature_readiness"]["feature_pr"]["head_sha"],
+        "main_validation_run_attempt": evidence["main_attempt"],
+        "main_validation_run_id": evidence["main_run_id"],
+        "manifest_sha256": release["manifest_sha256"],
+        "merge_commit": merge_commit,
+        "platform_version": version,
+        "preflight_artifact": contract["preflight"]["artifact_name"],
+        "preflight_artifact_digest": evidence["preflight_artifact_digest"],
+        "preflight_artifact_id": evidence["preflight_artifact_id"],
+        "preflight_run_attempt": evidence["preflight_attempt"],
+        "preflight_run_id": evidence["preflight_run_id"],
+        "pull_request": number,
+        "recovery_validation": ready_payload["recovery_validation"],
+        "release_commit": release["commit"],
+        "repository": repository,
+        "schema_version": SCHEMA_VERSION,
+        "source_commit": release["source_commit"],
+        "sync_base_commit": evidence["sync_base_commit"],
+        "sync_head_commit": sync_head_commit,
+        "sync_head_tree": evidence["sync_head_tree"],
+        "sync_validation_run_attempt": evidence["sync_attempt"],
+        "sync_validation_run_id": evidence["sync_run_id"],
+        "validation_mode": "published-release-sync-update",
+    }
+    return report
 
 
 def authorize(
@@ -3480,6 +4464,27 @@ def authorize(
     release_commit = head.get("sha")
     if not isinstance(release_commit, str) or COMMIT_RE.fullmatch(release_commit) is None:
         raise ApprovalError("Merged synchronization head is not a full commit")
+    if version == "0.6.2" and repository == "Fifty5D/B-UH-AllianceAuth":
+        recovery_contract = validation_recovery.load_contract()
+        if release_commit != recovery_contract["release"]["commit"]:
+            return _authorize_current_recovery(
+                event,
+                owner=owner,
+                repository=repository,
+                version=version,
+                number=number,
+                sync_head_commit=release_commit,
+                actor=actor,
+                triggering_actor=triggering_actor,
+                run_attempt=run_attempt,
+                api_url=api_url,
+                server_url=server_url,
+                output=output,
+                token=token,
+                work_actor=work_actor,
+                transport=transport,
+                sleeper=sleeper,
+            )
     # Read the exact release commit once to discover the tested source, then
     # validate every remaining field through the shared release contract.
     provisional = _config(
@@ -3983,6 +4988,9 @@ def _append_outputs(path: str | None, values: Mapping[str, Any]) -> None:
             "pull_request",
             "release_commit",
             "source_commit",
+            "sync_base_commit",
+            "sync_head_commit",
+            "sync_head_tree",
             "sync_validation_run_attempt",
             "sync_validation_run_id",
         )
@@ -4003,9 +5011,15 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     ready_parser = subparsers.add_parser("ready")
     recovery_parser = subparsers.add_parser("recover-ready")
+    recovery_update_parser = subparsers.add_parser("recover-ready-update")
     authorize_parser = subparsers.add_parser("authorize")
     verify_parser = subparsers.add_parser("verify-artifact")
-    for subparser in (ready_parser, recovery_parser, authorize_parser):
+    for subparser in (
+        ready_parser,
+        recovery_parser,
+        recovery_update_parser,
+        authorize_parser,
+    ):
         subparser.add_argument("--owner", required=True)
         subparser.add_argument("--repository", required=True)
         subparser.add_argument("--api-url", required=True)
@@ -4038,6 +5052,14 @@ def _parser() -> argparse.ArgumentParser:
     recovery_parser.add_argument("--validation-artifact-name", required=True)
     recovery_parser.add_argument("--validation-artifact-digest", required=True)
     recovery_parser.add_argument("--work-actor", default="")
+    recovery_update_parser.add_argument(
+        "--recovery-contract", type=Path, required=True
+    )
+    recovery_update_parser.add_argument("--sync-update", type=Path, required=True)
+    recovery_update_parser.add_argument(
+        "--sync-repair-readiness", type=Path, required=True
+    )
+    recovery_update_parser.add_argument("--work-actor", default="")
     authorize_parser.add_argument("--actor", required=True)
     authorize_parser.add_argument("--triggering-actor", required=True)
     authorize_parser.add_argument("--run-attempt", type=int, required=True)
@@ -4160,6 +5182,39 @@ def main(
                 validation_artifact_id=args.validation_artifact_id,
                 validation_artifact_name=args.validation_artifact_name,
                 validation_artifact_digest=args.validation_artifact_digest,
+                work_actor=args.work_actor,
+            )
+            output_values = report["ready"]
+        elif args.command == "recover-ready-update":
+            contract = validation_recovery.load_contract(args.recovery_contract)
+            sync_update_raw = args.sync_update.read_text(encoding="ascii")
+            sync_update_report = json.loads(sync_update_raw)
+            if (
+                sync_update_raw != _canonical(sync_update_report) + "\n"
+                or not isinstance(sync_update_report, dict)
+                or set(sync_update_report)
+                != {"recovery_id", "schema_version", "sync_update"}
+                or sync_update_report.get("recovery_id") != contract["recovery_id"]
+                or sync_update_report.get("schema_version")
+                != validation_recovery.SCHEMA_VERSION
+            ):
+                raise ApprovalError("Synchronization update evidence is not canonical")
+            repair_readiness_raw = args.sync_repair_readiness.read_text(
+                encoding="ascii"
+            )
+            repair_readiness = json.loads(repair_readiness_raw)
+            if repair_readiness_raw != _canonical(repair_readiness) + "\n":
+                raise ApprovalError("Sync-head repair readiness is not canonical")
+            report = ready_recovery_update(
+                contract,
+                token,
+                owner=args.owner,
+                repository=args.repository,
+                api_url=args.api_url,
+                server_url=args.server_url,
+                output=args.output,
+                sync_update=sync_update_report["sync_update"],
+                sync_repair_readiness=repair_readiness,
                 work_actor=args.work_actor,
             )
             output_values = report["ready"]

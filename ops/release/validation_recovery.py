@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - exercised by the CLI tests.
     import ledger  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ATTESTATION_SCHEMA_VERSION = 3
 RECOVERY_ID = "published-platform-v0.6.2-validation-20260909"
 WORKFLOW_PATH = ".github/workflows/source-published-release-recovery.yml"
@@ -155,6 +155,29 @@ PUBLICATION_REPAIR_PATHS = (
     "tests/release/test_validation_recovery.py",
 )
 
+# Exact tree delta permitted for the repair that separates the mutable,
+# validated synchronization head from the immutable v0.6.2 deployment target.
+# The merge of this PR is the only main commit that may be merged into the
+# synchronization branch by the bounded update path below.
+SYNC_REPAIR_PATHS = (
+    ".github/workflows/continue-synchronized-release-recovery.yml",
+    ".github/workflows/deploy-approved-platform-release.yml",
+    ".github/workflows/deploy-platform-v2.yml",
+    ".github/workflows/reusable-source-tests.yml",
+    "changes/sync-head-release-identity.toml",
+    "ops/release/README.md",
+    "ops/release/platform_approval.py",
+    "ops/release/published-release-recovery-v0.6.2.json",
+    "ops/release/validation_recovery.py",
+    "tests/platform/test_configuration.py",
+    "tests/platform/test_coordinated_recovery_rehearsal.py",
+    "tests/platform/test_release_workflow_execution.py",
+    "tests/release/fixtures/github-pr-52-behind.json",
+    "tests/release/fixtures/github-required-check-history-6074b965.json",
+    "tests/release/test_platform_approval.py",
+    "tests/release/test_validation_recovery.py",
+)
+
 
 class ValidationRecoveryError(ValueError):
     """The bounded recovery contract or claimed identity is invalid."""
@@ -228,6 +251,8 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         "repository",
         "schema_version",
         "sync",
+        "sync_repair",
+        "historical_readiness",
     }:
         raise ValidationRecoveryError("Validation recovery contract has invalid fields")
     if (
@@ -345,6 +370,35 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         != list(PUBLICATION_REPAIR_PATHS)
     ):
         raise ValidationRecoveryError("Recovery publication repair scope changed")
+
+    sync_repair = value.get("sync_repair")
+    if not isinstance(sync_repair, dict) or set(sync_repair) != {
+        "allowed_paths",
+        "base_commit",
+        "pull_request",
+    }:
+        raise ValidationRecoveryError("Synchronization-head repair contract is invalid")
+    if (
+        _positive_int(sync_repair.get("pull_request"), context="Sync repair PR")
+        != 57
+        or _commit(sync_repair.get("base_commit"), context="Sync repair base")
+        != "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb"
+        or sync_repair.get("allowed_paths") != list(SYNC_REPAIR_PATHS)
+    ):
+        raise ValidationRecoveryError("Synchronization-head repair scope changed")
+
+    historical_readiness = value.get("historical_readiness")
+    if not isinstance(historical_readiness, dict) or historical_readiness != {
+        "approval_nonce": (
+            "ac957ad0bea53e3d3188bcd9f024cb8fafde94872eb1b10f8d28790f3a669982"
+        ),
+        "comment_id": 5641670561,
+        "created_at": "2026-09-11T23:09:03Z",
+        "schema_version": 7,
+        "sync_base_commit": "9f50567ae85a0bc9219c2c4f03e55dbb431e4cfb",
+        "sync_head_commit": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+    }:
+        raise ValidationRecoveryError("Historical recovery readiness identity changed")
 
     failed_validation = value.get("failed_validation")
     if not isinstance(failed_validation, dict) or set(failed_validation) != {
@@ -614,9 +668,17 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         raise ValidationRecoveryError("Recovery release identity changed")
 
     sync = value.get("sync")
-    if not isinstance(sync, dict) or set(sync) != {"branch", "pull_request"}:
+    if not isinstance(sync, dict) or set(sync) != {
+        "branch",
+        "initial_head_commit",
+        "pull_request",
+    }:
         raise ValidationRecoveryError("Recovery synchronization identity is invalid")
-    if sync != {"branch": "sync/platform-v0.6.2", "pull_request": 52}:
+    if sync != {
+        "branch": "sync/platform-v0.6.2",
+        "initial_head_commit": "6074b965cbd2e6ab2630cd539ee455b8d419aef6",
+        "pull_request": 52,
+    }:
         raise ValidationRecoveryError("Recovery synchronization identity changed")
 
     preflight = value.get("preflight")
@@ -624,6 +686,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         "artifact_digest",
         "artifact_id",
         "artifact_name",
+        "expires_at",
         "failed_job",
         "jobs",
         "passed_job",
@@ -644,6 +707,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
         != 10083806725
         or preflight.get("artifact_name")
         != "platform-v2-preflight-34297562022-1"
+        or preflight.get("expires_at") != "2026-09-16T01:07:13Z"
         or _sha256(
             preflight.get("artifact_digest"),
             context="Preflight artifact digest",
@@ -1121,6 +1185,89 @@ def validate_publication_repair(
     }
 
 
+def validate_sync_repair(
+    root: Path,
+    current_commit: str,
+    *,
+    event_name: str,
+    pull_request: int | None,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only the reviewed PR #57 branch or its merge onto PR #56."""
+
+    root = root.resolve()
+    current = _resolve(root, current_commit)
+    repair = contract["sync_repair"]
+    base = _resolve(root, repair["base_commit"])
+    release = contract["release"]["commit"]
+    validate_publication_repair(
+        root,
+        base,
+        event_name="workflow_dispatch",
+        pull_request=None,
+        contract=contract,
+    )
+    _verify_release_identity(root, contract)
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", base, current],
+        operation="sync-head repair ancestry inspection",
+        check=False,
+    ).returncode != 0:
+        raise ValidationRecoveryError("Synchronization-head repair is not based on PR #56")
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", release, current],
+        operation="sync-head repair release inspection",
+        check=False,
+    ).returncode == 0:
+        raise ValidationRecoveryError(
+            "Synchronization-head repair unexpectedly contains the release ledger"
+        )
+
+    if event_name == "pull_request":
+        if pull_request != repair["pull_request"]:
+            raise ValidationRecoveryError("Recovery is restricted to sync-head repair PR #57")
+        feature_head = current
+        repair_commit = None
+    elif event_name in {"push", "workflow_dispatch"}:
+        parents = _parents(root, current)
+        if len(parents) != 2 or parents[0] != base:
+            raise ValidationRecoveryError(
+                "Synchronization-head repair is not a direct two-parent merge onto PR #56"
+            )
+        feature_head = parents[1]
+        if _tree(root, feature_head) != _tree(root, current):
+            raise ValidationRecoveryError(
+                "Synchronization-head repair merge tree differs from its reviewed head"
+            )
+        repair_commit = current
+    else:
+        raise ValidationRecoveryError("Event cannot continue sync-head recovery")
+
+    if _git(
+        root,
+        ["merge-base", "--is-ancestor", base, feature_head],
+        operation="sync-head repair feature ancestry inspection",
+        check=False,
+    ).returncode != 0:
+        raise ValidationRecoveryError("Synchronization-head repair feature has invalid ancestry")
+    if _changed_paths(root, base, feature_head) != SYNC_REPAIR_PATHS:
+        raise ValidationRecoveryError(
+            "Synchronization-head repair tree delta is outside the reviewed scope"
+        )
+    if _changed_paths(root, base, current) != SYNC_REPAIR_PATHS:
+        raise ValidationRecoveryError("Current synchronization-head repair delta changed")
+    return {
+        "base_commit": base,
+        "feature_head": feature_head,
+        "paths": _blob_records(root, current, SYNC_REPAIR_PATHS),
+        "pull_request": repair["pull_request"],
+        "sync_repair_commit": repair_commit,
+        "sync_repair_tree": _tree(root, current),
+    }
+
+
 def _merge_tree(root: Path, first_parent: str, second_parent: str) -> str:
     completed = _git(
         root,
@@ -1166,6 +1313,79 @@ def _synthetic_commit(root: Path, tree: str, first: str, second: str) -> str:
     return _commit(value, context="Synthetic synchronization commit")
 
 
+def validate_sync_update(
+    root: Path,
+    sync_head_commit: str,
+    repair_commit: str,
+    *,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate GitHub's one permitted merge-base update of PR #52."""
+
+    root = root.resolve()
+    release = _resolve(root, contract["release"]["commit"])
+    repair = _resolve(root, repair_commit)
+    sync_head = _resolve(root, sync_head_commit)
+    repair_evidence = validate_sync_repair(
+        root,
+        repair,
+        event_name="workflow_dispatch",
+        pull_request=None,
+        contract=contract,
+    )
+    expected_tree = _merge_tree(root, release, repair)
+    if _parents(root, sync_head) != [release, repair]:
+        raise ValidationRecoveryError(
+            "Synchronization update is not the permitted ordered merge of reviewed main"
+        )
+    if _tree(root, sync_head) != expected_tree:
+        raise ValidationRecoveryError("Synchronization update merge tree changed")
+    return {
+        "base_commit": repair,
+        "initial_head_commit": contract["sync"]["initial_head_commit"],
+        "pull_request": contract["sync"]["pull_request"],
+        "release_commit": release,
+        "sync_branch": contract["sync"]["branch"],
+        "sync_head_commit": sync_head,
+        "sync_head_tree": expected_tree,
+        "sync_repair": repair_evidence,
+    }
+
+
+def validate_sync_merge(
+    root: Path,
+    merge_commit: str,
+    *,
+    sync_head_commit: str,
+    repair_commit: str,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the final PR #52 merge without changing the release selection."""
+
+    root = root.resolve()
+    merged = _resolve(root, merge_commit)
+    update = validate_sync_update(
+        root,
+        sync_head_commit,
+        repair_commit,
+        contract=contract,
+    )
+    if _parents(root, merged) != [update["base_commit"], update["sync_head_commit"]]:
+        raise ValidationRecoveryError(
+            "Synchronization PR merge has unexpected ordered parents"
+        )
+    expected_tree = _merge_tree(
+        root, update["base_commit"], update["sync_head_commit"]
+    )
+    if _tree(root, merged) != expected_tree:
+        raise ValidationRecoveryError("Synchronization PR merge tree changed")
+    return {
+        "merge_commit": merged,
+        "merge_tree": expected_tree,
+        "sync_update": update,
+    }
+
+
 def verify_pending_ledger(
     root: Path,
     current_commit: str,
@@ -1198,16 +1418,48 @@ def verify_pending_ledger(
     else:
         raise ValidationRecoveryError("Published-release recovery is no longer pending")
 
-    publication_repair = validate_publication_repair(
-        root,
-        current_commit,
-        event_name=event_name,
-        pull_request=pull_request,
-        contract=contract,
-    )
+    root = root.resolve()
+    current = _resolve(root, current_commit)
+    repair_contract = contract["sync_repair"]
+    if event_name == "pull_request":
+        if pull_request != repair_contract["pull_request"]:
+            raise ValidationRecoveryError(
+                "Pending ledger recovery is restricted to sync-head repair PR #57"
+            )
+        repair_feature = validate_sync_repair(
+            root,
+            current,
+            event_name=event_name,
+            pull_request=pull_request,
+            contract=contract,
+        )
+        repair_tree = _tree(root, current)
+        repair_commit = _synthetic_commit(
+            root,
+            repair_tree,
+            repair_contract["base_commit"],
+            current,
+        )
+        sync_repair = {**repair_feature, "sync_repair_commit": repair_commit}
+    else:
+        sync_repair = validate_sync_repair(
+            root,
+            current,
+            event_name=event_name,
+            pull_request=pull_request,
+            contract=contract,
+        )
+        repair_commit = current
+
     release = contract["release"]["commit"]
-    merge_tree = _merge_tree(root, current_commit, release)
-    synthetic = _synthetic_commit(root, merge_tree, current_commit, release)
+    update_tree = _merge_tree(root, release, repair_commit)
+    synthetic_update = _synthetic_commit(
+        root, update_tree, release, repair_commit
+    )
+    final_tree = _merge_tree(root, repair_commit, synthetic_update)
+    synthetic = _synthetic_commit(
+        root, final_tree, repair_commit, synthetic_update
+    )
     with tempfile.TemporaryDirectory(prefix="buh-ledger-recovery-") as temporary:
         worktree = Path(temporary) / "checkout"
         _git(
@@ -1260,7 +1512,13 @@ def verify_pending_ledger(
             "release_required": plan["release_required"],
         },
         "recovery_id": contract["recovery_id"],
-        "publication_repair": publication_repair,
+        "publication_repair": validate_publication_repair(
+            root,
+            contract["sync_repair"]["base_commit"],
+            event_name="workflow_dispatch",
+            pull_request=None,
+            contract=contract,
+        ),
         "repair": validate_repair(
             root,
             contract["publication_repair"]["base_commit"],
@@ -1269,9 +1527,12 @@ def verify_pending_ledger(
             contract=contract,
         ),
         "schema_version": SCHEMA_VERSION,
-        "source_commit": current_commit,
+        "source_commit": current,
+        "sync_repair": sync_repair,
+        "synthetic_sync_update_commit": synthetic_update,
+        "synthetic_sync_update_tree": update_tree,
         "synthetic_merge_commit": synthetic,
-        "synthetic_merge_tree": merge_tree,
+        "synthetic_merge_tree": final_tree,
     }
 
 
@@ -1285,37 +1546,43 @@ def validate_hold(
 
     current = _resolve(root, current_commit)
     try:
-        publication_repair = validate_publication_repair(
+        sync_repair = validate_sync_repair(
             root,
             current,
             event_name="workflow_dispatch",
             pull_request=None,
             contract=contract,
         )
-        state = "publication-repair-pending-sync"
-        publication_commit = current
+        state = "sync-head-repair-pending-update"
+        repair_commit = current
+        sync_update = None
     except ValidationRecoveryError:
         parents = _parents(root, current)
-        release = contract["release"]["commit"]
-        if len(parents) != 2 or parents[1] != release:
+        if len(parents) != 2:
             raise ValidationRecoveryError("Current main is outside the recovery hold")
-        publication_commit = parents[0]
-        publication_repair = validate_publication_repair(
+        repair_commit, sync_head = parents
+        merged = validate_sync_merge(
             root,
-            publication_commit,
-            event_name="workflow_dispatch",
-            pull_request=None,
+            current,
+            sync_head_commit=sync_head,
+            repair_commit=repair_commit,
             contract=contract,
         )
-        if _tree(root, current) != _merge_tree(root, publication_commit, release):
-            raise ValidationRecoveryError("Synchronization merge tree changed")
+        sync_update = merged["sync_update"]
+        sync_repair = sync_update["sync_repair"]
         state = "synchronized-awaiting-retirement"
     return {
         "activation": verify_activation(root, contract=contract),
         "continuation": verify_continuation(root, contract=contract),
         "current_commit": current,
-        "publication_repair": publication_repair,
-        "publication_repair_commit": publication_commit,
+        "publication_repair": validate_publication_repair(
+            root,
+            contract["sync_repair"]["base_commit"],
+            event_name="workflow_dispatch",
+            pull_request=None,
+            contract=contract,
+        ),
+        "publication_repair_commit": contract["sync_repair"]["base_commit"],
         "recovery_id": contract["recovery_id"],
         "repair": validate_repair(
             root,
@@ -1326,6 +1593,9 @@ def validate_hold(
         ),
         "schema_version": SCHEMA_VERSION,
         "state": state,
+        "sync_repair": sync_repair,
+        "sync_repair_commit": repair_commit,
+        "sync_update": sync_update,
     }
 
 
@@ -1794,18 +2064,29 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("repair", "publication-repair", "ledger", "hold"):
+    for name in (
+        "repair",
+        "publication-repair",
+        "sync-repair",
+        "ledger",
+        "hold",
+    ):
         command = subparsers.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--source-commit", required=True)
         command.add_argument("--output", type=Path, required=True)
-        if name in {"repair", "publication-repair", "ledger"}:
+        if name in {"repair", "publication-repair", "sync-repair", "ledger"}:
             command.add_argument(
                 "--event-name",
                 choices=("pull_request", "push", "workflow_dispatch"),
                 required=True,
             )
             command.add_argument("--pull-request", type=int)
+    sync_update = subparsers.add_parser("sync-update")
+    sync_update.add_argument("--root", type=Path, required=True)
+    sync_update.add_argument("--source-commit", required=True)
+    sync_update.add_argument("--repair-commit", required=True)
+    sync_update.add_argument("--output", type=Path, required=True)
     overlay = subparsers.add_parser("apply-harness")
     overlay.add_argument("--root", type=Path, required=True)
     overlay.add_argument("--harness-commit", required=True)
@@ -1895,6 +2176,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "release_commit": contract["release"]["commit"],
                     "repair_commit": contract["publication_repair"]["base_commit"],
                     "source_commit": contract["release"]["source_commit"],
+                }
+            )
+        elif arguments.command == "sync-repair":
+            sync_repair = validate_sync_repair(
+                arguments.root,
+                arguments.source_commit,
+                event_name=arguments.event_name,
+                pull_request=arguments.pull_request,
+                contract=contract,
+            )
+            report = {
+                "recovery_id": contract["recovery_id"],
+                "schema_version": SCHEMA_VERSION,
+                "sync_repair": sync_repair,
+            }
+            _write(arguments.output, report)
+            _append_outputs(
+                {
+                    "release_commit": contract["release"]["commit"],
+                    "source_commit": contract["release"]["source_commit"],
+                    "sync_repair_commit": sync_repair["sync_repair_commit"]
+                    or "feature",
+                    "sync_repair_feature_head": sync_repair["feature_head"],
+                }
+            )
+        elif arguments.command == "sync-update":
+            sync_update = validate_sync_update(
+                arguments.root,
+                arguments.source_commit,
+                arguments.repair_commit,
+                contract=contract,
+            )
+            report = {
+                "recovery_id": contract["recovery_id"],
+                "schema_version": SCHEMA_VERSION,
+                "sync_update": sync_update,
+            }
+            _write(arguments.output, report)
+            _append_outputs(
+                {
+                    "release_commit": sync_update["release_commit"],
+                    "source_commit": contract["release"]["source_commit"],
+                    "sync_head_commit": sync_update["sync_head_commit"],
+                    "sync_repair_commit": sync_update["base_commit"],
                 }
             )
         elif arguments.command == "ledger":

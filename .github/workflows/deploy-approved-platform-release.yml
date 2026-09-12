@@ -43,6 +43,9 @@ jobs:
       preflight_run_id: ${{ steps.gate.outputs.preflight_run_id }}
       release_commit: ${{ steps.gate.outputs.release_commit }}
       source_commit: ${{ steps.gate.outputs.source_commit }}
+      sync_base_commit: ${{ steps.gate.outputs.sync_base_commit }}
+      sync_head_commit: ${{ steps.gate.outputs.sync_head_commit }}
+      sync_head_tree: ${{ steps.gate.outputs.sync_head_tree }}
       sync_validation_run_attempt: ${{ steps.gate.outputs.sync_validation_run_attempt }}
       sync_validation_run_id: ${{ steps.gate.outputs.sync_validation_run_id }}
     steps:
@@ -182,6 +185,9 @@ jobs:
       feature_pr_number: ${{ needs.authorize.outputs.feature_pr_number }}
       feature_head_sha: ${{ needs.authorize.outputs.feature_head_sha }}
       source_commit: ${{ needs.authorize.outputs.source_commit }}
+      sync_base_commit: ${{ needs.authorize.outputs.sync_base_commit }}
+      sync_head_commit: ${{ needs.authorize.outputs.sync_head_commit }}
+      sync_head_tree: ${{ needs.authorize.outputs.sync_head_tree }}
       feature_readiness: ${{ needs.authorize.outputs.feature_readiness }}
       main_validation_run_id: ${{ needs.authorize.outputs.main_validation_run_id }}
       main_validation_run_attempt: ${{ needs.authorize.outputs.main_validation_run_attempt }}
