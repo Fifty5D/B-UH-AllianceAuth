@@ -61,7 +61,20 @@ production-critical paths.
   accounting integrity, migration and retention safety, backup/release/deployment
   behavior, unintended feature changes, theme readability, responsive layout,
   sticky tables, and missing tests.
-- Do not merge, publish a release, dispatch deployment workflows, retry production
-  jobs, or deploy without the user's explicit approval.
+- Anthony grants ChatGPT Work standing approval to merge reviewed, validated
+  non-production pull requests without asking for approval for each PR or SHA,
+  unless he explicitly limits a particular task. Codex's implementation-only role
+  remains unchanged.
+- Before each merge, Work must verify the exact current head, successful required
+  checks, applicable preview, trusted readiness, absence of unresolved serious
+  findings, and normal protected merge eligibility. Standing approval does not
+  waive these requirements or any active release/recovery hold.
+- A merge that initiates production deployment, including a release synchronization
+  PR, still requires the separate production approval. Publishing a release,
+  dispatching deployment workflows, retrying production jobs, or deploying also
+  requires explicit approval; standing non-production merge approval does not
+  authorize those actions.
 - Production deployments must use the exact immutable release built from the tested
-  commit. A merge/deploy approval applies only to the named pull request and SHA.
+  commit. Production approval applies only to the reviewed immutable release and
+  its associated synchronization head, base, and evidence; it cannot be reused
+  after those identities change.
