@@ -2224,12 +2224,12 @@ def _artifact(
         raise ApprovalError("Retained preflight artifact ID changed")
     if expected_digest is not None and digest != expected_digest:
         raise ApprovalError("Retained preflight artifact digest changed")
+    expires_at = _timestamp("Retained artifact expiry", artifact.get("expires_at"))
+    if expires_at <= dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=90):
+        raise ApprovalError("Required retained artifact is expired or lacks the 90-minute execution window")
     if expected_expires_at is not None:
-        expires_at = _timestamp("Retained artifact expiry", artifact.get("expires_at"))
         if artifact.get("expires_at") != expected_expires_at:
             raise ApprovalError("Retained preflight artifact expiry changed")
-        if expires_at <= dt.datetime.now(dt.timezone.utc):
-            raise ApprovalError("Retained preflight artifact has expired")
     return artifact
 
 
@@ -4538,6 +4538,7 @@ def _verify_merge_commit(
     *,
     first_parent: str | None = None,
     second_parent: str | None = None,
+    current_main: str | None = None,
 ) -> dict[str, Any]:
     expected_first_parent = config.source_sha if first_parent is None else first_parent
     expected_second_parent = (
@@ -4556,7 +4557,7 @@ def _verify_merge_commit(
             "Synchronization PR was not merged with a merge commit directly "
             "onto its tested source"
         )
-    if _read_ref(client, config, "main") != merge_commit:
+    if _read_ref(client, config, "main") != (current_main or merge_commit):
         raise ApprovalError("Synchronization merge is no longer the current main tip")
     return merge
 
@@ -4579,6 +4580,7 @@ def _authorize_current_recovery(
     work_actor: str,
     transport,
     sleeper: Callable[[float], None],
+    current_main: str | None = None,
 ) -> dict[str, Any]:
     """Authorize an updated sync head while selecting only immutable v0.6.2."""
 
@@ -4674,6 +4676,7 @@ def _authorize_current_recovery(
         merge_commit,
         first_parent=evidence["sync_base_commit"],
         second_parent=sync_head_commit,
+        current_main=current_main,
     )
     if _commit_tree(merge, context="Synchronization PR merge") != evidence[
         "sync_head_tree"
@@ -4730,7 +4733,7 @@ def _authorize_current_recovery(
     # Close both queue-time races before returning a deployable identity.
     _verify_release(client, config, sync=False)
     _verify_sync_update_remote(client, config, contract, update)
-    if _read_ref(client, config, "main") != merge_commit:
+    if _read_ref(client, config, "main") != (current_main or merge_commit):
         raise ApprovalError("Synchronization merge is no longer current main")
     final_comments = _comments(client, config, number)
     final_historical, final_historical_payload, _ = _historical_recovery_comment(
@@ -5386,12 +5389,14 @@ def _parser() -> argparse.ArgumentParser:
     recovery_parser = subparsers.add_parser("recover-ready")
     recovery_update_parser = subparsers.add_parser("recover-ready-update")
     authorize_parser = subparsers.add_parser("authorize")
+    boundary_parser = subparsers.add_parser("boundary")
     verify_parser = subparsers.add_parser("verify-artifact")
     for subparser in (
         ready_parser,
         recovery_parser,
         recovery_update_parser,
         authorize_parser,
+        boundary_parser,
     ):
         subparser.add_argument("--owner", required=True)
         subparser.add_argument("--repository", required=True)
@@ -5436,11 +5441,12 @@ def _parser() -> argparse.ArgumentParser:
         "--check-association-repair-readiness", type=Path, required=True
     )
     recovery_update_parser.add_argument("--work-actor", default="")
-    authorize_parser.add_argument("--actor", required=True)
-    authorize_parser.add_argument("--triggering-actor", required=True)
-    authorize_parser.add_argument("--run-attempt", type=int, required=True)
-    authorize_parser.add_argument("--event", type=Path, required=True)
-    authorize_parser.add_argument("--work-actor", default="")
+    for subparser in (authorize_parser, boundary_parser):
+        subparser.add_argument("--actor", required=True)
+        subparser.add_argument("--triggering-actor", required=True)
+        subparser.add_argument("--run-attempt", type=int, required=True)
+        subparser.add_argument("--event", type=Path, required=True)
+        subparser.add_argument("--work-actor", default="")
     verify_parser.add_argument("--report", type=Path, required=True)
     verify_parser.add_argument("--artifact-dir", type=Path, required=True)
     return parser
@@ -5476,6 +5482,12 @@ def main(
             feature_readiness = json.loads(feature_readiness_raw)
             if feature_readiness_raw != _canonical(feature_readiness) + "\n":
                 raise ApprovalError("Feature-readiness evidence is not canonical")
+            import deployment_evidence
+
+            deployment_evidence.require_feature_runway(
+                deployment_evidence.ReadClient(GitHubClient(args.api_url, token)),
+                args.repository, _feature_readiness(feature_readiness, config),
+            )
             report = ready(
                 config,
                 token,
@@ -5605,7 +5617,14 @@ def main(
             output_values = report["ready"]
         else:
             event = json.loads(args.event.read_text(encoding="utf-8"))
-            report = authorize(
+            authorizer = authorize
+            extra = {}
+            if args.command == "boundary" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+                import approved_deployment_continuation
+
+                authorizer = approved_deployment_continuation.authorize
+                extra["environment"] = environment
+            report = authorizer(
                 event,
                 owner=args.owner,
                 repository=args.repository,
@@ -5617,7 +5636,20 @@ def main(
                 output=args.output,
                 token=token,
                 work_actor=args.work_actor,
+                **extra,
             )
+            if args.command == "boundary":
+                import deployment_evidence
+
+                config = _config(
+                    owner=args.owner, repository=args.repository,
+                    version=report["platform_version"], source_commit=report["source_commit"],
+                    release_commit=report["release_commit"], api_url=args.api_url,
+                    server_url=args.server_url, output=args.output,
+                )
+                deployment_evidence.verify(
+                    GitHubClient(args.api_url, token), config, report, work_actor=args.work_actor
+                )
             output_values = report
         _write_json(args.output, report)
         _append_outputs(environment.get("GITHUB_OUTPUT"), output_values)

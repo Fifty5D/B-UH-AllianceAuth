@@ -953,6 +953,9 @@ class ReadyTransport(ApprovalTransport):
         del headers, timeout
         parsed = urllib.parse.urlsplit(url)
         suffix = parsed.path.removeprefix(f"/repos/{REPOSITORY}/")
+        if suffix == "actions/artifacts/777" and method == "GET":
+            self.calls.append((method, parsed.path))
+            return _response({"id": 777, "digest": READINESS_DIGEST, "expired": False, "expires_at": PREFLIGHT_EXPIRES_AT})
         if suffix == f"pulls/{PR_NUMBER}" and method == "GET":
             self.calls.append((method, parsed.path))
             pr = copy.deepcopy(_event()["pull_request"])
@@ -1770,6 +1773,7 @@ class RecoveryTransport(ApprovalTransport):
                         {
                             "digest": RECOVERY_ARTIFACT_DIGEST,
                             "expired": False,
+                            "expires_at": PREFLIGHT_EXPIRES_AT,
                             "id": RECOVERY_ARTIFACT_ID,
                             "name": RECOVERY_ARTIFACT,
                             "size_in_bytes": 8192,
@@ -1790,6 +1794,7 @@ class RecoveryTransport(ApprovalTransport):
                         {
                             "digest": FAILED_RECOVERY_ARTIFACT_DIGEST,
                             "expired": False,
+                            "expires_at": PREFLIGHT_EXPIRES_AT,
                             "id": FAILED_RECOVERY_ARTIFACT_ID,
                             "name": FAILED_RECOVERY_ARTIFACT,
                             "size_in_bytes": 595,
@@ -1810,6 +1815,7 @@ class RecoveryTransport(ApprovalTransport):
                         {
                             "digest": FAILED_PUBLICATION_ARTIFACT_DIGEST,
                             "expired": False,
+                            "expires_at": PREFLIGHT_EXPIRES_AT,
                             "id": FAILED_PUBLICATION_ARTIFACT_ID,
                             "name": FAILED_PUBLICATION_ARTIFACT,
                             "size_in_bytes": 8192,
@@ -3014,6 +3020,37 @@ class PlatformApprovalTests(unittest.TestCase):
                     sleeper=lambda _: None,
                     polls=1,
                 )
+
+    def test_readiness_never_offers_approval_without_deployment_evidence_runway(self):
+        class NearExpiryTransport(ReadyTransport):
+            def request(self, method, url, headers, body, timeout):
+                response = super().request(method, url, headers, body, timeout)
+                if urllib.parse.urlsplit(url).path.endswith(f"/actions/runs/{PREFLIGHT_RUN}/artifacts"):
+                    value = json.loads(response.body)
+                    value["artifacts"][0]["expires_at"] = (
+                        approval.dt.datetime.now(approval.dt.timezone.utc)
+                        + approval.dt.timedelta(minutes=60)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    return _response(value)
+                return response
+
+        transport = NearExpiryTransport()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = approval._config(
+                owner=OWNER, repository=REPOSITORY, version=VERSION,
+                source_commit=SOURCE, release_commit=RELEASE,
+                api_url="https://api.github.com", server_url="https://github.com",
+                output=Path(temporary) / "ready.json",
+            )
+            with self.assertRaisesRegex(approval.ApprovalError, "90-minute"):
+                approval.ready(
+                    config, TOKEN, number=PR_NUMBER, feature_readiness=_published_readiness(),
+                    main_validation_run_id=MAIN_RUN, main_validation_run_attempt=1,
+                    manifest_sha256=MANIFEST, preflight_run_id=PREFLIGHT_RUN,
+                    preflight_run_attempt=1, preflight_artifact=ARTIFACT,
+                    transport=transport, sleeper=lambda _: None, polls=1,
+                )
+        self.assertFalse(any(method == "POST" for method, _path in transport.calls))
 
     def test_ready_rechecks_artifact_after_waiting_for_sync_validation(self) -> None:
         class ExpiringArtifactTransport(ReadyTransport):
@@ -4502,6 +4539,9 @@ class PlatformApprovalTests(unittest.TestCase):
             approval,
             "ready",
             side_effect=sync.SyncPrError(operation + unsafe_tail),
+        ), patch.object(
+            approval, "GitHubClient",
+            return_value=sync.GitHubClient("https://api.github.com", TOKEN, transport=ReadyTransport()),
         ):
             result = approval.main(
                 _ready_main_arguments(Path(temp)),

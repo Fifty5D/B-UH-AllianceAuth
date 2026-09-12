@@ -1712,6 +1712,19 @@ def validate_hold(
     """Hold v0.6.3 across the check-association repair and final sync."""
 
     current = _resolve(root, current_commit)
+    # The approved sync is now merged. Hold the next release across its one
+    # reviewed, non-runtime deployment repair as well; never consume fragments.
+    if _parents(root, current)[:1] == ["73569d32dc4f64fc1733cfc00b1d4c48928d5c5c"]:
+        import approved_deployment_continuation
+
+        repair = approved_deployment_continuation.validate_repair(root, current)
+        previous = validate_hold(root, repair["base_commit"], contract=contract)
+        return {
+            **previous,
+            "current_commit": current,
+            "deployment_repair": repair,
+            "state": "approved-deployment-continuation-held",
+        }
     try:
         association_repair = validate_check_association_repair(
             root,

@@ -1255,11 +1255,11 @@ class PlatformConfigurationContracts(TestCase):
         self.assertLess(queued_authorize, queued_download)
         self.assertLess(queued_download, final_boundary)
         self.assertIn(
-            '"${APPROVAL_TOOL}" authorize',
+            '"${APPROVAL_TOOL}" boundary',
             deploy["steps"][queued_authorize]["run"],
         )
         self.assertIn(
-            '"${APPROVAL_TOOL}" authorize',
+            '"${APPROVAL_TOOL}" boundary',
             deploy["steps"][final_boundary]["run"],
         )
         self.assertIn(
@@ -1267,10 +1267,8 @@ class PlatformConfigurationContracts(TestCase):
             deploy["steps"][final_boundary]["run"],
         )
         final_boundary_text = deploy["steps"][final_boundary]["run"]
-        self.assertLess(
-            final_boundary_text.rindex("ops/readiness.py published"),
-            final_boundary_text.rindex('"${APPROVAL_TOOL}" authorize'),
-        )
+        self.assertNotIn("ops/readiness.py published", final_boundary_text)
+        self.assertIn('"${APPROVAL_TOOL}" boundary', final_boundary_text)
         self.assertIn(
             '[[ "${MANIFEST_SHA256}" == "${RELEASE_MANIFEST_SHA256}" ]]',
             final_boundary_text,
@@ -1319,7 +1317,7 @@ class PlatformConfigurationContracts(TestCase):
             '"${ATTEMPT_EXIT}" == "0"',
             '"attempt gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
             "ops/buh-redact-diagnostics.py --validate",
-            "ops/readiness.py published",
+            '"${APPROVAL_TOOL}" boundary',
             "cmp --silent",
             "ops/deploy/request_archive.py",
             "artifacts/deployment-request.json",
@@ -1810,7 +1808,8 @@ class PlatformConfigurationContracts(TestCase):
         self.assertLess(stage_index, authorize_index)
         stage = steps[stage_index]
         self.assertEqual(stage["id"], "approval_source")
-        self.assertIn("github.event.pull_request.merge_commit_sha", str(stage["env"]))
+        self.assertEqual(stage["env"]["APPROVAL_SOURCE_COMMIT"], "${{ github.sha }}")
+        self.assertIn("73569d32dc4f64fc1733cfc00b1d4c48928d5c5c", stage["run"])
         for required in (
             'git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"',
             'expected_sync_head="${SYNC_HEAD_COMMIT:-${RELEASE_COMMIT}}"',
@@ -1848,10 +1847,11 @@ class PlatformConfigurationContracts(TestCase):
         )
         triggers = workflow.get("on", workflow.get(True))
         self.assertEqual(
-            triggers,
-            {"pull_request_target": {"branches": ["main"], "types": ["closed"]}},
+            triggers["pull_request_target"],
+            {"branches": ["main"], "types": ["closed"]},
         )
-        self.assertNotIn("workflow_dispatch", triggers)
+        self.assertEqual(set(triggers["workflow_dispatch"]["inputs"]), {"confirmation"})
+        self.assertEqual(triggers["workflow_dispatch"]["inputs"]["confirmation"]["options"], ["CONTINUE APPROVED V0.6.2"])
         authorize = workflow["jobs"]["authorize"]
         self.assertIn("github.event.pull_request.merged == true", authorize["if"])
         self.assertEqual(
@@ -1931,23 +1931,20 @@ class PlatformConfigurationContracts(TestCase):
                 "${{ needs.authorize.outputs." + name + " }}",
             )
         for required in (
-            "platform_approval.py authorize",
+            "platform_approval.py boundary",
             "platform_approval.py verify-artifact",
-            "ops/readiness.py published",
             "artifact-ids:",
-            "Current feature readiness differs from the approved record",
             "BUH_CHATGPT_WORK_ACTOR",
-            "--first-introduction-pr 44",
             "buh-platform-deploy-result:v1",
             "pull_request_target is trusted only",
         ):
             self.assertIn(required, text)
         self.assertLess(
             text.rindex("platform_approval.py verify-artifact"),
-            text.rindex("ops/readiness.py published"),
+            text.rindex("platform_approval.py boundary"),
         )
         self.assertLess(
-            text.rindex("ops/readiness.py published"),
+            text.rindex("platform_approval.py boundary"),
             text.index("  deploy:\n"),
         )
         helper = (ROOT / "ops" / "release" / "platform_approval.py").read_text(
