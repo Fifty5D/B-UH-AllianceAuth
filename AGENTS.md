@@ -65,11 +65,14 @@ production-critical paths.
   non-production PR after final risk review without asking for merge permission
   again. Source changes to deployment tooling are non-production until installed.
   Codex still hands the PR to Work. Explicit per-task limits override this rule.
-- Receiver installation, recovery completion/cleanup, and production deployment
-  each require the applicable exact owner approval. Never carry an approval for
-  one payload into a different payload or replay a consumed production attempt.
+- Standing non-production merge approval does not cover release publication,
+  synchronization merges that initiate production, workflow dispatch/retry,
+  receiver installation, recovery completion/cleanup, or production deployment.
+  Those actions require the applicable separate owner approval. Never carry an
+  approval into a different payload or replay a consumed production attempt.
 - Production deployments must use the exact immutable release built from the tested
-  commit. A merge/deploy approval applies only to the named pull request and SHA.
+  commit. Production approval binds that release and its associated synchronization
+  head, base and evidence; it cannot be reused after those identities change.
 
 ## Avoid repeated work
 
