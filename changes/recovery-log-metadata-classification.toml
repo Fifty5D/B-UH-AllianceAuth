@@ -1,4 +1,4 @@
 schema_version = 1
 app = "platform"
 kind = "fix"
-summary = "Distinguish fatal log severity from ESI header/logger metadata without exempting DEBUG failures or truncating retained logs, rehearse immutable v0.6.2 recovery, and prepare a separately approved classifier-file continuation from the installed PR 62 receiver with all receipts, backups and the release hold preserved."
+summary = "Distinguish fatal severity from ESI metadata without exempting DEBUG failures or truncating logs. Rehearse immutable v0.6.2 recovery and prepare a separately approved classifier-file repair from installed PR 62, preserving receipts, backups and the release hold."
