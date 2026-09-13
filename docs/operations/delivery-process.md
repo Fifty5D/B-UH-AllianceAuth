@@ -108,6 +108,7 @@ Do not repeatedly reinstall earlier repairs or classify the unexplained
 | Fail-fast diagnosis exposes one problem per attempt | Aggregate independent health probes and complete-interval log findings |
 | Diagnostic improvements require another server receiver install | Reviewed staged diagnostic entry point and a reusable owner launcher |
 | Every feature merge must fit a historical repair-commit allowlist to keep releases held | Explicit active recovery hold used before new publication and receiver access |
+| Bookkeeping labels cancel a required preview already running | Ignored label events receive their own concurrency group |
 | Repeated merge permissions and forced previews | Standing Work merge authority documented; automatic preview relevance |
 | Three-day preview/readiness artifacts expire during recovery | Consistent 30-day evidence retention for future v2 runs |
 | Prose edits rerun database/browser infrastructure | Conservative docs-only CI scope with an always-required aggregate gate |

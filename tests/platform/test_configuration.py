@@ -664,6 +664,11 @@ class PlatformConfigurationContracts(TestCase):
             preview["permissions"], {"contents": "read", "pull-requests": "read"}
         )
         self.assertIn("github.event.label.name == 'ui-preview'", preview["if"])
+        # A skipped codex/readiness label event must have its own concurrency group.
+        group = workflow["concurrency"]["group"]
+        self.assertIn("github.event.action == 'labeled'", group)
+        self.assertIn("github.event.label.name != 'ui-preview'", group)
+        self.assertIn("format('ignored-{0}', github.run_id)", group)
         self.assertEqual(
             preview["steps"][1]["with"]["ref"],
             "${{ steps.target.outputs.head_sha }}",

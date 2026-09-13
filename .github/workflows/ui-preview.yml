@@ -16,7 +16,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ui-preview-${{ github.event.pull_request.number || github.ref }}
+  # A skipped bookkeeping-label run must not cancel the actual preview.
+  group: ui-preview-${{ github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ui-preview' && format('ignored-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 defaults:
