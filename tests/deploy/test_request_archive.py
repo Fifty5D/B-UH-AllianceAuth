@@ -90,6 +90,17 @@ class RequestArchiveExecutionTests(unittest.TestCase):
             )
             self.assertEqual(checked_out.returncode, 0, checked_out.stderr[-1200:])
 
+            # This historical recovery reuses v0.6.1 applications. Exercise the
+            # current archive builder without including unrelated new apps or
+            # later feature changes in that frozen application baseline.
+            self.assertNotEqual(builder.resolve(), ROOT.resolve())
+            restored = run(
+                "git", "restore", "--source", V061_RELEASE, "--worktree", "--",
+                "apps", "ops/release/apps.toml", "platform/compatibility.toml",
+                cwd=builder,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stderr[-1200:])
+
             synthetic_changes = base / "synthetic-release-intent"
             synthetic_changes.mkdir()
             (synthetic_changes / "request-archive-recovery.toml").write_text(

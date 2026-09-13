@@ -162,7 +162,22 @@ def synthetic_recovery_plan(
     fixture_root: Path,
     source_commit: str,
 ) -> dict[str, Any]:
-    """Plan the bounded recovery from fixture-owned intent."""
+    """Plan historical recovery with its original application baseline.
+
+    Current receiver/release tooling stays under test, but unrelated future
+    application additions or fixes are not part of the v0.6.1 recovery payload.
+    Only this disposable clone is changed; the caller's source is untouched.
+    """
+
+    if checkout.resolve() == ROOT.resolve():
+        raise AssertionError("Historical fixture must use a disposable clone")
+    restored = run(
+        "git", "restore", "--source", V061_RELEASE, "--worktree", "--",
+        "apps", "ops/release/apps.toml", "platform/compatibility.toml",
+        cwd=checkout,
+    )
+    if restored.returncode != 0:
+        raise AssertionError(restored.stderr[-1000:])
 
     synthetic_changes = fixture_root / "synthetic-release-intent"
     synthetic_changes.mkdir(parents=True)
