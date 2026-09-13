@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "internal"
+summary = "Consolidate recovery diagnostics, delivery status, evidence retention and review workflow"

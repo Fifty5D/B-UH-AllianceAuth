@@ -1,4 +1,21 @@
-# Current log-classifier recovery — September 12, 2026
+# Current recovery entry point — September 13, 2026
+
+PR #63 is merged and the owner reported successful installation of its classifier
+fix, SHA-256 `5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c`.
+The subsequent verification found a retained structures task `HTTPError()`;
+its cause and current recurrence remain unresolved. Cleanup is not established.
+
+Use [the delivery process and staged read-only audit](../../docs/operations/delivery-process.md)
+for the next action. It collects independent findings without another receiver
+installation. Preserve all three installed repair receipts/backups, the original
+attempt, safety slots and immutable v0.6.2. Installation approvals for earlier
+payloads do not authorize a different payload or cleanup/deployment.
+
+The sections below describe the historical PR #63 preparation and remain as
+provenance. Their installation commands have already been consumed and must not
+be replayed as the next action.
+
+## Historical PR #63 preparation — September 12, 2026
 
 This supersedes earlier deployment/receiver-maintenance sequences, not their
 evidence. PRs #52, #60, #61 and #62 are merged; the follow-up base is

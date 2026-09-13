@@ -91,6 +91,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$(git rev-parse HEAD)" == "${SOURCE_COMMIT}" ]]
+          if [[ -f ops/release/recovery-hold.json ]]; then
+            python3 ops/release/delivery_state.py --root . \
+              --output build/delivery-status.json --summary "${GITHUB_STEP_SUMMARY}"
+            echo "release_needed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
           if [[ -f ops/release/published-release-recovery-v0.6.2.json ]]; then
             python3 ops/release/validation_recovery.py \
               --contract ops/release/published-release-recovery-v0.6.2.json \
@@ -115,6 +121,15 @@ jobs:
             echo "release_needed=true" >>"${GITHUB_OUTPUT}"
             echo "Found ${#fragments[@]} unconsumed change fragment(s)." >>"${GITHUB_STEP_SUMMARY}"
           fi
+
+      - name: Retain delivery status
+        if: steps.fragments.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: delivery-status-${{ steps.event.outputs.source_commit }}
+          path: build/delivery-status.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Derive the one exact merged feature pull request
         id: lineage

@@ -122,7 +122,7 @@ jobs:
         with:
           name: production-runtime-fingerprint-${{ github.run_id }}
           path: fingerprint.txt
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
       - name: Post the fingerprint to the diagnostics console

@@ -23,7 +23,7 @@ from .contracts import (
     load_validated_bundle,
     sha256_file,
 )
-from .docker_host import DockerHost, _atomic_bytes
+from .docker_host import DockerHost, LogScanError, _atomic_bytes
 from .engine import _atomic_write
 
 RELEASE = "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
@@ -302,7 +302,7 @@ def _install_file(
     return result
 
 
-def verify_restored(host: DockerHost, value: dict, bundle) -> dict:
+def prepare_verification(host: DockerHost, value: dict, bundle) -> None:
     """Reestablish only the confirmed unchanged, zero-restart production baseline.
 
     Never turn a newly observed nonzero count into a historical success baseline.
@@ -345,26 +345,44 @@ def verify_restored(host: DockerHost, value: dict, bundle) -> dict:
     # guild/owner association. Do not simply set the owner-transition flag.
     host._validate_recovery_host_baseline(bundle)
     host.log_since = "2026-09-12T19:09:32+00:00"
+
+
+def restored_file_checks(host: DockerHost):
     for saved, live in (
         (host.original_dockerfile, host.config.app_dir / host.config.custom_dockerfile),
         (host.original_local_settings, host.config.app_dir / host.config.local_settings),
         (host.original_platform_current, host._platform_current_path()),
         (host.original_deployment_current, host.config.state_dir / "current.json"),
     ):
-        if saved is None or sha256_file(saved) != sha256_file(live):
-            raise DeploymentError("Retained rollback file restoration is incomplete")
-    host._verify_previous_static_fallback()
-    for container in host._container_names_for_service(host.config.gunicorn_service):
-        host._verify_previous_static_manifest(container)
-    host._wait_for_slots(
+        def same_file(saved=saved, live=live):
+            if saved is None or sha256_file(saved) != sha256_file(live):
+                raise DeploymentError("Retained rollback file restoration is incomplete")
+
+        yield f"restored-file-{live.name}", same_file
+    yield "previous-static-fallback", host._verify_previous_static_fallback
+
+    def static_manifests():
+        for container in host._container_names_for_service(host.config.gunicorn_service):
+            host._verify_previous_static_manifest(container)
+
+    yield "previous-static-manifests", static_manifests
+    yield "candidate-safety-slots", lambda: host._wait_for_slots(
         host.candidate_web_slots,
         "sha256:46bbe055aa71f67e4f2c23d4f9aa89c352a5bfc115da8302d60f954bd7558a2d",
         context="Retained candidate safety slot identity",
     )
-    host._verify_proxy_upstream_bytes(
+    yield "proxy-upstream", lambda: host._verify_proxy_upstream_bytes(
         host._upstream_path().read_text(encoding="utf-8"), context="Retained upstream"
     )
-    host._proxy_exec("nginx", "-t", context="Read-only retained Nginx validation")
+    yield "nginx-configuration", lambda: host._proxy_exec(
+        "nginx", "-t", context="Read-only retained Nginx validation"
+    )
+
+
+def verify_restored(host: DockerHost, value: dict, bundle) -> dict:
+    prepare_verification(host, value, bundle)
+    for _name, action in restored_file_checks(host):
+        action()
     host._verify_restored(bundle, set())
     return {
         "schema_version": 1,
@@ -483,6 +501,11 @@ def main(argv=None) -> int:
                     else "bounded operation failed",
                     "cleanup": "not-established",
                     "preserve_resources": True,
+                    **({
+                        "log_findings": list(exc.findings),
+                        "log_scan_complete": exc.scan_complete,
+                        "log_findings_truncated": exc.findings_truncated,
+                    } if isinstance(exc, LogScanError) else {}),
                 }
             )
         )

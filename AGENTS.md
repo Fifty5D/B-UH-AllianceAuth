@@ -61,7 +61,37 @@ production-critical paths.
   accounting integrity, migration and retention safety, backup/release/deployment
   behavior, unintended feature changes, theme readability, responsive layout,
   sticky tables, and missing tests.
-- Do not merge, publish a release, dispatch deployment workflows, retry production
-  jobs, or deploy without the user's explicit approval.
+- Anthony's standing authorization lets ChatGPT Work merge a qualified
+  non-production PR after final risk review without asking for merge permission
+  again. Source changes to deployment tooling are non-production until installed.
+  Codex still hands the PR to Work. Explicit per-task limits override this rule.
+- Standing non-production merge approval does not cover release publication,
+  synchronization merges that initiate production, workflow dispatch/retry,
+  receiver installation, recovery completion/cleanup, or production deployment.
+  Those actions require the applicable separate owner approval. Never carry an
+  approval into a different payload or replay a consumed production attempt.
 - Production deployments must use the exact immutable release built from the tested
-  commit. A merge/deploy approval applies only to the named pull request and SHA.
+  commit. Production approval binds that release and its associated synchronization
+  head, base and evidence; it cannot be reused after those identities change.
+
+## Avoid repeated work
+
+- Read `docs/operations/delivery-process.md` for the current delivery and recovery
+  state. Check live GitHub once at the start; screenshots and old handoffs are
+  historical evidence, not current branch or host state.
+- Diagnose the complete remaining recovery checks together before proposing a
+  receiver repair. Use the staged `recovery_audit` tool; diagnosis does not need
+  another receiver installation. Keep fatal findings visible and explain their
+  cause before changing classification policy.
+- Keep one PR for a coherent change. Fix failed tests on that PR, batch independent
+  reads, and request readiness once its final head is qualified. Do not ask for
+  approval again for an action already authorized in the session.
+- Use automatic UI relevance. Do not add `ui-preview` to server-only repairs
+  unless a concrete visual risk requires it. Prose-only PRs use the conservative
+  CI scope; code, workflow, test and uncertain diffs run all source lanes.
+- While `recovery-hold.json` is active, feature work and qualified source merges
+  continue. Release preparation and all receiver access remain held. Never add a
+  feature's SHA to a historical repair allowlist just to make the release hold pass.
+- Final reports state: source merged, release published, receiver installed,
+  production verified, and the next necessary action. Report only states backed
+  by evidence; do not call a green GitHub build a successful production deployment.

@@ -12,6 +12,11 @@ on:
         description: Exact source commit tested by every lane
         required: true
         type: string
+      base_sha:
+        description: Optional comparison base; unknown scope always runs every lane
+        required: false
+        type: string
+        default: ""
       recovery_harness_sha:
         description: Optional reviewed activation merge supplying only the v0.6.2 fixture harness
         required: false
@@ -31,6 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
       node: ${{ steps.versions.outputs.node }}
       python: ${{ steps.versions.outputs.python }}
       python_image: ${{ steps.versions.outputs.python_image }}
@@ -43,6 +49,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify the exact source identity
@@ -52,6 +59,21 @@ jobs:
           set -Eeuo pipefail
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+
+      - name: Classify the exact source diff
+        id: scope
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -Eeuo pipefail
+          # Historical immutable callers have no comparison base or new helper.
+          if [[ -z "${BASE_SHA}" ]]; then
+            echo "docs_only=false" >>"${GITHUB_OUTPUT}"
+          else
+            python3 ops/release/ci_scope.py --base "${BASE_SHA}" \
+              --head "${SOURCE_SHA}" >>"${GITHUB_OUTPUT}"
+          fi
 
       - name: Read and validate the compatibility contract
         id: versions
@@ -333,6 +355,7 @@ jobs:
           PY
 
   fast:
+    if: needs.configuration.outputs.docs_only != 'true'
     name: Fast source checks
     needs: configuration
     runs-on: ubuntu-24.04
@@ -495,9 +518,10 @@ jobs:
           name: source-fast-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/fast.log
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   integration:
+    if: needs.configuration.outputs.docs_only != 'true'
     name: MariaDB, Redis, Celery, and fake ESI
     needs: configuration
     runs-on: ubuntu-24.04
@@ -590,9 +614,10 @@ jobs:
           name: source-integration-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/integration/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   upgrade:
+    if: needs.configuration.outputs.docs_only != 'true'
     name: Legacy schema upgrade and backup restore
     needs: configuration
     runs-on: ubuntu-24.04
@@ -672,9 +697,10 @@ jobs:
           name: source-upgrade-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/upgrade/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   browser:
+    if: needs.configuration.outputs.docs_only != 'true'
     name: Browser tables, actions, and permissions
     needs: configuration
     runs-on: ubuntu-24.04
@@ -807,7 +833,7 @@ jobs:
           name: source-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/browser/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   required:
     name: Required source checks
@@ -819,6 +845,7 @@ jobs:
     steps:
       - name: Require every source-test lane
         env:
+          DOCS_ONLY: ${{ needs.configuration.outputs.docs_only }}
           CONFIGURATION_RESULT: ${{ needs.configuration.result }}
           FAST_RESULT: ${{ needs.fast.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
@@ -840,7 +867,11 @@ jobs:
             lane="${entry%%:*}"
             result="${entry#*:}"
             printf '%s: %s\n' "${lane}" "${result}"
-            if [[ "${result}" != "success" ]]; then
+            expected="success"
+            if [[ "${DOCS_ONLY}" == "true" && "${lane}" =~ ^(fast|integration|upgrade|browser)$ ]]; then
+              expected="skipped"
+            fi
+            if [[ "${result}" != "${expected}" ]]; then
               failed=1
             fi
           done

@@ -16,7 +16,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ui-preview-${{ github.event.pull_request.number || github.ref }}
+  # A skipped bookkeeping-label run must not cancel the actual preview.
+  group: ui-preview-${{ github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ui-preview' && format('ignored-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -349,7 +350,7 @@ jobs:
           name: ui-preview-pr-${{ steps.target.outputs.pr }}-${{ steps.target.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ui-preview/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
       - name: Upload the bounded provenance manifest
         if: ${{ success() && steps.artifact_guard.outcome == 'success' }}
@@ -359,7 +360,7 @@ jobs:
           path: artifacts/ui-preview/manifest.json
           if-no-files-found: error
           compression-level: 0
-          retention-days: 3
+          retention-days: 30
 
       - name: Record that no preview is applicable
         if: steps.relevance.outputs.relevant != 'true'

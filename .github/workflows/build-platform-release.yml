@@ -282,6 +282,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Require a clear recovery hold before release preparation
+        run: python3 ops/release/delivery_state.py --require-clear --summary "${GITHUB_STEP_SUMMARY}"
+
       - name: Reverify exact published feature readiness
         id: lineage
         env:
@@ -747,7 +750,7 @@ jobs:
             build/wheels/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 14
+          retention-days: 30
 
       - name: Upload release-builder failure diagnostics
         if: failure()
@@ -762,7 +765,7 @@ jobs:
             build/candidate-metadata/
             build/wheels/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30
   publication_gate:
     name: Fail-closed publication gate
     if: ${{ inputs.publish_release_branch }}
@@ -1561,7 +1564,7 @@ jobs:
           path: build/publication/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 30
 
   publish:
     name: Publish preverified release branch

@@ -515,7 +515,7 @@ jobs:
           path: ${{ runner.temp }}/pr-readiness/readiness.json
           if-no-files-found: error
           compression-level: 0
-          retention-days: 3
+          retention-days: 30
 
       - name: Publish the sole authoritative readiness pointer
         id: pointer

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tomllib
@@ -663,6 +664,11 @@ class PlatformConfigurationContracts(TestCase):
             preview["permissions"], {"contents": "read", "pull-requests": "read"}
         )
         self.assertIn("github.event.label.name == 'ui-preview'", preview["if"])
+        # A skipped codex/readiness label event must have its own concurrency group.
+        group = workflow["concurrency"]["group"]
+        self.assertIn("github.event.action == 'labeled'", group)
+        self.assertIn("github.event.label.name != 'ui-preview'", group)
+        self.assertIn("format('ignored-{0}', github.run_id)", group)
         self.assertEqual(
             preview["steps"][1]["with"]["ref"],
             "${{ steps.target.outputs.head_sha }}",
@@ -689,7 +695,7 @@ class PlatformConfigurationContracts(TestCase):
             '"workflow": ".github/workflows/ui-preview.yml"',
             '"screenshots": screenshots',
             '"playwright_report": report',
-            "retention-days: 3",
+            "retention-days: 30",
         ):
             self.assertIn(required, text)
         self.assertNotIn('playwright-report/" 2>>"${REPORT_DIR}/run.log" || true', text)
@@ -821,7 +827,7 @@ class PlatformConfigurationContracts(TestCase):
             "ready-for-work",
             "needs-codex",
             "ui-preview",
-            "retention-days: 3",
+            "retention-days: 30",
         ):
             self.assertIn(required, text)
         self.assertLess(text.index('index("codex") != null'), text.index("gh label create"))
@@ -980,8 +986,46 @@ class PlatformConfigurationContracts(TestCase):
         self.assertIn('"legacy-release:${LEGACY_RELEASE_RESULT}"', text)
         self.assertIn('"upgrade:${UPGRADE_RESULT}"', text)
         self.assertIn('if: always()', text)
-        self.assertIn('"${result}" != "success"', text)
+        self.assertIn('"${result}" != "${expected}"', text)
         self.assertIn("Multiline workflow output is forbidden", text)
+
+    def test_required_gate_accepts_only_proven_docs_skips(self):
+        workflow = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
+        script = workflow["jobs"]["required"]["steps"][0]["run"]
+        base = {name + "_RESULT": "success" for name in (
+            "CONFIGURATION", "RELEASE_LEDGER", "LEGACY_RELEASE", "FAST",
+            "INTEGRATION", "UPGRADE", "BROWSER",
+        )}
+        docs = {**base, "DOCS_ONLY": "true", **{
+            name + "_RESULT": "skipped" for name in ("FAST", "INTEGRATION", "UPGRADE", "BROWSER")
+        }}
+        for values, succeeds in (
+            ({**base, "DOCS_ONLY": "false"}, True), (docs, True),
+            ({**docs, "DOCS_ONLY": ""}, False),
+            ({**docs, "CONFIGURATION_RESULT": "failure"}, False),
+            ({**docs, "RELEASE_LEDGER_RESULT": "skipped"}, False),
+            ({**docs, "BROWSER_RESULT": "cancelled"}, False),
+            ({**base, "FAST_RESULT": "skipped"}, False),
+        ):
+            with self.subTest(values=values):
+                result = subprocess.run(["bash", "-c", script], env={**os.environ, **values}, capture_output=True)
+                self.assertEqual(result.returncode == 0, succeeds, result.stdout.decode())
+
+    def test_recovery_hold_is_checked_before_release_and_receiver_access(self):
+        for filename, job, boundary in (
+            ("build-platform-release.yml", "source_gate", "Reverify exact published feature readiness"),
+            ("deploy-approved-platform-release.yml", "authorize", "Reverify the merge, evidence, and one ChatGPT approval"),
+            ("deploy-platform-v2.yml", "deploy", "Configure guarded deploy and observer SSH identities"),
+        ):
+            with self.subTest(workflow=filename):
+                workflow = _load_workflow(WORKFLOWS / filename)
+                # The reusable operation has historically used a different job ID.
+                jobs = workflow["jobs"]
+                selected = jobs.get(job) or next(value for value in jobs.values() if "steps" in value)
+                steps = selected["steps"]
+                hold = next(i for i, step in enumerate(steps) if "delivery_state.py --require-clear" in step.get("run", ""))
+                access = next(i for i, step in enumerate(steps) if step["name"] == boundary)
+                self.assertLess(hold, access)
 
     def test_release_ledger_is_checked_early_and_pinned_through_publication(self):
         build = _load_workflow(WORKFLOWS / "build-platform-release.yml")
@@ -1860,7 +1904,7 @@ class PlatformConfigurationContracts(TestCase):
         self.assertFalse(authorize["steps"][0]["with"]["persist-credentials"])
         self.assertIn(
             'github.event.pull_request.merge_commit_sha',
-            authorize["steps"][1]["run"],
+            next(step["run"] for step in authorize["steps"] if step.get("id") == "gate"),
         )
         artifact_download = next(
             step

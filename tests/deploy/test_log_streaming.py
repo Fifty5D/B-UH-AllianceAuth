@@ -284,6 +284,82 @@ class LogStreamingTests(unittest.TestCase):
                     )
                 )
 
+    def test_aggregate_scan_reaches_late_errors_and_other_services_after_failure(self):
+        real_popen = subprocess.Popen
+        calls = []
+
+        def popen(args, **kwargs):
+            calls.append(args[-1])
+            program = "import sys\n"
+            if args[-1] == self.host.config.auth_services[0]:
+                program += self.output("ERROR first-task-failed\n")
+                program += self.noise()
+                program += self.output("ERROR late-task-failed\n")
+            if args[-1] == self.host.config.database_service:
+                program += self.output("CRITICAL database-failed password=secret-value\n")
+            return real_popen([sys.executable, "-u", "-c", program], **kwargs)
+
+        with (
+            mock.patch.object(runtime.DockerHost, "compose_prefix", new_callable=mock.PropertyMock,
+                              return_value=["docker", "compose"]),
+            mock.patch.object(runtime.subprocess, "Popen", side_effect=popen),
+            self.assertRaises(runtime.LogScanError) as failure,
+        ):
+            self.host._scan_new_logs(self.host.config.auth_services)
+        findings = "\n".join(failure.exception.findings)
+        for phrase in ("first-task-failed", "late-task-failed", "database-failed"):
+            self.assertIn(phrase, findings)
+        self.assertNotIn("secret-value", findings)
+        self.assertIn(self.host.config.proxy_service, calls)
+        self.assertTrue(failure.exception.scan_complete)
+
+    def test_failed_stream_does_not_prevent_other_sources_and_never_passes(self):
+        real_popen = subprocess.Popen
+
+        def popen(args, **kwargs):
+            program = "import sys\n"
+            if args[-1] == self.host.config.database_service:
+                program += "sys.exit(7)\n"
+            else:
+                program += self.output("ERROR independent-failure\n")
+            return real_popen([sys.executable, "-u", "-c", program], **kwargs)
+
+        with (
+            mock.patch.object(runtime.DockerHost, "compose_prefix", new_callable=mock.PropertyMock,
+                              return_value=["docker", "compose"]),
+            mock.patch.object(runtime.subprocess, "Popen", side_effect=popen),
+            self.assertRaises(runtime.LogScanError) as failure,
+        ):
+            self.host._scan_new_logs(self.host.config.auth_services)
+        self.assertFalse(failure.exception.scan_complete)
+        self.assertIn("independent-failure", str(failure.exception))
+
+    def test_findings_report_is_bounded_and_declares_overflow(self):
+        with self.assertRaises(runtime.LogScanError) as failure:
+            self.host._classify_log_batch(
+                [("worker", "\n".join(f"ERROR task-{i}" for i in range(100)))], set(), None
+            )
+        self.assertEqual(len(failure.exception.findings), runtime.MAX_RETAINED_LOG_FINDINGS)
+        self.assertTrue(failure.exception.findings_truncated)
+
+    def test_repeated_tasks_are_grouped_and_http_status_is_retained_without_payload(self):
+        records = []
+        for i in range(50):
+            records.append(
+                f"[2026-09-13 00:08:{i:02d},259: ERROR/MainProcess] "
+                f"Task structures.tasks.update[{i:08x}-c5c3-435b-9179-e914b1dcf21c] raised unexpected: HTTPError()\n"
+                "requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: "
+                "https://example.invalid/private?token=must-never-appear\n"
+            )
+        records.append("CRITICAL independent-database-failure\n")
+        with self.assertRaises(runtime.LogScanError) as failure:
+            self.host._classify_log_batch([("worker", "".join(records))], set(), None)
+        self.assertEqual(len(failure.exception.findings), 3)
+        self.assertFalse(failure.exception.findings_truncated)
+        self.assertIn("HTTP=403", str(failure.exception))
+        self.assertNotIn("example.invalid", str(failure.exception))
+        self.assertNotIn("must-never-appear", str(failure.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
