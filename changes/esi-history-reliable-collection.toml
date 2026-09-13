@@ -1,0 +1,4 @@
+schema_version = 1
+app = "esi-history"
+kind = "fix"
+summary = "Recover abandoned archive jobs and resume bounded, fair public downloads with retry delays and correct change detection."

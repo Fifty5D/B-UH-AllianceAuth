@@ -93,3 +93,13 @@ django_app = "buh_moon_tax"
 version_file = "src/buh_moon_tax/__init__.py"
 dependencies = ["structure-ops"]
 setup_commands = ["buh_moon_tax_setup"]
+
+[[apps]]
+id = "esi-history"
+path = "apps/esi-history"
+distribution = "aa-buh-max-history"
+import_name = "buh_max_history"
+django_app = "buh_max_history"
+version_file = "src/buh_max_history/__init__.py"
+dependencies = []
+setup_commands = ["buh_archive_setup"]

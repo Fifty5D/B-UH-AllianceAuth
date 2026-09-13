@@ -497,7 +497,8 @@ jobs:
             --no-build-isolation --no-deps \
             -e apps/structure-ops \
             -e apps/mining-analytics \
-            -e apps/moon-tax
+            -e apps/moon-tax \
+            -e apps/esi-history
           python -m pip check
 
       - name: Run unit, migration, and JavaScript checks

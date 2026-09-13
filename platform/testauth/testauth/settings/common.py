@@ -1,6 +1,7 @@
 """Secret-free settings shared by every disposable test profile."""
 
 import os
+from importlib.util import find_spec
 from urllib.parse import urlparse
 
 from .base import *  # noqa: F403
@@ -32,6 +33,12 @@ for app in (
 
 STATICFILES_DIRS = []
 STATIC_ROOT = os.environ.get("BUH_TEST_STATIC_ROOT", "/tmp/buh-test-static")
+# Archive is absent only from the frozen legacy baseline image.
+if find_spec("buh_max_history") is not None:
+    INSTALLED_APPS.append("buh_max_history")  # noqa: F405
+BUH_ESI_ARCHIVE_CAPTURE_ENABLED = False
+BUH_ESI_ARCHIVE_ROOT = "/tmp/buh-test-esi-archive"
+
 STORAGES["staticfiles"] = {  # noqa: F405
     "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
 }

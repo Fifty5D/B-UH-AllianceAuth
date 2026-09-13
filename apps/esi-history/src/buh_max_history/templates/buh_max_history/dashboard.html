@@ -1,0 +1,40 @@
+{% extends "buh_max_history/base.html" %}
+{% load static %}
+{% block content %}
+<main id="buh-archive" data-catalog-url="{% url 'buh_max_history:start_job' 'catalog' %}" data-sync-url="{% url 'buh_max_history:start_job' 'sync' %}" data-verify-url="{% url 'buh_max_history:start_job' 'verify' %}">
+    <section class="ar-hero">
+        <div><p class="ar-eyebrow"><span></span> Durable evidence layer</p><h1>ESI History Archive</h1><p>Change-only private and public ESI snapshots, unlimited Member Audit retention, and a bounded EVE Ref mirror—kept outside MariaDB for long-term growth.</p></div>
+        <div class="ar-state {% if config.capture_enabled %}online{% endif %}"><i class="fa-solid fa-circle"></i><span><strong>{% if config.capture_enabled %}Capturing{% else %}Paused{% endif %}</strong><small>Private {{ config.capture_private_esi|yesno:"on,off" }} · Public {{ config.capture_public_esi|yesno:"on,off" }}</small></span></div>
+    </section>
+
+    {% if permissions.view_archive_storage %}
+    <section class="ar-stats">
+        <article><span>Observed calls</span><strong>{{ totals.requests|default:0 }}</strong><small>Every successful ESI read</small></article>
+        <article><span>Changed snapshots</span><strong>{{ totals.snapshots|default:0 }}</strong><small>{{ totals.streams|default:0 }} endpoint streams</small></article>
+        <article><span>ESI payload storage</span><strong>{{ totals.stored_bytes|filesizeformat }}</strong><small>{{ totals.source_bytes|filesizeformat }} observed before deduplication</small></article>
+        <article><span>Public mirror</span><strong>{{ totals.public_stored_bytes|filesizeformat }}</strong><small>{{ totals.public_files|default:0 }} cataloged files</small></article>
+        <article><span>Host free space</span><strong>{{ disk.free|filesizeformat }}</strong><small>Writes stop at {{ config.minimum_free_gib }} GiB free</small></article>
+    </section>
+    {% endif %}
+
+    {% if permissions.run_public_archive_sync %}
+    <section class="ar-panel ar-controls"><div class="ar-heading"><div><p class="ar-kicker">Guarded operations</p><h2>Public archive controls</h2></div><span class="ar-pill"><i class="fa-solid fa-shield-halved"></i> data.everef.net only</span></div><div class="ar-control-grid"><article><i class="fa-solid fa-list-check"></i><div><h3>Catalog</h3><p>Refresh file metadata and calculate the pending archive without downloading payloads.</p></div><button class="btn btn-outline-info ar-job" data-kind="catalog" type="button">Refresh catalog</button></article><article><i class="fa-solid fa-cloud-arrow-down"></i><div><h3>Bounded sync</h3><p>Download the next configured batch, respecting file, byte, and free-space limits.</p></div><button class="btn btn-primary ar-job" data-kind="sync" type="button" {% if not config.public_mirror_enabled %}disabled title="Enable public mirroring in Settings first"{% endif %}>Sync next batch</button></article><article><i class="fa-solid fa-shield-check"></i><div><h3>Verify files</h3><p>Check a rotating sample and return missing or changed files to the queue.</p></div><button class="btn btn-outline-light ar-job" data-kind="verify" type="button">Verify sample</button></article></div></section>
+    {% endif %}
+
+    {% if permissions.view_archive_coverage %}
+    <section class="ar-panel"><div class="ar-heading"><div><p class="ar-kicker">Change-only capture</p><h2>Recent endpoint streams</h2></div><span class="ar-pill">Latest 30</span></div><div class="table-responsive ar-table"><table class="table align-middle mb-0"><thead><tr><th>ESI operation</th><th>Scope</th><th>Requests</th><th>Changes</th><th>Stored</th><th>Last seen</th><th></th></tr></thead><tbody>{% for stream in streams %}<tr><td><strong>{{ stream.operation_id }}</strong><small>{{ stream.method }} {{ stream.url_template }}</small></td><td>{% if stream.is_private %}<span class="ar-tag private">Private{% if stream.character_id %} · {{ stream.character_id }}{% endif %}</span>{% else %}<span class="ar-tag public">Public</span>{% endif %}</td><td>{{ stream.request_count }}</td><td>{{ stream.snapshot_count }}</td><td>{{ stream.stored_bytes|filesizeformat }}</td><td>{{ stream.last_seen_at|date:"Y-m-d H:i:s" }} UTC</td><td>{% if stream.latest_snapshot %}{% if stream.is_private and permissions.download_private_archive or not stream.is_private and permissions.download_public_archive %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'buh_max_history:download_snapshot' stream.latest_snapshot.pk %}" title="Download latest compressed payload"><i class="fa-solid fa-download"></i></a>{% endif %}{% endif %}</td></tr>{% empty %}<tr><td class="ar-empty" colspan="7">No ESI calls have been captured yet. Normal Auth and Member Audit refreshes will populate this automatically.</td></tr>{% endfor %}</tbody></table></div></section>
+    {% endif %}
+
+    {% if permissions.view_public_archive %}
+    <section class="ar-panel"><div class="ar-heading"><div><p class="ar-kicker">Public history</p><h2>EVE Ref datasets</h2></div><span class="ar-pill {% if config.public_mirror_enabled %}good{% endif %}">{{ config.public_mirror_enabled|yesno:"Scheduled,Paused" }}</span></div><div class="ar-datasets">{% for dataset in datasets %}<article><div><span class="ar-dataset-state {% if dataset.last_error %}bad{% elif dataset.stored_count %}good{% endif %}"></span><h3>{{ dataset.name }}</h3></div><dl><div><dt>Cataloged</dt><dd>{{ dataset.file_count }}</dd></div><div><dt>Stored</dt><dd>{{ dataset.stored_count }}</dd></div><div><dt>Disk</dt><dd>{{ dataset.stored_size|filesizeformat }}</dd></div></dl><small>{% if dataset.last_error %}{{ dataset.last_error|truncatechars:150 }}{% elif dataset.last_sync_at %}Synced {{ dataset.last_sync_at|date:"Y-m-d H:i" }} UTC{% elif dataset.last_catalog_at %}Cataloged {{ dataset.last_catalog_at|date:"Y-m-d H:i" }} UTC{% else %}Waiting for first catalog{% endif %}</small></article>{% empty %}<p class="ar-empty">No public datasets are configured.</p>{% endfor %}</div></section>
+    {% endif %}
+
+    <section class="ar-panel"><div class="ar-heading"><div><p class="ar-kicker">Audit trail</p><h2>Archive jobs</h2></div></div><div id="ar-jobs" class="ar-jobs">{% for job in jobs %}<article data-job-id="{{ job.pk }}"><span class="ar-job-icon"><i class="fa-solid {% if job.kind == 'SYNC' %}fa-cloud-arrow-down{% elif job.kind == 'VERIFY' %}fa-shield-check{% else %}fa-list-check{% endif %}"></i></span><div><strong>{{ job.get_kind_display }}</strong><small>{% if job.requested_by %}{{ job.requested_by.username }} · {% else %}Scheduler · {% endif %}{{ job.requested_at|date:"Y-m-d H:i:s" }} UTC{% if job.message %} · {{ job.message }}{% endif %}</small></div><span class="ar-job-status status-{{ job.status|lower }}">{{ job.get_status_display }}</span></article>{% empty %}<p class="ar-empty">No public archive jobs have run yet.</p>{% endfor %}</div></section>
+
+    {% if issues %}<section class="ar-panel"><div class="ar-heading"><div><p class="ar-kicker warning">Attention</p><h2>Recent capture guards</h2></div></div><div class="ar-issues">{% for issue in issues %}<article><i class="fa-solid fa-triangle-exclamation"></i><div><strong>{{ issue.operation_id|default:"Archive" }} · {{ issue.reason }}</strong><small>{{ issue.detail|default:"No additional detail" }} · {{ issue.occurrences }} occurrence{{ issue.occurrences|pluralize }}</small></div><time>{{ issue.last_seen_at|date:"Y-m-d H:i:s" }} UTC</time></article>{% endfor %}</div></section>{% endif %}
+
+    <footer class="ar-footer">B-UH ESI History Archive {{ app_version }} · OAuth tokens, secrets, request bodies, and authorization headers are never stored.</footer>
+</main>
+<div id="ar-toast" class="ar-toast" role="status" aria-live="polite"></div>
+<form id="ar-csrf" class="d-none">{% csrf_token %}</form>
+{% endblock %}
