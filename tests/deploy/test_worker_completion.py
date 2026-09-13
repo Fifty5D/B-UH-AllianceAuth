@@ -162,11 +162,13 @@ class WorkerCompletionTests(unittest.TestCase):
                     if args[-1] == f"{6:064x}":  # services worker
                         program += log_streaming.LogStreamingTests.noise()
                         program += log_streaming.LogStreamingTests.output(
-                            RETAINED_DISCORD_OWNER_LOG.read_text()
+                            log_streaming.ESI_SUCCESS_METADATA.read_text()
+                            + RETAINED_DISCORD_OWNER_LOG.read_text()
                         )
                         if failure == "fatal-log":
                             program += log_streaming.LogStreamingTests.output(
-                                "CRITICAL unrelated failure\n"
+                                "DEBUG X-Esi-Error-Limit-Remain: 100; "
+                                "PermissionError: unrelated failure\n"
                             )
                         elif failure == "incomplete-log":
                             program += "sys.stdout.write('INFO interrupted')"

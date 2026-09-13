@@ -47,7 +47,12 @@ END_V2 = "# END B-UH PLATFORM V2"
 BEGIN_LEGACY = "# BEGIN B-UH MOON TAX PLATFORM"
 END_LEGACY = "# END B-UH MOON TAX PLATFORM"
 FATAL_LOG_RE = re.compile(
-    r"(?:^|\W)(?:ERROR|CRITICAL|Traceback|PermissionError|permission denied)"
+    # Severity words are standalone tokens, not pieces of HTTP metadata names
+    # (X-Esi-Error-Limit-Remain, stale-if-error) or dotted logger identifiers.
+    # Do not discard DEBUG records or strip metadata: their values/bodies can
+    # still contain real severity markers, permission failures or tracebacks.
+    r"(?<![\w.-])(?:ERROR|CRITICAL)(?![\w.-])|"
+    r"(?:^|\W)(?:Traceback|PermissionError|permission denied)"
     r"(?:\W|$)|ModuleNotFoundError|Worker failed to boot|ImproperlyConfigured|"
     r"ImportError:|SyntaxError:|django\.db\.migrations\.exceptions|"
     r"(?:\b403\s+Forbidden\b|\berror\s+code:\s*50013\b|"
@@ -4577,7 +4582,7 @@ class DockerHost:
         individually_scanned: set[str],
         owner_transition_phase: str | None,
     ) -> tuple[str, ...]:
-        """Unchanged exact-owner classifier; each batch contains whole incidents."""
+        """Classify severity/exception evidence, with whole exact-owner incidents."""
         allowed: list[str] = []
         rejected: list[str] = []
         allowlist: list[re.Pattern[str]] = []

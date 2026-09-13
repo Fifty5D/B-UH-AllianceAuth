@@ -6,17 +6,25 @@ import tempfile
 import time
 import tracemalloc
 import unittest
+import threading
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
 from ops.deploy import docker_host as runtime
 from ops.deploy.contracts import DeploymentError
+from tests.fake_esi.server import Handler
 from tests.deploy.test_docker_host import (
     RETAINED_DISCORD_OWNER_LOG,
     container_id,
     make_config,
     owner_log_environment,
 )
+
+# Only the first production prefix was available; headers and the second format
+# are synthetic, grounded in the normal headers emitted by tests/fake_esi.
+ESI_SUCCESS_METADATA = Path(__file__).with_name("fixtures") / "esi-success-metadata.log"
 
 
 class LogStreamingTests(unittest.TestCase):
@@ -62,14 +70,76 @@ class LogStreamingTests(unittest.TestCase):
         )
 
     def test_clean_interval_exceeds_four_mib_with_bounded_memory(self):
-        tracemalloc.start()
-        try:
-            self.assertEqual(self.scan_program("import sys\n" + self.noise()), [])
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        self.assertLess(peak, runtime.MAX_COMMAND_OUTPUT)
+        metadata = ESI_SUCCESS_METADATA.read_text(encoding="utf-8")
+        repeats = runtime.MAX_COMMAND_OUTPUT // len(metadata.encode()) + 100
+        for program in (
+            self.noise(),
+            f"for _ in range({repeats}):\n sys.stdout.write({metadata!r})\n",
+        ):
+            tracemalloc.start()
+            try:
+                self.assertEqual(self.scan_program("import sys\n" + program), [])
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertLess(peak, runtime.MAX_COMMAND_OUTPUT)
         self.assertEqual(runtime.MAX_COMMAND_OUTPUT, 4 * 1024 * 1024)
+
+    def test_successful_fake_esi_http_metadata_is_not_a_severity(self):
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/latest/markets/10000002/orders/",
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["X-Esi-Error-Limit-Remain"], "100")
+                    record = (
+                        "[12/Sep/2026 20:09:00] DEBUG [memberaudit.core.esi_status:181] "
+                        f"esi status response: {response.status} headers: {dict(response.headers)!r}\n"
+                    )
+                self.assertEqual(
+                    self.scan_program("import sys\n" + self.output(record)), []
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_metadata_tokens_do_not_hide_real_severity_or_exception_evidence(self):
+        metadata = ESI_SUCCESS_METADATA.read_text(encoding="utf-8")
+        benign = (
+            metadata + "[12/Sep/2026 20:09:01] DEBUG [example.error.client:12] healthy\n"
+        )
+        for owner in (False, True):
+            with self.subTest(owner=owner):
+                self.assertEqual(
+                    self.scan_program("import sys\n" + self.output(benign), owner=owner), []
+                )
+        for fatal in (
+            metadata.replace(
+                "] DEBUG [memberaudit", "] ERROR [memberaudit"
+            ),  # actual severity with an otherwise successful response
+            metadata.replace("DEBUG/MainProcess", "CRITICAL/MainProcess"),
+            "DEBUG X-Esi-Error-Limit-Remain: ERROR backend failed\n",
+            "DEBUG X-Esi-Error-Limit-Remain: 100; PermissionError: denied\n",
+            "DEBUG ModuleNotFoundError: unavailable\n",
+            "DEBUG Traceback (most recent call last):\n",
+            "DEBUG ImportError: unavailable\n",
+            "DEBUG SyntaxError: invalid\n",
+            "DEBUG Worker failed to boot\n",
+            "DEBUG ImproperlyConfigured: database\n",
+            "DEBUG django.db.migrations.exceptions.InconsistentMigrationHistory\n",
+            "DEBUG permission denied\n",
+            "DEBUG 403 Forbidden (error code: 50013): Missing Permissions\n",
+            "DEBUG restarting repeatedly\n",
+            'DEBUG {"error": "unexpected failure"}\n',
+            "[error] failed\n",
+            "ERROR: failed\n",
+        ):
+            with self.subTest(fatal=fatal[:70]), self.assertRaises(DeploymentError):
+                self.scan_program("import sys\n" + self.output(fatal), owner=False)
 
     def test_fatal_at_start_boundary_and_end_is_never_lost(self):
         noise = self.noise()
@@ -113,7 +183,7 @@ class LogStreamingTests(unittest.TestCase):
                 self.scan_program("import sys\n" + self.output(text))
 
     def test_exact_pipe_cuts_inside_header_traceback_and_owner_id(self):
-        record = self.retained[self.retained.index("[07/Sep/"):]
+        record = self.retained[self.retained.index("[07/Sep/") :]
         for cut in (
             record.index("WARNING") + 3,
             record.index("Traceback") + 4,
@@ -184,11 +254,15 @@ class LogStreamingTests(unittest.TestCase):
                     calls.append(args)
                     program = "import sys\n"
                     if args[-1] == container:
-                        program += self.noise() + self.output(self.retained)
+                        program += self.noise() + self.output(
+                            ESI_SUCCESS_METADATA.read_text(encoding="utf-8") + self.retained
+                        )
                     return real_popen([sys.executable, "-u", "-c", program], **kwargs)
 
                 with (
-                    owner_log_environment(self.host, rollback=phase == "rollback", streaming=True),
+                    owner_log_environment(
+                        self.host, rollback=phase == "rollback", streaming=True
+                    ),
                     mock.patch.object(
                         runtime.DockerHost,
                         "compose_prefix",
