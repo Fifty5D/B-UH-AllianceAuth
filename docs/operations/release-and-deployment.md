@@ -1,5 +1,9 @@
 # Release and deployment operations
 
+Start with [delivery state and the current workflow](delivery-process.md). The
+active recovery hold permits source work while blocking new release preparation
+and receiver access. Historical procedures below do not reopen a consumed attempt.
+
 ## Deployment generations
 
 There are two deliberately separate generations:

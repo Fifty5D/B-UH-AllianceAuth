@@ -98,6 +98,26 @@ NGINX_PRODUCTION_HOST = "auth.b-uh.com"
 STATIC_HEALTH_ASSET = "admin/css/base.css"
 MAX_RETAINED_LOG_FINDINGS = 32
 MAX_RETAINED_LOG_FINDING_CHARS = 200
+
+
+class LogScanError(DeploymentError):
+    """Bounded findings from every readable stream, never a health approval."""
+
+    def __init__(self, findings, *, complete=True, truncated=False):
+        unique = tuple(dict.fromkeys(
+            _safe_report_text(str(item), 500) for item in findings
+        ))
+        self.findings = unique[:MAX_RETAINED_LOG_FINDINGS]
+        self.scan_complete = complete
+        self.findings_truncated = truncated or len(unique) > MAX_RETAINED_LOG_FINDINGS
+        super().__init__(
+            "New fatal AllianceAuth log pattern was detected: "
+            + "\n".join(self.findings)
+            + ("\nLog collection incomplete; preserve recovery resources." if not complete else "")
+            + ("\nAdditional findings exceed the report bound." if self.findings_truncated else "")
+        )
+
+
 MAX_STATIC_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_STATIC_MANIFEST_ENTRIES = 100_000
 MAX_STATIC_ASSET_BYTES = 512 * 1024 * 1024
@@ -376,6 +396,42 @@ def _safe_report_text(output: str, maximum: int) -> str:
         character if 32 <= ord(character) <= 126 else "?" for character in safe
     )
     return printable[:maximum]
+
+
+def _finding_signature(text: str) -> str:
+    """Group repeated samples without hiding distinct services or HTTP statuses."""
+    text = re.sub(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", "<task-id>", text)
+    return re.sub(
+        r"(?:\d{4}-\d{2}-\d{2}[ T]|\d{2}/[A-Za-z]{3}/\d{4} )"
+        r"\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:\d{2})?",
+        "<time>", text,
+    )
+
+
+def _failure_sample(lines: list[str], index: int) -> str:
+    """Keep exception type/status, never traceback frames, response bodies or URLs."""
+
+    def exception_detail(line):
+        match = re.match(r"^\s*((?:[A-Za-z_]\w*\.)*(?:[A-Za-z_]\w*)?(?:Error|Exception)):", line)
+        if match is None:
+            return None
+        detail = match[1][:100]
+        status = re.search(r"\b([45][0-9]{2}) (?:Client|Server) Error\b", line)
+        return detail + (f" HTTP={status[1]}" if status else "")
+
+    sample = exception_detail(lines[index]) or _safe_report_text(
+        lines[index], MAX_RETAINED_LOG_FINDING_CHARS
+    )
+    details = []
+    for line in lines[index + 1:index + 1 + MAX_OWNER_RECORD_LINES]:
+        if CELERY_LOG_HEADER_RE.match(line) or ALLIANCEAUTH_LOG_HEADER_RE.match(line):
+            break
+        detail = exception_detail(line)
+        if detail is None:
+            continue
+        if detail not in details and len(details) < 3:
+            details.append(detail)
+    return sample + (" | exception details: " + ", ".join(details) if details else "")
 
 
 def _atomic_bytes(
@@ -4553,6 +4609,20 @@ class DockerHost:
                 )
             )
         findings: list[str] = []
+        failures: list[str] = []
+        scan_complete = True
+        truncated = False
+
+        def retain_failure(source: str, value: str) -> None:
+            nonlocal truncated
+            safe = _safe_report_text(f"{source}: {value}", 500)
+            if any(_finding_signature(safe) == _finding_signature(item) for item in failures):
+                return
+            if len(failures) < MAX_RETAINED_LOG_FINDINGS:
+                failures.append(safe)
+            else:
+                truncated = True
+
         for source, command, context in commands:
             deadline = time.monotonic() + self.config.command_timeout_seconds
             lines = self._stream_log_lines(command, deadline=deadline, context=context)
@@ -4563,17 +4633,31 @@ class DockerHost:
             )
             try:
                 for batch in batches:
-                    for finding in self._classify_log_batch(
-                        [(source, batch)], individually_scanned, owner_transition_phase
-                    ):
+                    try:
+                        classified = self._classify_log_batch(
+                            [(source, batch)], individually_scanned, owner_transition_phase
+                        )
+                    except LogScanError as error:
+                        for failure in error.findings:
+                            retain_failure(source, failure)
+                        truncated = truncated or error.findings_truncated
+                        continue
+                    for finding in classified:
                         if (
                             finding not in findings
                             and len(findings) < MAX_RETAINED_LOG_FINDINGS
                         ):
                             findings.append(finding)
+            except DeploymentError as error:
+                # Continue independent sources for diagnosis, but an unreadable,
+                # oversized, interrupted or timed-out stream can never pass.
+                scan_complete = False
+                retain_failure(source, str(error))
             finally:
                 batches.close()
                 lines.close()
+        if failures:
+            raise LogScanError(failures, complete=scan_complete, truncated=truncated)
         return tuple(findings)
 
     def _classify_log_batch(
@@ -4585,6 +4669,17 @@ class DockerHost:
         """Classify severity/exception evidence, with whole exact-owner incidents."""
         allowed: list[str] = []
         rejected: list[str] = []
+        rejected_overflow = False
+
+        def reject(sample):
+            nonlocal rejected_overflow
+            if any(_finding_signature(sample) == _finding_signature(item) for item in rejected):
+                return
+            if len(rejected) < MAX_RETAINED_LOG_FINDINGS:
+                rejected.append(sample)
+            else:
+                rejected_overflow = True
+
         allowlist: list[re.Pattern[str]] = []
         for signature in self.config.fatal_log_allowlist:
             match = FATAL_LOG_ALLOWLIST_RE.fullmatch(signature)
@@ -4846,7 +4941,8 @@ class DockerHost:
         for source, text in logs_by_source:
             owner_indexes = owner_service_findings.get(source, set())
             invalid_indexes = owner_invalid_indexes.get(source, set())
-            for index, raw_line in enumerate(text.splitlines()):
+            source_lines = text.splitlines()
+            for index, raw_line in enumerate(source_lines):
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
                     if not processes:
@@ -4862,11 +4958,7 @@ class DockerHost:
                         allowed.append(safe)
                     continue
                 if index in invalid_indexes:
-                    safe = _safe_report_text(
-                        raw_line, MAX_RETAINED_LOG_FINDING_CHARS
-                    )
-                    if len(rejected) < MAX_RETAINED_LOG_FINDINGS:
-                        rejected.append(safe)
+                    reject(_failure_sample(source_lines, index))
                     continue
                 if not FATAL_LOG_RE.search(raw_line):
                     continue
@@ -4874,13 +4966,10 @@ class DockerHost:
                 if any(pattern.fullmatch(raw_line) for pattern in allowlist):
                     if safe not in allowed and len(allowed) < MAX_RETAINED_LOG_FINDINGS:
                         allowed.append(safe)
-                elif len(rejected) < MAX_RETAINED_LOG_FINDINGS:
-                    rejected.append(safe)
+                else:
+                    reject(_failure_sample(source_lines, index))
         if rejected:
-            raise DeploymentError(
-                "New fatal AllianceAuth log pattern was detected: "
-                + rejected[0]
-            )
+            raise LogScanError(rejected, truncated=rejected_overflow)
         return tuple(allowed)
 
     def _retain_transition_log_findings(
@@ -5183,54 +5272,73 @@ class DockerHost:
                 context="Rollback Celery beat singleton restoration",
             )
 
-    def _verify_restored(
+    def restored_health_checks(
         self, bundle: ValidatedBundle, replaced_services: set[str]
-    ) -> None:
+    ):
+        """The same read-only probes serve verification and aggregate diagnosis.
+
+        Each yielded action is independent. Diagnosis must not call rollback,
+        retain a verification receipt, or treat a successful probe as approval.
+        """
         expected = {
             **self.auth_replica_counts,
             self.config.database_service: 1,
             self.config.redis_service: 1,
             self.config.proxy_service: 1,
         }
-        self._wait_for_compose_services(
+        yield "services-and-restarts", lambda: self._wait_for_compose_services(
             expected,
             zero_restarts=replaced_services,
             context="Restored production services",
         )
-        self._require_live_images(
+        yield "installed-images", lambda: self._require_live_images(
             {
                 service: image
                 for service, (image, _reference) in self.previous_images.items()
             }
         )
-        self._manage_live("check", "--no-color", context="Restored Django checks")
-        migrations = self._manage_live(
-            "showmigrations",
-            "--plan",
-            "--no-color",
-            context="Restored migration state",
+        yield "django", lambda: self._manage_live(
+            "check", "--no-color", context="Restored Django checks"
         )
-        if re.search(r"(?m)^\s*\[ \]", migrations):
-            raise DeploymentError("Restored deployment has pending migrations")
-        self._redis_health()
-        self._celery_health()
-        for container in self._container_names_for_service(self.config.gunicorn_service):
-            self._internal_http_checks(container)
-        self._verify_static_asset(None)
+
+        def migration_check():
+            migrations = self._manage_live(
+                "showmigrations", "--plan", "--no-color", context="Restored migration state"
+            )
+            if re.search(r"(?m)^\s*\[ \]", migrations):
+                raise DeploymentError("Restored deployment has pending migrations")
+
+        yield "migration-state", migration_check
+        yield "redis", self._redis_health
+        yield "celery-workers-queues-tasks", self._celery_health
+
+        def internal_http():
+            for container in self._container_names_for_service(self.config.gunicorn_service):
+                self._internal_http_checks(container)
+
+        yield "internal-http", internal_http
+        yield "static-asset", lambda: self._verify_static_asset(None)
         for command in self.config.application_health_commands:
-            self._manage_live(
+            yield f"application-{command}", lambda command=command: self._manage_live(
                 command,
                 "--no-color",
                 context=f"Restored read-only application health command {command}",
             )
-        self._public_smoke_checks()
-        findings = self._scan_new_logs(
+        yield "public-http", self._public_smoke_checks
+        yield "retained-interval-logs", lambda: self._scan_new_logs(
             self.config.auth_services,
             owner_transition_phase=(
                 "rollback" if self.recovery_baseline_verified else None
             ),
         )
-        self._retain_transition_log_findings(bundle, findings)
+
+    def _verify_restored(
+        self, bundle: ValidatedBundle, replaced_services: set[str]
+    ) -> None:
+        for name, action in self.restored_health_checks(bundle, replaced_services):
+            result = action()
+            if name == "retained-interval-logs":
+                self._retain_transition_log_findings(bundle, result)
 
     def rollback(self, bundle: ValidatedBundle, last_state: str | None) -> str:
         del last_state

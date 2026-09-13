@@ -124,7 +124,7 @@ jobs:
           name: supply-chain-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/supply-chain/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
       - name: Require reviewed source update when drift exists
         if: steps.refresh.outputs.drift == 'true'

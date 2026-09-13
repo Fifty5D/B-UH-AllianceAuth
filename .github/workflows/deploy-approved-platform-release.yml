@@ -65,6 +65,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Require a clear recovery hold before production authorization
+        run: python3 ops/release/delivery_state.py --require-clear --summary "${GITHUB_STEP_SUMMARY}"
+
       - name: Reverify the merge, evidence, and one ChatGPT approval
         id: gate
         env:

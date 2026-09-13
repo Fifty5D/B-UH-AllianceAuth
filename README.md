@@ -1,7 +1,18 @@
 # B-UH Alliance Auth
 
-Private source, tests, guarded deployment tooling, and support utilities for the
+Source, tests, guarded deployment tooling, and support utilities for the
 Bureau of Unified Harvesting Alliance Auth installation.
+
+## Current delivery process
+
+Feature development and qualified source merges can continue while production
+recovery is held. The last reported receiver repair is installed; recovery
+verification is still unresolved. A published v0.6.2 release is not proof it is
+running successfully on the server.
+
+See [delivery status, ownership and the next action](docs/operations/delivery-process.md).
+Use `python ops/release/delivery_state.py` for repository status; a host report is
+required to establish the installed production version.
 
 ## Source-first platform
 
@@ -41,7 +52,8 @@ See `docs/architecture/source-first-platform.md` for the rollout and safety gate
 
 ## VPS diagnostics console
 
-Repository issue **#1** is the private diagnostics console. After the one-time
+Repository issue **#1** is the diagnostics console. This repository is public;
+only sanitized, bounded diagnostics may be posted there. After the one-time
 observer setup, the repository owner can comment `/diagnostics 15` to collect a
 sanitized status and log report. Supported windows are 5, 15, 30, 60, 180, and
 360 minutes. Comment `/fingerprint platform-v2` after updating the observer

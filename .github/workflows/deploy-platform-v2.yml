@@ -325,6 +325,15 @@ jobs:
             >artifacts/release-commit.json
           [[ "$(jq -er '.parents | length' artifacts/release-commit.json)" == "1" ]]
 
+      - name: Check out the trusted caller recovery policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require a clear recovery hold before receiver access
+        run: python3 ops/release/delivery_state.py --require-clear --summary "${GITHUB_STEP_SUMMARY}"
+
       - name: Check out the exact published release commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -795,7 +804,7 @@ jobs:
             artifacts/diagnostics.txt
             artifacts/attempt.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
       - name: Require receiver, observer, and sanitization success
         if: always()
