@@ -1,0 +1,5 @@
+[12/Sep/2026 20:09:00] DEBUG [memberaudit.core.esi_status:181] esi status response: 200 headers: {'X-Esi-Error-Limit-Remain': '100', 'X-Esi-Error-Limit-Reset': '60', 'Cache-Control': 'public, max-age=300, stale-if-error=600'}
+[2026-09-12 20:09:00,001: DEBUG/MainProcess] esi status response: 200
+X-Esi-Error-Limit-Remain: 100
+X-Esi-Error-Limit-Reset: 60
+Cache-Control: public, max-age=300, stale-if-error=600

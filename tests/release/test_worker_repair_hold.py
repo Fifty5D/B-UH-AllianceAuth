@@ -27,6 +27,9 @@ class WorkerRepairHoldTests(unittest.TestCase):
     def test_retained_log_repair_merge_preserves_hold_from_merged_pr61(self):
         self.exercise_merge("4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc")
 
+    def test_log_classifier_merge_preserves_hold_from_merged_pr62(self):
+        self.exercise_merge("787251cb319008805a7c7e39f81e7ca52a92bc05")
+
     def exercise_merge(self, base):
         with tempfile.TemporaryDirectory() as tmp:
             checkout = Path(tmp) / "checkout"

@@ -1712,10 +1712,33 @@ def validate_hold(
     """Hold v0.6.3 across the check-association repair and final sync."""
 
     current = _resolve(root, current_commit)
+    # PR #62's reader is already installed. This classifier-only continuation
+    # preserves the unresolved recovery hold and does not reopen deployment.
+    classifier_base = "787251cb319008805a7c7e39f81e7ca52a92bc05"
+    parents = _parents(root, current)
+    if parents[:1] == [classifier_base]:
+        permitted = {
+            "ops/deploy/docker_host.py", "ops/deploy/worker_recovery.py",
+            "ops/deploy/WORKER-RECOVERY.md", "ops/release/validation_recovery.py",
+            "tests/deploy/test_log_streaming.py", "tests/deploy/test_log_reader_install.py",
+            "tests/deploy/test_worker_completion.py",
+            "tests/deploy/fixtures/esi-success-metadata.log",
+            "tests/release/test_worker_repair_hold.py",
+            "changes/recovery-log-metadata-classification.toml",
+        }
+        changed = set(_changed_paths(root, classifier_base, current))
+        if (
+            len(parents) != 2 or not changed or not changed <= permitted
+            or _tree(root, parents[1]) != _tree(root, current)
+        ):
+            raise ValidationRecoveryError("Log classifier repair is outside the bounded release hold")
+        previous = validate_hold(root, classifier_base, contract=contract)
+        return {**previous, "current_commit": current,
+                "log_classifier_repair": {"base_commit": classifier_base,
+                                          "feature_head": parents[1], "merge_commit": current}}
     # Continue the hold from the completed PR #61 merge; this log-reader repair
     # does not authorize recovery, cleanup, a release build or a deployment.
     log_repair_base = "4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc"
-    parents = _parents(root, current)
     if parents[:1] == [log_repair_base]:
         permitted = {
             "ops/deploy/docker_host.py", "ops/deploy/worker_recovery.py",

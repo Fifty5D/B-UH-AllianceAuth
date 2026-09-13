@@ -1,8 +1,8 @@
-# Current retained-log recovery — September 12, 2026
+# Current log-classifier recovery — September 12, 2026
 
 This supersedes earlier deployment/receiver-maintenance sequences, not their
-evidence. PRs #52, #60 and #61 are merged; the follow-up base is
-`4f02900aed9e62c3f7fcb7cce4bcdde50325b5bc`. No code merge is a new production
+evidence. PRs #52, #60, #61 and #62 are merged; the follow-up base is
+`787251cb319008805a7c7e39f81e7ca52a92bc05`. No code merge is a new production
 approval. The one-use `CONTINUE APPROVED V0.6.2` dispatch is **consumed**.
 
 Anthony has **already installed** PR #61's one-file worker repair, with result
@@ -12,10 +12,31 @@ is `c33fe29ed735e18f0c62bbbb31aecd7a6f3ee49a175a8c1c2ad8f33b90134ef8`;
 preserve `/etc/buh-platform-v2/WORKER-REPAIR.json` and its backup
 `/var/backups/buh-receiver-upgrade/worker-check-c33fe29ed735` unchanged.
 
-The next **verify**, not deploy, passed the corrected worker check but failed:
+The historical next **verify**, not deploy, passed the worker check but failed:
 `Retained owner-transition log scan for allianceauth_worker_services exceeded the bounded output limit`.
-Cleanup remains **not established**, with `preserve_resources: true`. This is
-not a new failed deployment or permission to remove safety resources.
+Anthony has also **already installed** PR #62's complete-interval log reader from
+`96c51a6aca6b07aac23c17934fb2465cf47e9f29`, returning
+`receiver-log-reader-repaired`. The **currently installed** file SHA-256 is
+`d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9`.
+Preserve `/etc/buh-platform-v2/RETAINED-LOG-REPAIR.json` and
+`/var/backups/buh-receiver-upgrade/retained-logs-d75575649e7d` as well as PR #61's
+receipt and backup. Do **not** replay `install`, `install-logs`, or maintenance.
+
+The latest verification failed with `New fatal AllianceAuth log pattern was detected`.
+Its reported prefix was a successful HTTP 200 DEBUG ESI response; the screenshot
+did not contain the complete headers. Work reproduced the false match of `ERROR`
+inside `X-Esi-Error-Limit-Remain`, a normal header also emitted by fake ESI tests.
+Fixtures label their remaining headers synthetic, not recovered production data.
+Cleanup remains **not established**. This is not a new failed deployment or
+permission to remove safety resources.
+
+The correction recognizes standalone severity tokens, not the `Error` segment
+of a hyphenated header/cache directive or a dotted logger identifier. It still
+scans every line and metadata value for actual ERROR/CRITICAL, tracebacks,
+permission/import/migration/boot and repeated-restart failures, including within
+DEBUG records. It neither broadens the exact guild-owner exception nor truncates
+the interval starting `2026-09-12T19:09:32+00:00`. Pipe/record/incident memory bounds,
+deadlines and fail-closed incomplete/nonzero/oversized reads remain unchanged.
 
 ## Established state and remaining evidence
 
@@ -47,7 +68,7 @@ not a new failed deployment or permission to remove safety resources.
   Its original `docker_host.py` SHA-256 was
   `0aa449968b98038fd68aca1b093640bea76d3889c185dce298775943881f20fe`;
   that file is retained in PR #61's backup, not currently installed. The installed
-  single-file override is the `c33fe29…` hash above.
+  single-file override is now `d7557564…`; `c33fe29…` is retained in PR #62's backup.
   Original `INSTALL.json` is
   `d7b5c208f223720bfaf33525aff3bb3f116054b654015cbc7298e648fc959379`;
   original failed attempt journal is
@@ -151,14 +172,14 @@ baseline/preflight command is not an activation shortcut for this changed host.
 First review **only this qualified repair PR** and its trusted exact-head evidence,
 then Work may merge it with the v0.6.3 hold intact. Codex does not merge. Do not
 dispatch deployment or a preflight. Ask Anthony for a **new** approval to replace
-only installed `docker_host.py`, from `c33fe29…` to the reviewed log-reader hash.
+only installed `docker_host.py`, from `d7557564…` to the reviewed classifier hash.
 Approval must identify the qualified feature commit and this new Git-blob SHA-256:
 
-`d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9`
+`5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c`
 
-The helper independently verifies the original `INSTALL.json`, old repair receipt
-and backup, original plan/journal/backup-manifest/config/upstream/engine/receiver
-pins, and installed `c33fe29…` bytes before activation. Any drift is a blocker,
+The helper independently verifies the original `INSTALL.json`, **both** existing
+repair receipts and backups, original plan/journal/backup-manifest/config/upstream/
+engine/receiver pins, and installed `d7557564…` bytes before activation. Any drift is a blocker,
 not permission to refresh pins, replay maintenance or discard a receipt.
 
 Prepare a fresh, clean LF checkout of the exact reviewed feature head (not the
@@ -192,18 +213,18 @@ From that exact root-owned source directory, with `$RUNTIME_SHA256` and
 
 ```bash
 # STOP unless Work/Anthony approved this exact new payload and source export.
-# Run under the same root-only, production-locked helper; do not use "install".
+# Run under the same root-only, production-locked helper; neither old installer is valid.
 set -euo pipefail
-RUNTIME_SHA256=d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9
+RUNTIME_SHA256=5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c
 test "$(sha256sum ops/deploy/docker_host.py | cut -d' ' -f1)" = "$RUNTIME_SHA256"
 test "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" = "$ARCHIVE_SHA256"
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin PYTHONPATH="$PWD" \
-  /usr/bin/python3 -B -P -m ops.deploy.worker_recovery install-logs \
+  /usr/bin/python3 -B -P -m ops.deploy.worker_recovery install-classifier \
   --runtime-sha256 "$RUNTIME_SHA256" \
-  --confirm "INSTALL RETAINED LOG READER $RUNTIME_SHA256"
+  --confirm "INSTALL LOG CLASSIFIER $RUNTIME_SHA256"
 ```
 
-Require `receiver-log-reader-repaired`, matching old/new hashes and the additive
+Require `receiver-log-classifier-repaired`, matching old/new hashes and the additive
 receipt below. If installation fails, stop and inspect retained evidence; do not
 retry or delete its backup/receipt. After Work reviews successful activation,
 run the separately staged verification command (no preflight/cleanup/deploy):
@@ -216,15 +237,15 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin PYTHONPATH="$PWD" \
 ```
 
 The installer changes only installed `docker_host.py`, atomically. It uses the
-production lock, retains the installed **c33fe29…** file, original `INSTALL.json`
-and existing `WORKER-REPAIR.json` in a new
-`/var/backups/buh-receiver-upgrade/retained-logs-d75575649e7d` backup, and restores
-c33fe29… on activation failure. It never restores the older pre-PR-61 checker.
-Original `INSTALL.json`, PR #61's receipt and its backup are unchanged. A **new**
-`/etc/buh-platform-v2/RETAINED-LOG-REPAIR.json` binds both hashes, the new backup
-and the previous receipt's hash. Verify/complete require that intact receipt
-chain and both backups. A later health-verification failure leaves the approved
-log reader installed and preserves every recovery resource; it is not automatic
+production lock, retains the installed **d7557564…** file, original `INSTALL.json`
+and both `WORKER-REPAIR.json` and `RETAINED-LOG-REPAIR.json` in a new
+`/var/backups/buh-receiver-upgrade/log-classifier-5891086d9656` backup, and restores
+d7557564… on activation failure. It never restores either older checker.
+Original `INSTALL.json`, both earlier receipts and both backups are unchanged.
+A **new** `/etc/buh-platform-v2/LOG-CLASSIFIER-REPAIR.json` binds old/new hashes,
+the new backup and PR #62's receipt hash. Verify/complete require the intact
+three-receipt chain and all three backups. A later health-verification failure leaves the approved
+classifier installed and preserves every recovery resource; it is not automatic
 permission to revert infrastructure or clean up.
 No wrapper, forced command, credentials, config, engine, release or service changes.
 

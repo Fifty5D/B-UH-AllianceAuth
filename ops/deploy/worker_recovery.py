@@ -33,8 +33,10 @@ ORIGINAL_RUNTIME = "0aa449968b98038fd68aca1b093640bea76d3889c185dce298775943881f
 INSTALLED_WORKER_RUNTIME = (
     "c33fe29ed735e18f0c62bbbb31aecd7a6f3ee49a175a8c1c2ad8f33b90134ef8"
 )
+INSTALLED_LOG_RUNTIME = "d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9"
 REPAIR_RECEIPT = Path("/etc/buh-platform-v2/WORKER-REPAIR.json")
 LOG_REPAIR_RECEIPT = Path("/etc/buh-platform-v2/RETAINED-LOG-REPAIR.json")
+CLASSIFIER_REPAIR_RECEIPT = Path("/etc/buh-platform-v2/LOG-CLASSIFIER-REPAIR.json")
 PINS = {
     Path(
         "/etc/buh-platform-v2/receiver.json"
@@ -81,6 +83,12 @@ def _repair_backup(runtime_sha256: str) -> Path:
 def _log_repair_backup(runtime_sha256: str) -> Path:
     return (
         Path("/var/backups/buh-receiver-upgrade") / f"retained-logs-{runtime_sha256[:12]}"
+    )
+
+
+def _classifier_repair_backup(runtime_sha256: str) -> Path:
+    return (
+        Path("/var/backups/buh-receiver-upgrade") / f"log-classifier-{runtime_sha256[:12]}"
     )
 
 
@@ -131,13 +139,11 @@ def _log_repair_record(runtime_sha256: str, parent_receipt: str) -> dict:
     }
 
 
-def verify_log_repair(runtime_sha256: str) -> None:
+def verify_log_repair(runtime_sha256: str) -> str:
     parent = _verify_worker_repair()
     expected = _log_repair_record(runtime_sha256, parent)
-    if (
-        read_file(LOG_REPAIR_RECEIPT)[1]
-        != (json.dumps(expected, sort_keys=True) + "\n").encode()
-    ):
+    metadata, raw = read_file(LOG_REPAIR_RECEIPT)
+    if raw != (json.dumps(expected, sort_keys=True) + "\n").encode():
         raise DeploymentError("Retained-log repair receipt changed or is missing")
     backup = _log_repair_backup(runtime_sha256)
     for path, digest in (
@@ -147,6 +153,37 @@ def verify_log_repair(runtime_sha256: str) -> None:
     ):
         if read_file(path)[0].get("sha256") != digest:
             raise DeploymentError("Retained-log repair backup changed or is missing")
+    return metadata["sha256"]
+
+
+def _classifier_repair_record(runtime_sha256: str, parent_receipt: str) -> dict:
+    return {
+        **_log_repair_record(runtime_sha256, parent_receipt),
+        "result": "receiver-log-classifier-repaired",
+        "previous_sha256": INSTALLED_LOG_RUNTIME,
+        "backup_path": str(_classifier_repair_backup(runtime_sha256)),
+        "parent_receipt_path": str(LOG_REPAIR_RECEIPT),
+    }
+
+
+def verify_classifier_repair(runtime_sha256: str) -> None:
+    """Require all three additive receipts/backups; never rewrite their history."""
+    parent = verify_log_repair(INSTALLED_LOG_RUNTIME)
+    expected = _classifier_repair_record(runtime_sha256, parent)
+    if (
+        read_file(CLASSIFIER_REPAIR_RECEIPT)[1]
+        != (json.dumps(expected, sort_keys=True) + "\n").encode()
+    ):
+        raise DeploymentError("Log-classifier repair receipt changed or is missing")
+    backup = _classifier_repair_backup(runtime_sha256)
+    for path, digest in (
+        (backup / "docker_host.py", INSTALLED_LOG_RUNTIME),
+        (backup / "INSTALL.json", expected["base_install_sha256"]),
+        (backup / "WORKER-REPAIR.json", _verify_worker_repair()),
+        (backup / "RETAINED-LOG-REPAIR.json", parent),
+    ):
+        if read_file(path)[0].get("sha256") != digest:
+            raise DeploymentError("Log-classifier repair backup changed or is missing")
 
 
 def install(runtime_sha256: str, *, confirmation: str) -> dict:
@@ -158,7 +195,19 @@ def install_log_reader(runtime_sha256: str, *, confirmation: str) -> dict:
     return _install_file(runtime_sha256, confirmation=confirmation, log_reader=True)
 
 
-def _install_file(runtime_sha256: str, *, confirmation: str, log_reader: bool) -> dict:
+def install_log_classifier(runtime_sha256: str, *, confirmation: str) -> dict:
+    return _install_file(
+        runtime_sha256, confirmation=confirmation, log_reader=True, log_classifier=True
+    )
+
+
+def _install_file(
+    runtime_sha256: str,
+    *,
+    confirmation: str,
+    log_reader: bool,
+    log_classifier: bool = False,
+) -> dict:
     """One fixed-file receiver repair, not the historical receiver/VPS upgrade.
 
     Work must bind the file hash to its reviewed Git commit before owner execution.
@@ -169,10 +218,22 @@ def _install_file(runtime_sha256: str, *, confirmation: str, log_reader: bool) -
     marker = "INSTALL RETAINED LOG READER" if log_reader else "INSTALL WORKER CHECK"
     previous = INSTALLED_WORKER_RUNTIME if log_reader else ORIGINAL_RUNTIME
     receipt = LOG_REPAIR_RECEIPT if log_reader else REPAIR_RECEIPT
+    if log_classifier:
+        marker, previous, receipt = (
+            "INSTALL LOG CLASSIFIER",
+            INSTALLED_LOG_RUNTIME,
+            CLASSIFIER_REPAIR_RECEIPT,
+        )
     if confirmation != f"{marker} {runtime_sha256}":
         raise DeploymentError("Separate exact receiver-repair approval is required")
     verify_pins(runtime_sha256, installed_sha256=previous)
-    parent_receipt = _verify_worker_repair() if log_reader else None
+    parent_receipt = (
+        verify_log_repair(INSTALLED_LOG_RUNTIME)
+        if log_classifier
+        else _verify_worker_repair()
+        if log_reader
+        else None
+    )
     if runtime_sha256 == previous:
         raise DeploymentError("Receiver repair payload is unchanged")
     if receipt.exists() or receipt.is_symlink():
@@ -186,6 +247,8 @@ def _install_file(runtime_sha256: str, *, confirmation: str, log_reader: bool) -
     backup = (
         _log_repair_backup(runtime_sha256) if log_reader else _repair_backup(runtime_sha256)
     )
+    if log_classifier:
+        backup = _classifier_repair_backup(runtime_sha256)
     # Validate the existing root-only parent, never mkdir through a replaceable path.
     from .receiver import _verify_root_owned_ancestors
 
@@ -197,6 +260,13 @@ def _install_file(runtime_sha256: str, *, confirmation: str, log_reader: bool) -
     if log_reader:
         _atomic_bytes(
             backup / "WORKER-REPAIR.json", read_file(REPAIR_RECEIPT)[1], 0o600, owner=(0, 0)
+        )
+    if log_classifier:
+        _atomic_bytes(
+            backup / "RETAINED-LOG-REPAIR.json",
+            read_file(LOG_REPAIR_RECEIPT)[1],
+            0o600,
+            owner=(0, 0),
         )
     result = {
         "schema_version": 1,
@@ -211,10 +281,17 @@ def _install_file(runtime_sha256: str, *, confirmation: str, log_reader: bool) -
     }
     if log_reader:
         result = _log_repair_record(runtime_sha256, parent_receipt)
+    if log_classifier:
+        result = _classifier_repair_record(runtime_sha256, parent_receipt)
     try:
         _atomic_bytes(target, new, 0o644, owner=(0, 0))
         verify_pins(runtime_sha256)
-        if log_reader and _verify_worker_repair() != parent_receipt:
+        if log_classifier:
+            if verify_log_repair(INSTALLED_LOG_RUNTIME) != parent_receipt:
+                raise DeploymentError(
+                    "Retained-log repair receipt changed during activation"
+                )
+        elif log_reader and _verify_worker_repair() != parent_receipt:
             raise DeploymentError("Worker repair receipt changed during activation")
         _atomic_write(receipt, (json.dumps(result, sort_keys=True) + "\n").encode())
     except BaseException:
@@ -318,7 +395,8 @@ def complete(host, value, bundle, *, confirmation: str) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=("install", "install-logs", "verify", "complete")
+        "operation",
+        choices=("install", "install-logs", "install-classifier", "verify", "complete"),
     )
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--archive-sha256")
@@ -336,16 +414,23 @@ def main(argv=None) -> int:
             installed_sha256={
                 "install": ORIGINAL_RUNTIME,
                 "install-logs": INSTALLED_WORKER_RUNTIME,
+                "install-classifier": INSTALLED_LOG_RUNTIME,
             }.get(args.operation),
         )
-        if args.operation == "install-logs":
+        if args.operation == "install-classifier":
+            verify_log_repair(INSTALLED_LOG_RUNTIME)
+        elif args.operation == "install-logs":
             _verify_worker_repair()
         elif args.operation != "install":
-            verify_log_repair(args.runtime_sha256)
+            verify_classifier_repair(args.runtime_sha256)
         config = ReceiverConfig.load(Path("/etc/buh-platform-v2/receiver.json"))
         lock = _open_lock(config)
-        if args.operation in {"install", "install-logs"}:
-            installer = install_log_reader if args.operation == "install-logs" else install
+        if args.operation in {"install", "install-logs", "install-classifier"}:
+            installer = {
+                "install": install,
+                "install-logs": install_log_reader,
+                "install-classifier": install_log_classifier,
+            }[args.operation]
             print(
                 json.dumps(
                     installer(args.runtime_sha256, confirmation=args.confirm),
@@ -354,7 +439,7 @@ def main(argv=None) -> int:
             )
             return 0
         verify_pins(args.runtime_sha256)
-        verify_log_repair(args.runtime_sha256)
+        verify_classifier_repair(args.runtime_sha256)
         loaded = DockerHost.load_incomplete_plan(config)
         if loaded is None:
             raise DeploymentError(

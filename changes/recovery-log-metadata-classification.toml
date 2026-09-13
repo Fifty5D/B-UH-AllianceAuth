@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Distinguish fatal severity from ESI metadata without exempting DEBUG failures or truncating logs. Rehearse immutable v0.6.2 recovery and prepare a separately approved classifier-file repair from installed PR 62, preserving receipts, backups and the release hold."
