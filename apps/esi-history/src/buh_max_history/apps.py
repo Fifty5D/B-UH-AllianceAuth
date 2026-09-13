@@ -15,3 +15,6 @@ class BuhMaxHistoryConfig(AppConfig):
         from .capture import install_esi_archive_hooks
 
         install_esi_archive_hooks()
+        from .local_history import install_business_history_hooks
+
+        install_business_history_hooks()

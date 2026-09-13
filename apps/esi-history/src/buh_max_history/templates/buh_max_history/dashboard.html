@@ -3,14 +3,14 @@
 {% block content %}
 <main id="buh-archive" data-catalog-url="{% url 'buh_max_history:start_job' 'catalog' %}" data-sync-url="{% url 'buh_max_history:start_job' 'sync' %}" data-verify-url="{% url 'buh_max_history:start_job' 'verify' %}">
     <section class="ar-hero">
-        <div><p class="ar-eyebrow"><span></span> Durable evidence layer</p><h1>ESI History Archive</h1><p>Change-only private and public ESI snapshots, unlimited Member Audit retention, and a bounded EVE Ref mirror—kept outside MariaDB for long-term growth.</p></div>
+        <div><p class="ar-eyebrow"><span></span> B-UH history</p><h1>ESI History Archive</h1><p>Saved ESI responses, dated Auth records, and public dataset history. Open History &amp; coverage to check collection progress and missing access.</p></div>
         <div class="ar-state {% if config.capture_enabled %}online{% endif %}"><i class="fa-solid fa-circle"></i><span><strong>{% if config.capture_enabled %}Capturing{% else %}Paused{% endif %}</strong><small>Private {{ config.capture_private_esi|yesno:"on,off" }} · Public {{ config.capture_public_esi|yesno:"on,off" }}</small></span></div>
     </section>
 
     {% if permissions.view_archive_storage %}
     <section class="ar-stats">
-        <article><span>Observed calls</span><strong>{{ totals.requests|default:0 }}</strong><small>Every successful ESI read</small></article>
-        <article><span>Changed snapshots</span><strong>{{ totals.snapshots|default:0 }}</strong><small>{{ totals.streams|default:0 }} endpoint streams</small></article>
+        <article><span>Observed calls</span><strong>{{ totals.requests|default:0 }}</strong><small>Successful reads observed by the archive</small></article>
+        <article><span>Distinct payloads</span><strong>{{ totals.snapshots|default:0 }}</strong><small>{{ totals.streams|default:0 }} endpoint streams</small></article>
         <article><span>ESI payload storage</span><strong>{{ totals.stored_bytes|filesizeformat }}</strong><small>{{ totals.source_bytes|filesizeformat }} observed before deduplication</small></article>
         <article><span>Public mirror</span><strong>{{ totals.public_stored_bytes|filesizeformat }}</strong><small>{{ totals.public_files|default:0 }} cataloged files</small></article>
         <article><span>Host free space</span><strong>{{ disk.free|filesizeformat }}</strong><small>Writes stop at {{ config.minimum_free_gib }} GiB free</small></article>

@@ -76,6 +76,9 @@ class ArchiveDatabaseContracts(TransactionTestCase):
             executor.migrate(latest)
             # A rollback-compatible additive schema still accepts inserts made
             # by the old model, which does not know the new non-null columns.
+            old.get_model("buh_max_history", "ArchiveConfiguration").objects.create(
+                singleton_id=1
+            )
             File.objects.create(
                 dataset=dataset,
                 source_url="https://data.everef.net/new",
@@ -120,3 +123,81 @@ class ArchiveDatabaseContracts(TransactionTestCase):
                 gzip.decompress((Path(directory) / snapshot.relative_path).read_bytes()),
             )
             self.assertEqual(snapshot.stream.safe_parameters["page"], 1)
+
+    def test_collection_lock_is_independent_and_detects_session_loss(self):
+        other = connection.copy(alias="collection-lock-test")
+        try:
+            with public_archive_lock("collection") as acquired:
+                self.assertTrue(acquired)
+                with other.cursor() as cursor:
+                    cursor.execute("SELECT GET_LOCK(%s, 0)", [_lock_name("collection")])
+                    self.assertEqual(cursor.fetchone()[0], 0)
+                    cursor.execute("SELECT GET_LOCK(%s, 0)", [_lock_name()])
+                    self.assertEqual(cursor.fetchone()[0], 1)
+                connection.close()
+                with self.assertRaises(ArchiveLockLost):
+                    assert_public_archive_lock("collection")
+        finally:
+            other.close()
+
+    def test_active_collector_uses_real_private_esi_client_and_saves_each_page(self):
+        from unittest.mock import patch
+        from django.contrib.auth import get_user_model
+        from allianceauth.eveonline.models import EveCharacter
+        from esi.models import Scope, Token
+        from esi.openapi_clients import ESIClientProvider
+        from buh_max_history.collection import collect_target, endpoints, new_target
+
+        user = get_user_model().objects.create_user(username="synthetic-history-owner")
+        character_id = 99000999
+        EveCharacter.objects.create(
+            character_id=character_id,
+            character_name="Synthetic History Pilot",
+            corporation_id=98000001,
+            corporation_name="Synthetic Corporation",
+        )
+        token = Token.objects.create(
+            user=user,
+            character_id=character_id,
+            character_name="Synthetic History Pilot",
+            character_owner_hash="synthetic-history-owner-hash",
+            access_token="synthetic-access-not-real",
+            refresh_token="synthetic-refresh-not-real",
+        )
+        scope, _ = Scope.objects.get_or_create(name="esi-wallet.read_character_wallet.v1")
+        token.scopes.add(scope)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            override_settings(BUH_ESI_ARCHIVE_ROOT=directory),
+        ):
+            ArchiveConfiguration.objects.update_or_create(
+                singleton_id=1, defaults={"minimum_free_gib": 5, "capture_enabled": True}
+            )
+            reset_configuration_cache()
+            name = "GetCharactersCharacterIdWalletJournal"
+            client = ESIClientProvider(
+                compatibility_date="2026-09-13",
+                ua_appname="ActiveArchiveContractTests",
+                ua_version="1.0.0",
+                operations=[name],
+            ).client
+            target = new_target(
+                endpoints()[name], {"character_id": character_id}, character_id
+            )
+            target.save()
+            with (
+                public_archive_lock("collection") as acquired,
+                patch("buh_max_history.capture._free_bytes", return_value=100 * 1024**3),
+            ):
+                self.assertTrue(acquired)
+                self.assertTrue(collect_target(target, client))
+            target.refresh_from_db()
+            self.assertEqual(target.status, "current", target.detail)
+            snapshot = ArchiveSnapshot.objects.filter(stream__operation_id=name).get()
+            self.assertTrue(snapshot.stream.is_private)
+            self.assertEqual(snapshot.stream.character_id, character_id)
+            payload = gzip.decompress(
+                (Path(directory) / snapshot.relative_path).read_bytes()
+            )
+            self.assertIn(b"ref_type", payload)
+            self.assertNotIn("token", snapshot.stream.safe_parameters)

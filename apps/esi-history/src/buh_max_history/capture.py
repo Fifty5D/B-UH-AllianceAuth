@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, ProgrammingError, transaction
+from django.db import OperationalError, ProgrammingError, transaction
 from django.db.models import F
 from django.utils.timezone import now
 
@@ -272,6 +272,11 @@ def _write_payload(relative: Path, payload: bytes) -> int:
         return target.stat().st_size
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     compressed = gzip.compress(payload, compresslevel=6, mtime=0)
+    if (
+        shutil.disk_usage(target.parent).free - len(compressed)
+        < int(_configuration()["minimum_free_gib"]) * 1024**3
+    ):
+        raise OSError("Archive free-space reserve reached.")
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -289,7 +294,7 @@ def _write_payload(relative: Path, payload: bytes) -> int:
     return target.stat().st_size
 
 
-def archive_esi_result(operation, data: Any, response: Any, extra=None) -> None:
+def archive_esi_result(operation, data: Any, response: Any, extra=None):
     """Archive one successful ESI response without ever affecting its caller."""
 
     config = _configuration()
@@ -333,67 +338,63 @@ def archive_esi_result(operation, data: Any, response: Any, extra=None) -> None:
             return
 
     payload_hash = hashlib.sha256(payload).hexdigest()
-    existing = ArchiveSnapshot.objects.filter(
-        stream=stream, payload_sha256=payload_hash
-    ).first()
-    if existing:
-        # A database row alone is not a saved response. Repair a missing payload
-        # from this successful response before counting another observation.
-        stored_path = archive_root() / existing.relative_path
-        if not stored_path.is_file():
-            _write_payload(Path(existing.relative_path), payload)
-        ArchiveSnapshot.objects.filter(pk=existing.pk).update(
-            observation_count=F("observation_count") + 1,
-            last_observed_at=now(),
+    with transaction.atomic():
+        # Serialize only this stream, preserving arrival order without blocking
+        # unrelated characters/endpoints. Old snapshots retain their identity.
+        stream = ArchiveStream.objects.select_for_update().get(pk=stream.pk)
+        existing = ArchiveSnapshot.objects.filter(
+            stream=stream, payload_sha256=payload_hash
+        ).first()
+        relative = (
+            Path(existing.relative_path)
+            if existing
+            else _relative_payload_path(metadata, payload_hash)
         )
-        ArchiveStream.objects.filter(pk=stream.pk).update(
-            request_count=F("request_count") + 1,
-            source_bytes=F("source_bytes") + len(payload),
-            current_payload_sha256=payload_hash,
-            last_status_code=status_code,
-            last_seen_at=now(),
+        stored_bytes = _write_payload(relative, payload)
+        snapshot, created = ArchiveSnapshot.objects.get_or_create(
+            stream=stream,
+            payload_sha256=payload_hash,
+            defaults={
+                "relative_path": relative.as_posix(),
+                "content_type": str(
+                    getattr(response, "headers", {}).get("content-type", "")
+                )[:120],
+                "status_code": status_code or 200,
+                "source_bytes": len(payload),
+                "stored_bytes": stored_bytes,
+                "response_headers": _safe_response_headers(response),
+            },
         )
-        return
+        stamp = now()
+        if not created:
+            ArchiveSnapshot.objects.filter(pk=snapshot.pk).update(
+                observation_count=F("observation_count") + 1,
+                last_observed_at=stamp,
+            )
+        from .models import ArchiveObservation
 
-    relative = _relative_payload_path(metadata, payload_hash)
-    stored_bytes = _write_payload(relative, payload)
-    try:
-        with transaction.atomic():
-            ArchiveSnapshot.objects.create(
+        current = stream.observations.first()
+        if current and current.snapshot_id == snapshot.pk:
+            ArchiveObservation.objects.filter(pk=current.pk).update(
+                last_observed_at=stamp, observation_count=F("observation_count") + 1
+            )
+        else:
+            ArchiveObservation.objects.create(
                 stream=stream,
-                payload_sha256=payload_hash,
-                relative_path=relative.as_posix(),
-                content_type=str(getattr(response, "headers", {}).get("content-type", ""))[
-                    :120
-                ],
-                status_code=status_code,
-                source_bytes=len(payload),
-                stored_bytes=stored_bytes,
-                response_headers=_safe_response_headers(response),
+                snapshot=snapshot,
+                first_observed_at=stamp,
+                last_observed_at=stamp,
             )
-            ArchiveStream.objects.filter(pk=stream.pk).update(
-                request_count=F("request_count") + 1,
-                snapshot_count=F("snapshot_count") + 1,
-                source_bytes=F("source_bytes") + len(payload),
-                stored_bytes=F("stored_bytes") + stored_bytes,
-                current_payload_sha256=payload_hash,
-                last_status_code=status_code,
-                last_seen_at=now(),
-            )
-    except IntegrityError:
-        # A parallel worker archived the same changed payload first.
-        duplicate = ArchiveSnapshot.objects.get(stream=stream, payload_sha256=payload_hash)
-        ArchiveSnapshot.objects.filter(pk=duplicate.pk).update(
-            observation_count=F("observation_count") + 1,
-            last_observed_at=now(),
-        )
         ArchiveStream.objects.filter(pk=stream.pk).update(
             request_count=F("request_count") + 1,
+            snapshot_count=F("snapshot_count") + int(created),
             source_bytes=F("source_bytes") + len(payload),
+            stored_bytes=F("stored_bytes") + (stored_bytes if created else 0),
             current_payload_sha256=payload_hash,
-            last_status_code=status_code,
-            last_seen_at=now(),
+            last_status_code=status_code or 200,
+            last_seen_at=stamp,
         )
+        return snapshot
 
 
 def _safe_archive(operation, data: Any, response: Any, extra=None) -> None:

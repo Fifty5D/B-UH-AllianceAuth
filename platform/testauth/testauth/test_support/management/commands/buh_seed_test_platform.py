@@ -63,6 +63,7 @@ class Command(BaseCommand):
         # command safe to retry after a partially completed CI job.
         self._clear_synthetic_data()
         sync_console_theme()
+        seed_archive_history()
 
         director = self._user("test-director", 99000001, "Director Pilot")
         member = self._user(
@@ -89,6 +90,9 @@ class Command(BaseCommand):
         )
         director.user_permissions.add(
             *Permission.objects.filter(content_type__app_label="buh_mining_analytics")
+        )
+        director.user_permissions.add(
+            *Permission.objects.filter(content_type__app_label="buh_max_history")
         )
         member_permissions = all_tax_permissions.filter(
             codename__in=(
@@ -366,9 +370,7 @@ class Command(BaseCommand):
         adjustment.reversed_at = fixed + dt.timedelta(days=5)
         adjustment.reversed_by = director
         adjustment.reversal_reason = "Synthetic reversal history"
-        adjustment.save(
-            update_fields=("reversed_at", "reversed_by", "reversal_reason")
-        )
+        adjustment.save(update_fields=("reversed_at", "reversed_by", "reversal_reason"))
         TaxExemption.objects.create(
             auth_user=restricted,
             effective_from=fixed.date() - dt.timedelta(days=30),
@@ -454,4 +456,98 @@ class Command(BaseCommand):
                 {"kind": "CHARACTER", "id": 99000001, "name": "Director Pilot"}
             ],
             status=TaxPeriod.Status.DUE,
+        )
+
+
+def seed_archive_history():
+    """Small synthetic fixtures for real archive pages; collectors stay disabled."""
+    try:
+        from buh_max_history.models import (
+            ArchiveCollectionTarget,
+            ArchiveConfiguration,
+            ArchiveObservation,
+            ArchiveSnapshot,
+            ArchiveStream,
+            PublicArchiveFile,
+            PublicArchiveRevision,
+            PublicDataset,
+        )
+    except ImportError:
+        return  # Older release rehearsal images do not contain this app/schema.
+    import gzip
+    import hashlib
+    from pathlib import Path
+    from django.conf import settings
+
+    ArchiveConfiguration.objects.update_or_create(
+        singleton_id=1,
+        defaults={
+            "capture_enabled": False,
+            "active_esi_enabled": False,
+            "local_history_enabled": False,
+            "public_mirror_enabled": False,
+            "discover_public_datasets": False,
+        },
+    )
+    root = Path(settings.BUH_ESI_ARCHIVE_ROOT)
+    for index, state in enumerate(("current", "backlog", "missing_access"), 1):
+        key = hashlib.sha256(f"synthetic-history-{index}".encode()).hexdigest()
+        stream, _ = ArchiveStream.objects.get_or_create(
+            stream_key=key,
+            defaults={
+                "operation_id": "SyntheticWalletHistory",
+                "url_template": "/synthetic/wallet",
+                "is_private": True,
+                "character_id": 99000000 + index,
+                "safe_parameters": {"character_id": 99000000 + index},
+            },
+        )
+        body = f'{{"synthetic":true,"balance":{index * 100}}}'.encode()
+        digest = hashlib.sha256(body).hexdigest()
+        path = root / "synthetic-preview" / f"{digest}.json.gz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(gzip.compress(body, mtime=0))
+        snapshot, _ = ArchiveSnapshot.objects.get_or_create(
+            stream=stream,
+            payload_sha256=digest,
+            defaults={
+                "relative_path": path.relative_to(root).as_posix(),
+                "stored_bytes": path.stat().st_size,
+            },
+        )
+        ArchiveObservation.objects.get_or_create(stream=stream, snapshot=snapshot)
+        ArchiveCollectionTarget.objects.update_or_create(
+            key=key,
+            defaults={
+                "operation_id": "GetCharactersCharacterIdWallet",
+                "character_id": 99000000 + index,
+                "parameters": {"character_id": 99000000 + index},
+                "status": state,
+                "detail": "Synthetic preview record",
+            },
+        )
+    dataset, _ = PublicDataset.objects.get_or_create(
+        slug="synthetic-history-preview",
+        defaults={
+            "name": "Synthetic public history",
+            "index_url": "https://data.everef.net/synthetic-history-preview/index.json",
+            "enabled": False,
+        },
+    )
+    file, _ = PublicArchiveFile.objects.get_or_create(
+        dataset=dataset,
+        source_url="https://data.everef.net/synthetic-history-preview/current.json",
+        defaults={"relative_path": "public/synthetic/current.json", "status": "STORED"},
+    )
+    for body in (b'{"synthetic":"older"}', b'{"synthetic":"current"}'):
+        digest = hashlib.sha256(body).hexdigest()
+        path = root / "synthetic-preview" / digest
+        path.write_bytes(body)
+        PublicArchiveRevision.objects.get_or_create(
+            file=file,
+            payload_sha256=digest,
+            defaults={
+                "relative_path": path.relative_to(root).as_posix(),
+                "stored_bytes": len(body),
+            },
         )
