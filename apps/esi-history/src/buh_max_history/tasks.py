@@ -55,6 +55,17 @@ def _run_job(job, *, catalog_first=True):
             if job.kind == ArchiveJob.Kind.CATALOG:
                 result = catalog_enabled_datasets()
             elif job.kind == ArchiveJob.Kind.SYNC:
+                if catalog_first:
+                    from .discovery import discover_public_datasets
+
+                    try:
+                        discover_public_datasets()
+                    except Exception as exc:
+                        from .capture import _record_issue
+
+                        _record_issue(
+                            "public_discovery", "discovery_failed", type(exc).__name__
+                        )
                 result = sync_public_archive(catalog_first=catalog_first)
             elif job.kind == ArchiveJob.Kind.VERIFY:
                 result = verify_archive_files()
@@ -94,3 +105,34 @@ def scheduled_public_archive_sync():
         return {"ok": True, "skipped": "public_mirror_disabled"}
     # A stale database row must never disable the recurring scheduler.
     return _run_job(ArchiveJob.objects.create(kind=ArchiveJob.Kind.SYNC))
+
+
+@shared_task(soft_time_limit=300, time_limit=330)
+def scheduled_history_collection():
+    """One short task handles new ESI states and business-record backfill."""
+    import time
+
+    from .collection import collect_esi_batch
+    from .local_history import collect_local_batch
+
+    with public_archive_lock("collection") as acquired:
+        if not acquired:
+            return {"skipped": "collector_active"}
+        started = time.monotonic()
+        result = {}
+        for name, collector, seconds in (
+            ("auth", collect_local_batch, 60),
+            ("esi", collect_esi_batch, 240),
+        ):
+            try:
+                result[name] = collector(deadline=started + seconds)
+            except Exception as exc:
+                result[name] = {"error": type(exc).__name__}
+                from .capture import _record_issue
+
+                _record_issue(
+                    "scheduled_history_collection",
+                    name + "_batch_failed",
+                    type(exc).__name__,
+                )
+        return result

@@ -70,7 +70,9 @@ def dashboard(request):
         streams = streams.filter(is_private=False)
     streams = list(streams[:30])
     for stream in streams:
-        stream.latest_snapshot = stream.snapshots.order_by("-first_observed_at").first()
+        stream.latest_snapshot = stream.snapshots.filter(
+            payload_sha256=stream.current_payload_sha256
+        ).first()
 
     totals = {}
     disk = None

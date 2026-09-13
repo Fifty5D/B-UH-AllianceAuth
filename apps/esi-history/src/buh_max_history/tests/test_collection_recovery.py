@@ -65,6 +65,7 @@ class CollectionTests(TestCase):
             minimum_free_gib=5,
             public_max_files_per_run=3,
             public_max_gib_per_run=1,
+            discover_public_datasets=False,
         )
         disk = patch(
             "buh_max_history.public_archive.shutil.disk_usage",

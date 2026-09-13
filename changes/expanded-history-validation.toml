@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Exercise active history with a real ESI client, MariaDB upgrade and collection locks, and the history pages across supported themes and viewports."

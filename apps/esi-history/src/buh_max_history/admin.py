@@ -160,8 +160,20 @@ class ArchiveConfigurationAdmin(ArchivePermissionAdminMixin, admin.ModelAdmin):
             {
                 "fields": (
                     "public_mirror_enabled",
+                    "discover_public_datasets",
                     "public_max_files_per_run",
                     "public_max_gib_per_run",
+                )
+            },
+        ),
+        (
+            "Expanded history collection",
+            {
+                "fields": (
+                    "active_esi_enabled",
+                    "active_requests_per_run",
+                    "local_history_enabled",
+                    "local_rows_per_run",
                 )
             },
         ),

@@ -39,6 +39,7 @@ version = { attr = "buh_max_history.__version__" }
 
 [tool.setuptools.package-data]
 buh_max_history = [
+  "*.json",
   "templates/buh_max_history/*.html",
   "templates/buh_max_history/includes/*.html",
   "templates/buh_max_history/widgets/*.html",

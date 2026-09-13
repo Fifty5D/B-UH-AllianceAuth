@@ -8,6 +8,9 @@ from django.db.models.functions import Coalesce
 from buh_max_history.capture import archive_root
 from buh_max_history.models import (
     ArchiveCaptureIssue,
+    ArchiveCollectionTarget,
+    ArchiveObservation,
+    PublicArchiveRevision,
     ArchiveConfiguration,
     ArchiveJob,
     ArchiveSnapshot,
@@ -85,6 +88,26 @@ class Command(BaseCommand):
             f"snapshot rows={ArchiveSnapshot.objects.count():,}"
         )
         self.stdout.write("")
+        self.stdout.write("ACTIVE HISTORY COLLECTION")
+        self.stdout.write(
+            f"ESI enabled={config.active_esi_enabled}; max reads/batch={config.active_requests_per_run}; Auth history enabled={config.local_history_enabled}; max rows/batch={config.local_rows_per_run}"
+        )
+        self.stdout.write(
+            f"Dated ESI/Auth state spans={ArchiveObservation.objects.count()}; public file versions={PublicArchiveRevision.objects.count()}"
+        )
+        for item in (
+            ArchiveCollectionTarget.objects.values("kind", "status")
+            .annotate(count=Count("pk"))
+            .order_by("kind", "status")
+        ):
+            self.stdout.write(f"  {item['kind']} {item['status']}: {item['count']}")
+        self.stdout.write(
+            f"ESI cooldown until={config.active_retry_at}; public discovery enabled={config.discover_public_datasets}; last discovery={config.last_public_discovery_at}"
+        )
+        self.stdout.write(
+            "External backup: not established by this application; verify an off-server destination separately."
+        )
+        self.stdout.write("")
         self.stdout.write("EVE REF PUBLIC MIRROR")
         self.stdout.write(
             f"Mirror={'enabled' if config.public_mirror_enabled else 'disabled'} | "
@@ -106,6 +129,6 @@ class Command(BaseCommand):
             f"active jobs={ArchiveJob.objects.filter(status__in=('QUEUED', 'RUNNING')).count():,}"
         )
         self.stdout.write(
-            "Payloads contain ESI responses only. OAuth access/refresh tokens, request bodies, "
-            "authorization headers, passwords, and secrets are never archived."
+            "Payloads contain successful ESI responses and approved Auth business records. "
+            "Credential tables and authentication headers are excluded. Private archives require separate permissions."
         )

@@ -161,10 +161,18 @@ export function registerThemeChecks(capture: boolean) {
           await page.setViewportSize({width: 390, height: 844});
           await page.setExtraHTTPHeaders({"User-Agent": devices["iPhone 13"].userAgent});
         }
-        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-person", "moon-tax-payments", "moon-tax-policy", "mining-analytics", "structure-operations", "schedule", "archive", "vps"] as ConsoleApp[]) {
+        for (const app of ["moon-tax", "moon-tax-period", "moon-tax-person", "moon-tax-payments", "moon-tax-policy", "mining-analytics", "structure-operations", "schedule", "archive", "archive-history", "archive-public-history", "vps"] as ConsoleApp[]) {
           const root = await openConsole(page, app);
           await expect(page.locator(root)).toHaveCSS("color-scheme", theme.light ? "light" : "dark");
           await checkReadableText(page, root);
+          if (app === "archive-history") {
+            const table = page.locator(`${root} table`).first();
+            const sort = table.getByRole("button", {name: "Sort Subject", exact: true});
+            await sort.click();
+            await sort.click();
+            await expect(sort.locator("..")).toHaveAttribute("aria-sort", "descending");
+            await expect(table.locator("tbody tr").first()).toContainText("99000003");
+          }
           if (app === "vps") {
             await checkChartLabels(page);
             await page.getByRole("button", {name: /Restart Auth services$/}).first().click();

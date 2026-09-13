@@ -237,6 +237,14 @@ def _catalog_file(
     modified = str(
         entry.get("last_modified") or entry.get("modified") or entry.get("mtime") or ""
     )[:120]
+    from django.utils.dateparse import parse_datetime
+
+    try:
+        source_time = parse_datetime(str(entry.get("file_time") or ""))
+        if source_time is not None and source_time.tzinfo is None:
+            source_time = None
+    except ValueError:
+        source_time = None
     record, was_created = PublicArchiveFile.objects.get_or_create(
         source_url=source_url,
         defaults={
@@ -245,6 +253,7 @@ def _catalog_file(
             "remote_size": size,
             "etag": etag,
             "remote_modified": modified,
+            "source_time": source_time,
         },
     )
     if was_created:
@@ -264,6 +273,7 @@ def _catalog_file(
         "remote_size": size or record.remote_size,
         "etag": etag or record.etag,
         "remote_modified": modified or record.remote_modified,
+        "source_time": source_time or record.source_time,
         "last_checked_at": now(),
     }
     if altered:
@@ -517,6 +527,15 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
             handle.flush()
             os.fsync(handle.fileno())
         assert_public_archive_lock()
+        from .revisions import retain_public_revision
+
+        if target.is_file() and not record.revisions.exists():
+            retain_public_revision(
+                record, target, deadline=deadline, observed_at=record.downloaded_at
+            )
+        retain_public_revision(
+            record, temporary, deadline=deadline, digest=digest.hexdigest()
+        )
         os.replace(temporary, target)
         PublicArchiveFile.objects.filter(pk=record.pk).update(
             status=PublicArchiveFile.Status.STORED,

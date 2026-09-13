@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth.models import Group
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils.timezone import now
 
 
 class HistoryArchivePermission(models.Model):
@@ -54,6 +55,18 @@ class ArchiveConfiguration(models.Model):
         help_text="Archiving pauses before the host drops below this much free space.",
     )
     public_mirror_enabled = models.BooleanField(default=True)
+    discover_public_datasets = models.BooleanField(default=True, db_default=True)
+    active_esi_enabled = models.BooleanField(default=True, db_default=True)
+    local_history_enabled = models.BooleanField(default=True, db_default=True)
+    active_requests_per_run = models.PositiveSmallIntegerField(
+        default=120,
+        db_default=120,
+        validators=[MinValueValidator(1), MaxValueValidator(2000)],
+    )
+    local_rows_per_run = models.PositiveIntegerField(default=500, db_default=500)
+    discovery_character_cursor = models.PositiveBigIntegerField(default=0, db_default=0)
+    last_public_discovery_at = models.DateTimeField(null=True, blank=True)
+    active_retry_at = models.DateTimeField(null=True, blank=True)
     public_retry_at = models.DateTimeField(null=True, blank=True)
     public_max_files_per_run = models.PositiveSmallIntegerField(
         default=12, validators=[MinValueValidator(1), MaxValueValidator(250)]
@@ -146,6 +159,46 @@ class ArchiveSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.stream.operation_id} · {self.payload_sha256[:12]}"
+
+
+class ArchiveObservation(models.Model):
+    """Consecutive observations of one state; A -> B -> A retains three spans."""
+
+    stream = models.ForeignKey(
+        ArchiveStream, on_delete=models.CASCADE, related_name="observations"
+    )
+    snapshot = models.ForeignKey(
+        ArchiveSnapshot, on_delete=models.PROTECT, related_name="observations"
+    )
+    first_observed_at = models.DateTimeField(default=now, db_index=True)
+    last_observed_at = models.DateTimeField(default=now)
+    observation_count = models.PositiveBigIntegerField(default=1)
+
+    class Meta:
+        ordering = ("-pk",)
+        indexes = [models.Index(fields=("stream", "-id"))]
+
+
+class ArchiveCollectionTarget(models.Model):
+    """Durable, credential-free cursor and coverage state for one collector."""
+
+    key = models.CharField(max_length=64, unique=True)
+    kind = models.CharField(max_length=12, default="esi", db_index=True)
+    operation_id = models.CharField(max_length=180, db_index=True)
+    parameters = models.JSONField(default=dict)
+    character_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    corporation_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    status = models.CharField(max_length=32, default="pending", db_index=True)
+    cursor = models.JSONField(default=dict, blank=True)
+    next_attempt_at = models.DateTimeField(default=now, db_index=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    failure_count = models.PositiveIntegerField(default=0)
+    detail = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        ordering = ("next_attempt_at", "pk")
 
 
 class ArchiveCaptureIssue(models.Model):
@@ -248,6 +301,7 @@ class PublicArchiveFile(models.Model):
     payload_sha256 = models.CharField(max_length=64, blank=True, default="")
     etag = models.CharField(max_length=300, blank=True, default="")
     remote_modified = models.CharField(max_length=120, blank=True, default="")
+    source_time = models.DateTimeField(null=True, blank=True, db_index=True)
     discovered_at = models.DateTimeField(auto_now_add=True)
     downloaded_at = models.DateTimeField(null=True, blank=True)
     last_checked_at = models.DateTimeField(auto_now=True)
@@ -296,3 +350,20 @@ class ArchiveJob(models.Model):
 
     def __str__(self):
         return f"{self.get_kind_display()} · {self.get_status_display()}"
+
+
+class PublicArchiveRevision(models.Model):
+    """A dated state of a public file; payload paths are content addressed."""
+
+    file = models.ForeignKey(
+        PublicArchiveFile, on_delete=models.PROTECT, related_name="revisions"
+    )
+    payload_sha256 = models.CharField(max_length=64)
+    relative_path = models.CharField(max_length=700)
+    stored_bytes = models.PositiveBigIntegerField(default=0)
+    first_observed_at = models.DateTimeField(default=now, db_index=True)
+    last_observed_at = models.DateTimeField(default=now)
+
+    class Meta:
+        ordering = ("-pk",)
+        indexes = [models.Index(fields=("file", "-id"))]

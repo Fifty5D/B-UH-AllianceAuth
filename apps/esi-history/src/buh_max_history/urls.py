@@ -1,10 +1,17 @@
 from django.urls import path
 
-from . import views
+from . import history_views, views
 
 app_name = "buh_max_history"
 
 urlpatterns = [
+    path("history/", history_views.history, name="history"),
+    path("public-history/", history_views.public_history, name="public_history"),
+    path(
+        "public-revisions/<int:revision_id>/download/",
+        history_views.download_revision,
+        name="download_revision",
+    ),
     path("", views.dashboard, name="dashboard"),
     path("jobs/start/<str:kind>/", views.start_job, name="start_job"),
     path("jobs/<uuid:job_id>/", views.job_detail, name="job_detail"),

@@ -1,0 +1,4 @@
+schema_version = 1
+app = "esi-history"
+kind = "feature"
+summary = "Collect authorized ESI and Auth business history with resumable cursors, discover public datasets, retain dated state changes and file revisions, and expose searchable coverage."
