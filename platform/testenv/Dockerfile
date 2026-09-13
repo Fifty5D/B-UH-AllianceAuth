@@ -43,7 +43,8 @@ RUN python -m pip install \
       --no-deps \
       -e /workspace/apps/structure-ops \
       -e /workspace/apps/mining-analytics \
-      -e /workspace/apps/moon-tax
+      -e /workspace/apps/moon-tax \
+      -e /workspace/apps/esi-history
 
 COPY platform/testauth/ /workspace/platform/testauth/
 COPY platform/baselines/ /workspace/platform/baselines/

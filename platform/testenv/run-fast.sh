@@ -19,9 +19,10 @@ export PYTHONPATH="${ROOT}/platform/testauth:${ROOT}"
 export BUH_TEST_SETTINGS="testauth.settings.unit"
 python platform/testauth/manage.py check --no-color
 python platform/testauth/manage.py makemigrations --check --dry-run --no-color \
-    buh_structure_ops buh_mining_analytics buh_moon_tax
+    buh_structure_ops buh_mining_analytics buh_moon_tax buh_max_history
 python platform/testauth/manage.py test --noinput --no-color \
     buh_structure_ops.tests \
     buh_mining_analytics.tests \
     buh_moon_tax.tests \
+    buh_max_history.tests \
     tests.contracts
