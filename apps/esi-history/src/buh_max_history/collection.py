@@ -138,7 +138,7 @@ def token_for(target, entry):
         query = query.require_scopes(entry["scopes"])
     # After a role denial, try another already-authorized corporation character.
     denied = target.cursor.get("denied_characters", [])
-    return query.exclude(character_id__in=denied).order_by("pk").first()
+    return query.exclude(character_id__in=denied).order_by("-created", "-pk").first()
 
 
 @contextmanager

@@ -142,14 +142,30 @@ class ArchiveDatabaseContracts(TransactionTestCase):
 
     def test_active_collector_uses_real_private_esi_client_and_saves_each_page(self):
         from unittest.mock import patch
-        from app_utils.testdata_factories import UserMainFactory
+        from django.contrib.auth import get_user_model
+        from allianceauth.eveonline.models import EveCharacter
+        from esi.models import Scope, Token
         from esi.openapi_clients import ESIClientProvider
         from buh_max_history.collection import collect_target, endpoints, new_target
 
-        user = UserMainFactory(
-            main_character__scopes=["esi-wallet.read_character_wallet.v1"]
+        user = get_user_model().objects.create_user(username="synthetic-history-owner")
+        character_id = 99000999
+        EveCharacter.objects.create(
+            character_id=character_id,
+            character_name="Synthetic History Pilot",
+            corporation_id=98000001,
+            corporation_name="Synthetic Corporation",
         )
-        character_id = user.profile.main_character.character_id
+        token = Token.objects.create(
+            user=user,
+            character_id=character_id,
+            character_name="Synthetic History Pilot",
+            character_owner_hash="synthetic-history-owner-hash",
+            access_token="synthetic-access-not-real",
+            refresh_token="synthetic-refresh-not-real",
+        )
+        scope, _ = Scope.objects.get_or_create(name="esi-wallet.read_character_wallet.v1")
+        token.scopes.add(scope)
         with (
             tempfile.TemporaryDirectory() as directory,
             override_settings(BUH_ESI_ARCHIVE_ROOT=directory),

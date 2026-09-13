@@ -244,6 +244,20 @@ class ExpandedHistoryTests(TestCase):
         self.assertIsNone(token_for(target, entry))
         correct.scopes.add(scope)
         self.assertEqual(token_for(target, entry), correct)
+        replacement = Token.objects.bulk_create(
+            [
+                Token(
+                    user=owner,
+                    character_id=character_id,
+                    character_name="Synthetic replacement",
+                    character_owner_hash=owner_hash,
+                    access_token="replacement-not-real",
+                    refresh_token="replacement-not-real",
+                )
+            ]
+        )[0]
+        replacement.scopes.add(scope)
+        self.assertEqual(token_for(target, entry), replacement)
 
     @patch("buh_max_history.collection.token_for", return_value=None)
     def test_missing_access_never_calls_the_api(self, token):
