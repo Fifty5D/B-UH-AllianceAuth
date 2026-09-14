@@ -225,7 +225,11 @@ incident through both `WARNING/MainProcess` Celery records and
 `WARNING [allianceauth.services.modules.discord.tasks:100]` records, including
 duplicated tracebacks; named `ForkPoolWorker-N` Celery records remain supported.
 Each logger family must have one exact retry and its own exact denial evidence,
-and every record remains capped at 128 lines. The retained container, restart
+and every record remains capped at 128 lines. AA 5.2's optional final exhausted
+nickname ERROR at `discord.tasks:110` is accepted only alongside that same
+family's retry and API 403/code 50013, with the exact owner URL traceback. A
+second final record, another user/operation or unmatched final failure blocks.
+The retained container, restart
 count, exact old image, replica count, configured guild, linked Discord ID, and
 Alliance Auth username must still match the confirmed baseline. Altered guild
 or member IDs, repeated records within one logger family, interleaved or
@@ -235,6 +239,11 @@ logger formats, and guild in `HEALTH.json`. Candidate output and all new-worker
 output remain strict, so the exception ends as soon as the old workers are
 replaced; it is available again only while verifying exact restored old workers
 during rollback.
+
+For the fully diagnosed incident whose affected data syncs later succeeded, use
+[reviewed recovery](REVIEWED-RECOVERY.md). That entry point retains the historical
+findings, requires an explicit assessment, and verifies fresh database status
+and every newer log before separately approved completion.
 
 ## Schema-v2 managed web-switch prerequisite
 

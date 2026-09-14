@@ -42,6 +42,18 @@ RETAINED_DISCORD_OWNER_LOG = (
 )
 
 
+def discord_exhausted_record():
+    """Synthetic final-attempt pair emitted by AA 5.2 tasks.py:100 and :110."""
+    retained = RETAINED_DISCORD_OWNER_LOG.read_text(encoding="utf-8")
+    retries = retained[retained.index("[07/Sep/2026 04:50:00] WARNING"):]
+    final = retries.replace("WARNING", "ERROR").replace(
+        "discord.tasks:100", "discord.tasks:110"
+    ).replace(
+        "user Fifty5D, retrying in 60 secs", "user Fifty5D after max retries"
+    )
+    return retained + final, final
+
+
 @contextmanager
 def simulated_root_owned_lstat(path: Path):
     """Expose one runner-owned safety fixture as root-owned on POSIX CI."""
@@ -3174,6 +3186,7 @@ class DockerHostContracts(unittest.TestCase):
                 "celery",
             ),
             ("retained-production", retained, "MainProcess", "allianceauth,celery"),
+            ("owner-exhausted", discord_exhausted_record()[0], "MainProcess", "allianceauth,celery"),
             (
                 "retained-production-retries",
                 retained_retries,
@@ -3241,6 +3254,33 @@ class DockerHostContracts(unittest.TestCase):
                         config.auth_services,
                         owner_transition_phase="candidate-health",
                     )
+
+    def test_owner_exhaustion_requires_matching_final_retry_and_exact_denial(self):
+        complete, final = discord_exhausted_record()
+        cases = {
+            "missing-last-retry": final,
+            "duplicate-final": complete + final,
+            "different-second": complete.removesuffix(final) + final.replace("04:50:00", "04:50:01"),
+            "wrong-final-level": complete.removesuffix(final) + final.replace("ERROR", "WARNING"),
+            "missing-final-traceback": complete.replace("Traceback (most recent call last):", "stack missing"),
+            "different-user": complete.replace("user Fifty5D after", "user AnotherMember after"),
+            "roles": complete.replace("update_nickname failed", "update_groups failed"),
+            "different-terminal-member": complete.removesuffix(final) + final.replace("318985508913020930", "318985508913020931"),
+            "unrelated-error": complete + "[2026-09-07 04:50:00,225: ERROR/MainProcess] unrelated failure\n",
+        }
+        for name, record in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                config = make_config(Path(temporary))
+                host = DockerHost(config)
+                with owner_log_environment(host, {container_id(20): record}), self.assertRaises(DeploymentError):
+                    host._scan_new_logs(config.auth_services, owner_transition_phase="rollback")
+        with tempfile.TemporaryDirectory() as temporary:
+            config = make_config(Path(temporary))
+            host = DockerHost(config)
+            # No transition authority and no individually verified old worker.
+            for individually_scanned, phase in ((set(), "rollback"), ({config.worker_service}, None)):
+                with self.assertRaises(DeploymentError):
+                    host._classify_log_batch([(config.worker_service, complete)], individually_scanned, phase)
 
     def test_owner_transition_rejects_ambiguous_member_role_repeated_and_transient_records(self):
         owner = discord_nickname_record(frames=4)

@@ -5,6 +5,8 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -15,22 +17,37 @@ from ops.deploy.docker_host import LogScanError
 
 class RecoveryAuditTests(unittest.TestCase):
     def test_owner_launcher_has_valid_embedded_python_and_powershell(self):
-        launcher = Path(__file__).resolve().parents[2] / "ops/deploy/run-recovery-audit.ps1"
-        text = launcher.read_text()
-        embedded = text.split("$rootScript = @'\n", 1)[1].split("\n'@", 1)[0]
-        compile(embedded, str(launcher), "exec")
+        directory = Path(__file__).resolve().parents[2] / "ops/deploy"
+        launchers = [directory / name for name in ("run-recovery-audit.ps1", "run-reviewed-recovery.ps1")]
+        for launcher in launchers:
+            text = launcher.read_text()
+            embedded = text.split("$rootScript = @'\n", 1)[1].split("\n'@", 1)[0]
+            compile(embedded, str(launcher), "exec")
         powershell = shutil.which("pwsh")
         if powershell is None:
             if os.environ.get("GITHUB_ACTIONS") == "true":
                 self.fail("Hosted Linux must validate the owner PowerShell launcher")
             return
-        result = subprocess.run([
-            powershell, "-NoProfile", "-NonInteractive", "-Command",
-            "$tokens=$null; $errors=$null; "
-            "[System.Management.Automation.Language.Parser]::ParseFile($env:BUH_AUDIT_SCRIPT,[ref]$tokens,[ref]$errors) | Out-Null; "
-            "if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }",
-        ], env={**os.environ, "BUH_AUDIT_SCRIPT": str(launcher)}, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        for launcher in launchers:
+            with self.subTest(launcher=launcher.name), tempfile.TemporaryDirectory() as temporary:
+                # Parse the actual file, then execute its actual Tee command.
+                # Syntax parsing alone does not detect incompatible parameter sets.
+                result = subprocess.run([
+                    powershell, "-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference='Stop'; $tokens=$null; $errors=$null; "
+                    "$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:BUH_AUDIT_SCRIPT,[ref]$tokens,[ref]$errors); "
+                    "if ($errors.Count) { throw 'Launcher syntax failed' }; "
+                    "$tee=$ast.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Tee-Object'},$true); "
+                    "if ($tee.Count -ne 1) { throw 'Expected one capture command' }; "
+                    "$reportPath=Join-Path $env:BUH_TEST_OUTPUT 'report.txt'; "
+                    "$invoke=[scriptblock]::Create('& $env:BUH_TEST_PYTHON -c '+[char]39+'print(123);raise SystemExit(7)'+[char]39+' | '+$tee[0].Extent.Text); "
+                    ". $invoke; if ($LASTEXITCODE -ne 7) { throw 'Native failure code lost' }; "
+                    "if ((Get-Content -Raw $reportPath).Trim() -ne '123') { throw 'Report missing' }; "
+                    "$variable=$tee[0].CommandElements[-1].Value; "
+                    "if ((Get-Variable -Name $variable -ValueOnly)[0] -ne '123') { throw 'Captured output missing' }",
+                ], env={**os.environ, "BUH_AUDIT_SCRIPT": str(launcher), "BUH_TEST_OUTPUT": temporary,
+                        "BUH_TEST_PYTHON": sys.executable}, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_all_independent_checks_run_and_findings_stay_separate(self):
         calls = []

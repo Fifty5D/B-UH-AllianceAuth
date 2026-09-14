@@ -2,10 +2,13 @@
 
 from contextlib import ExitStack
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -23,13 +26,36 @@ def digest(raw):
 
 @unittest.skipUnless(os.name == "posix", "Linux ownership and atomic-file activation")
 class LogReaderInstallTests(unittest.TestCase):
+    def test_single_file_payload_imports_with_the_unchanged_installed_library(self):
+        # Installing one file must not accidentally depend on newer sibling
+        # modules that are only present in the reviewed staging checkout.
+        archived = subprocess.check_output([
+            "git", "archive", "fc0229b71c50c1bcb15d37f3625189fd9a7cb495", "ops",
+        ], cwd=ROOT)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with tarfile.open(fileobj=io.BytesIO(archived)) as archive:
+                archive.extractall(root, filter="data")
+            (root / "ops/deploy/docker_host.py").write_bytes((ROOT / "ops/deploy/docker_host.py").read_bytes())
+            result = subprocess.run([
+                sys.executable, "-B", "-P", "-c",
+                "from ops.deploy.docker_host import DockerHost; "
+                "from ops.release import recovery_policy; "
+                "assert callable(DockerHost.restored_health_checks); "
+                "assert recovery_policy.load_policy()['host_baseline']['discord_owner']",
+            ], cwd=root, env={**os.environ, "PYTHONPATH": str(root)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_already_installed_continuation_integrity_and_failure_restore(self):
         self.exercise_install(log_classifier=False)
 
     def test_classifier_continuation_requires_both_installed_receipts_and_backups(self):
         self.exercise_install(log_classifier=True)
 
-    def exercise_install(self, *, log_classifier):
+    def test_exhaustion_continuation_requires_all_receipts_and_preserves_failures(self):
+        self.exercise_install(log_classifier=True, owner_exhaustion=True)
+
+    def exercise_install(self, *, log_classifier, owner_exhaustion=False):
         worker = subprocess.check_output(
             [
                 "git",
@@ -50,6 +76,12 @@ class LogReaderInstallTests(unittest.TestCase):
                 cwd=ROOT,
             )
             self.assertEqual(digest(old), recovery.INSTALLED_LOG_RUNTIME)
+        installed_log = old
+        if owner_exhaustion:
+            old = subprocess.check_output([
+                "git", "show", "0cda73ac80253e4fba8531b44d56d27e1c8593d2:ops/deploy/docker_host.py",
+            ], cwd=ROOT)
+            self.assertEqual(digest(old), recovery.INSTALLED_CLASSIFIER_RUNTIME)
         original = subprocess.check_output(
             [
                 "git",
@@ -78,6 +110,8 @@ class LogReaderInstallTests(unittest.TestCase):
                 "saved-parent-receipt",
                 "old-installer-baseline",
             )
+        if owner_exhaustion:
+            failures += ("classifier-receipt", "classifier-backup", "classifier-saved-parent")
         for failure in failures:
             with (
                 self.subTest(failure=failure),
@@ -106,10 +140,14 @@ class LogReaderInstallTests(unittest.TestCase):
                 first_backup.mkdir(mode=0o700)
                 next_parent.mkdir(mode=0o700)
                 prefix = "log-classifier" if log_classifier else "retained-logs"
+                if owner_exhaustion:
+                    prefix = "owner-exhaustion"
                 next_backup = next_parent / f"{prefix}-{reviewed[:12]}"
                 installed_log_backup = root / "retained-logs-d75575649e7d"
                 classifier_receipt = root / "LOG-CLASSIFIER-REPAIR.json"
-                new_receipt = classifier_receipt if log_classifier else log_receipt
+                exhaustion_receipt = root / "OWNER-EXHAUSTION-REPAIR.json"
+                installed_classifier_backup = root / "log-classifier-5891086d9656"
+                new_receipt = exhaustion_receipt if owner_exhaustion else classifier_receipt if log_classifier else log_receipt
                 (first_backup / "docker_host.py").write_bytes(original)
                 (first_backup / "INSTALL.json").write_bytes(base_install.read_bytes())
                 receipt.write_text(
@@ -167,6 +205,22 @@ class LogReaderInstallTests(unittest.TestCase):
                             for p in (log_receipt, *installed_log_backup.iterdir())
                         }
                     )
+                if owner_exhaustion:
+                    installed_classifier_backup.mkdir(mode=0o700)
+                    (installed_classifier_backup / "docker_host.py").write_bytes(installed_log)
+                    for path in (base_install, receipt, log_receipt):
+                        (installed_classifier_backup / path.name).write_bytes(path.read_bytes())
+                    classifier_receipt.write_text(json.dumps({
+                        "schema_version": 1, "result": "receiver-log-classifier-repaired",
+                        "base_source_commit": "fc0229b71c50c1bcb15d37f3625189fd9a7cb495",
+                        "base_install_sha256": install_hash, "path": str(target),
+                        "previous_sha256": recovery.INSTALLED_LOG_RUNTIME,
+                        "sha256": recovery.INSTALLED_CLASSIFIER_RUNTIME,
+                        "backup_path": str(installed_classifier_backup),
+                        "parent_receipt_sha256": digest(log_receipt.read_bytes()),
+                        "parent_receipt_path": str(log_receipt), "deployment_performed": False,
+                    }, sort_keys=True) + "\n")
+                    retained.update({p: p.read_bytes() for p in (classifier_receipt, *installed_classifier_backup.iterdir())})
                 journal = root / "failed-journal.json"
                 journal.write_bytes(b'{"failed":"retain"}\n')
                 retained[journal] = journal.read_bytes()
@@ -203,6 +257,7 @@ class LogReaderInstallTests(unittest.TestCase):
                     ("REPAIR_RECEIPT", receipt),
                     ("LOG_REPAIR_RECEIPT", log_receipt),
                     ("CLASSIFIER_REPAIR_RECEIPT", classifier_receipt),
+                    ("EXHAUSTION_REPAIR_RECEIPT", exhaustion_receipt),
                 ):
                     stack.enter_context(mock.patch.object(recovery, name, value))
                 stack.enter_context(
@@ -219,9 +274,10 @@ class LogReaderInstallTests(unittest.TestCase):
                 )
                 stack.enter_context(
                     mock.patch.object(
-                        recovery, "_classifier_repair_backup", return_value=next_backup
+                        recovery, "_classifier_repair_backup", return_value=installed_classifier_backup if owner_exhaustion else next_backup
                     )
                 )
+                stack.enter_context(mock.patch.object(recovery, "_exhaustion_repair_backup", return_value=next_backup))
                 stack.enter_context(
                     mock.patch.object(recovery, "read_file", side_effect=read)
                 )
@@ -248,6 +304,14 @@ class LogReaderInstallTests(unittest.TestCase):
                     }[failure]
                     changed.write_bytes(b"changed\n")
                     retained[changed] = changed.read_bytes()
+                elif failure in {"classifier-receipt", "classifier-backup", "classifier-saved-parent"}:
+                    changed = {
+                        "classifier-receipt": classifier_receipt,
+                        "classifier-backup": installed_classifier_backup / "docker_host.py",
+                        "classifier-saved-parent": installed_classifier_backup / "RETAINED-LOG-REPAIR.json",
+                    }[failure]
+                    changed.write_bytes(b"changed\n")
+                    retained[changed] = changed.read_bytes()
                 elif failure == "old-installer-baseline":
                     target.write_bytes(worker)
                 elif failure == "post-write":
@@ -262,17 +326,17 @@ class LogReaderInstallTests(unittest.TestCase):
                         mock.patch.object(recovery, "_atomic_bytes", side_effect=atomic)
                     )
                 marker = (
-                    "INSTALL LOG CLASSIFIER"
+                    "INSTALL OWNER EXHAUSTION CHECK" if owner_exhaustion else "INSTALL LOG CLASSIFIER"
                     if log_classifier
                     else "INSTALL RETAINED LOG READER"
                 )
                 installer = (
-                    recovery.install_log_classifier
+                    recovery.install_owner_exhaustion if owner_exhaustion else recovery.install_log_classifier
                     if log_classifier
                     else recovery.install_log_reader
                 )
                 verifier = (
-                    recovery.verify_classifier_repair
+                    recovery.verify_exhaustion_repair if owner_exhaustion else recovery.verify_classifier_repair
                     if log_classifier
                     else recovery.verify_log_repair
                 )
@@ -288,7 +352,7 @@ class LogReaderInstallTests(unittest.TestCase):
                     result = installer(reviewed, confirmation=confirm)
                     self.assertEqual(
                         result["result"],
-                        "receiver-log-classifier-repaired"
+                        "receiver-owner-exhaustion-repaired" if owner_exhaustion else "receiver-log-classifier-repaired"
                         if log_classifier
                         else "receiver-log-reader-repaired",
                     )
@@ -304,7 +368,7 @@ class LogReaderInstallTests(unittest.TestCase):
                         (next_backup / "RETAINED-LOG-REPAIR.json",)
                         if log_classifier
                         else ()
-                    ):
+                    ) + ((next_backup / "LOG-CLASSIFIER-REPAIR.json",) if owner_exhaustion else ()):
                         unchanged = part.read_bytes()
                         part.write_bytes(unchanged + b"changed")
                         with self.assertRaises(DeploymentError):
@@ -317,6 +381,9 @@ class LogReaderInstallTests(unittest.TestCase):
                         recovery.install_log_reader(
                             reviewed, confirmation=f"INSTALL RETAINED LOG READER {reviewed}"
                         )
+                if owner_exhaustion:
+                    with self.assertRaises(DeploymentError):
+                        recovery.install_log_classifier(reviewed, confirmation=f"INSTALL LOG CLASSIFIER {reviewed}")
                 # The old installer is not the continuation, even with its marker.
                 with self.assertRaises(DeploymentError):
                     recovery.install(
