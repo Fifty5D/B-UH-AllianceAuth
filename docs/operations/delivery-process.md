@@ -5,19 +5,24 @@ available on the live Auth site still requires verified recovery and a separatel
 approved deployment. A GitHub merge, published release, installed receiver fix,
 and healthy production installation are four different states.
 
-## State established on September 13, 2026
+## State established on September 14, 2026
 
 | Area | Established state | Remaining action |
 | --- | --- | --- |
-| Source | PRs #60–#63 merged; PR #63 merge was `492fe7dd8f3dae21a8f6e1c77947c500eb486a0d` | Ordinary feature development and qualified merges may continue |
+| Source | PRs #60–#66 merged; PR #66 merge was `9f607309d38de8d579a5e79a68c5774694ad30a3` | History collection and the owner nickname guard are in source; they are not installed application updates |
 | Release | Immutable v0.6.2 exists at `6074b965cbd2e6ab2630cd539ee455b8d419aef6` | Preserve its bytes; do not infer installation from publication |
 | Server receiver | Owner reported PR #63 installation succeeded; SHA-256 `5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c` | Recheck installed identity when collecting diagnosis |
 | Production recovery | Attempt `gh-34713182347-1` reached migrations. Full rollback verification and cleanup remain unresolved | Complete diagnosis, resolve findings, then obtain the applicable recovery approval |
-| Latest reported blocker | A retained `structures.tasks.update_structures_assets_for_owner` task raised `HTTPError()` | Establish the full cause and whether it persists; status/cause are not known from the screenshot |
+| Diagnostic health | All 22 functional probes passed; only the original retained log interval failed | Recheck live health during reviewed recovery |
+| Data syncs | A later owner-provided snapshot reports 12/12 Structures owners healthy, 12/12 Moon Mining owners successful and 10/10 refinery ledgers successful | Preserve that evidence and require fresh success flags and timestamps |
+| Remaining receiver case | The installed guard is absent; the final owner nickname retry emits an additional ERROR | Review the exhausted-owner correction and the explicit historical assessment in [reviewed recovery](../../ops/deploy/REVIEWED-RECOVERY.md) |
 | New publication/deployment | Active recovery hold; the previous continuation was consumed | Keep production held until recovery is verified and its hold is retired through review |
 
-The last verification reached its log check after earlier functional probes, but
-that observation is not a fresh health report. Old containers and safety slots
+The complete historical inventory accounts for 26 ESI task errors whose HTTP
+status was not recorded, owner nickname 403/code 50013 responses and exhausted
+retries, and transient Discord 429/503 responses. The later successful data syncs
+establish subsequent recovery; they do not prove that history has no gaps or
+that the old logs were clean. Old containers and safety slots
 were retained; migrations had already run. The current installed application
 version must come from verified host markers, image identities and the journal.
 
@@ -55,6 +60,12 @@ restore already-expired artifacts or extend an authorization past its verified
 evidence. Digest, source identity and live review checks still apply.
 
 ## Diagnose the remaining incident once
+
+The combined audit, complete log inventory and subsequent sync snapshot have
+already been collected for this incident. Continue with the reviewed recovery
+runbook above; do not request these broad diagnostics again unless concrete new
+evidence changes the assessment. The following launcher remains available for
+diagnosis against the original installed PR #63 receiver.
 
 Run `ops/deploy/run-recovery-audit.ps1` from the reviewed diagnostic commit:
 

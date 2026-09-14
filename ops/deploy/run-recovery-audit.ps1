@@ -94,7 +94,7 @@ except Exception as error:
 '@
 $reportPath = Join-Path $taskDirectory 'diagnostic-report.txt'
 $rootScript | ssh $SshHost "sudo -n timeout 1900s /usr/bin/python3 -B - $uploadDirectory $sourceHash $ReviewedCommit" |
-    Tee-Object -FilePath $reportPath -Variable buhAuditOutput
+    Tee-Object -FilePath $reportPath -OutVariable buhAuditOutput
 $auditExitCode = $LASTEXITCODE
 # Copy the report on failure too: finding blockers is a useful diagnostic result.
 $buhAuditOutput | Set-Clipboard

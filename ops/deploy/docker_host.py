@@ -4708,6 +4708,11 @@ class DockerHost:
                 r"retrying in 60 secs[.!]?",
                 re.IGNORECASE,
             )
+            exhausted = re.compile(
+                rf"update_nickname failed for user {re.escape(owner['auth_username'])} "
+                r"after max retries[.!]?\s*$",
+                re.IGNORECASE,
+            )
             denied = re.compile(
                 r"(?:403 Forbidden \(error code: 50013\): Missing Permissions|"
                 r"Discord HTTP 403, code 50013: Missing Permissions)[.!]?\s*$",
@@ -4826,6 +4831,7 @@ class DockerHost:
                     valid = True
                     accepted_indexes: set[int] = set()
                     retry_families: set[str] = set()
+                    exhausted_families: set[str] = set()
                     denial_kinds: dict[str, set[str]] = {}
                     incident_processes: set[str] = set()
                     incident_formats: set[str] = set()
@@ -4844,6 +4850,11 @@ class DockerHost:
                             for index, line in absolute_lines
                             if retry.search(line)
                         ]
+                        owner_exhausted = [
+                            (index, line)
+                            for index, line in absolute_lines
+                            if exhausted.search(line)
+                        ]
                         family = record["family"]
                         process = record["process"]
                         if family == "celery":
@@ -4852,21 +4863,25 @@ class DockerHost:
                             incident_processes.add(process)
                         if operation_lines:
                             valid = valid and len(operation_lines) == 1
-                            valid = valid and len(owner_retries) == 1
+                            is_exhausted = len(owner_exhausted) == 1 and not owner_retries
+                            expected_level = "ERROR" if is_exhausted else "WARNING"
+                            valid = valid and (is_exhausted or len(owner_retries) == 1)
                             if family == "celery":
-                                valid = valid and record["level"] == "WARNING"
+                                valid = valid and record["level"] == expected_level
                             else:
                                 valid = valid and (
-                                    record["level"] == "WARNING"
+                                    record["level"] == expected_level
                                     and record["component"]
                                     == "allianceauth.services.modules.discord.tasks"
-                                    and record["source_line"] == "100"
+                                    and record["source_line"] == ("110" if is_exhausted else "100")
                                 )
-                            if family in retry_families:
+                            operation_families = exhausted_families if is_exhausted else retry_families
+                            if family in operation_families:
                                 valid = False
-                            retry_families.add(family)
+                            operation_families.add(family)
                             incident_formats.add(family)
                             accepted_indexes.update(index for index, _line in owner_retries)
+                            accepted_indexes.update(index for index, _line in owner_exhausted)
                             traceback_headers = [
                                 index
                                 for index, line in absolute_lines
@@ -4888,6 +4903,12 @@ class DockerHost:
                             valid = valid and bool(
                                 traceback_terminals or compact_denials
                             )
+                            # AA 5.2 logs the final exception after its last retry
+                            # warning. Require the exact owner URL, not a generic
+                            # exhausted task or an unrelated permissions failure.
+                            if is_exhausted:
+                                valid = valid and len(traceback_terminals) == 1
+                                valid = valid and not compact_denials
                             accepted_indexes.update(traceback_headers)
                             accepted_indexes.update(traceback_terminals)
                         for index, line in absolute_lines:
@@ -4924,6 +4945,11 @@ class DockerHost:
                             incident_formats.add(family)
                     valid = valid and 1 <= len(retry_families) <= 2
                     valid = valid and retry_families == set(denial_kinds)
+                    valid = valid and exhausted_families <= retry_families
+                    valid = valid and all(
+                        "api-error" in denial_kinds.get(family, set())
+                        for family in exhausted_families
+                    )
                     valid = valid and all(denial_kinds.values())
                     valid = valid and len(incident_processes) <= 1
                     if valid:

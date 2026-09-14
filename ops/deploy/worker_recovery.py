@@ -34,9 +34,11 @@ INSTALLED_WORKER_RUNTIME = (
     "c33fe29ed735e18f0c62bbbb31aecd7a6f3ee49a175a8c1c2ad8f33b90134ef8"
 )
 INSTALLED_LOG_RUNTIME = "d75575649e7d6a8bbae51adee8bbc8beb44d7b9765106220f53e4eb73ada74a9"
+INSTALLED_CLASSIFIER_RUNTIME = "5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c"
 REPAIR_RECEIPT = Path("/etc/buh-platform-v2/WORKER-REPAIR.json")
 LOG_REPAIR_RECEIPT = Path("/etc/buh-platform-v2/RETAINED-LOG-REPAIR.json")
 CLASSIFIER_REPAIR_RECEIPT = Path("/etc/buh-platform-v2/LOG-CLASSIFIER-REPAIR.json")
+EXHAUSTION_REPAIR_RECEIPT = Path("/etc/buh-platform-v2/OWNER-EXHAUSTION-REPAIR.json")
 PINS = {
     Path(
         "/etc/buh-platform-v2/receiver.json"
@@ -90,6 +92,10 @@ def _classifier_repair_backup(runtime_sha256: str) -> Path:
     return (
         Path("/var/backups/buh-receiver-upgrade") / f"log-classifier-{runtime_sha256[:12]}"
     )
+
+
+def _exhaustion_repair_backup(runtime_sha256: str) -> Path:
+    return Path("/var/backups/buh-receiver-upgrade") / f"owner-exhaustion-{runtime_sha256[:12]}"
 
 
 def _verify_worker_repair() -> str:
@@ -166,7 +172,7 @@ def _classifier_repair_record(runtime_sha256: str, parent_receipt: str) -> dict:
     }
 
 
-def verify_classifier_repair(runtime_sha256: str) -> None:
+def verify_classifier_repair(runtime_sha256: str) -> str:
     """Require all three additive receipts/backups; never rewrite their history."""
     parent = verify_log_repair(INSTALLED_LOG_RUNTIME)
     expected = _classifier_repair_record(runtime_sha256, parent)
@@ -184,6 +190,34 @@ def verify_classifier_repair(runtime_sha256: str) -> None:
     ):
         if read_file(path)[0].get("sha256") != digest:
             raise DeploymentError("Log-classifier repair backup changed or is missing")
+    return read_file(CLASSIFIER_REPAIR_RECEIPT)[0]["sha256"]
+
+
+def _exhaustion_repair_record(runtime_sha256: str, parent_receipt: str) -> dict:
+    return {
+        **_log_repair_record(runtime_sha256, parent_receipt),
+        "result": "receiver-owner-exhaustion-repaired",
+        "previous_sha256": INSTALLED_CLASSIFIER_RUNTIME,
+        "backup_path": str(_exhaustion_repair_backup(runtime_sha256)),
+        "parent_receipt_path": str(CLASSIFIER_REPAIR_RECEIPT),
+    }
+
+
+def verify_exhaustion_repair(runtime_sha256: str) -> None:
+    parent = verify_classifier_repair(INSTALLED_CLASSIFIER_RUNTIME)
+    expected = _exhaustion_repair_record(runtime_sha256, parent)
+    if read_file(EXHAUSTION_REPAIR_RECEIPT)[1] != (json.dumps(expected, sort_keys=True) + "\n").encode():
+        raise DeploymentError("Owner-exhaustion repair receipt changed or is missing")
+    backup = _exhaustion_repair_backup(runtime_sha256)
+    for path, digest in (
+        (backup / "docker_host.py", INSTALLED_CLASSIFIER_RUNTIME),
+        (backup / "INSTALL.json", expected["base_install_sha256"]),
+        (backup / "WORKER-REPAIR.json", _verify_worker_repair()),
+        (backup / "RETAINED-LOG-REPAIR.json", verify_log_repair(INSTALLED_LOG_RUNTIME)),
+        (backup / "LOG-CLASSIFIER-REPAIR.json", parent),
+    ):
+        if read_file(path)[0].get("sha256") != digest:
+            raise DeploymentError("Owner-exhaustion repair backup changed or is missing")
 
 
 def install(runtime_sha256: str, *, confirmation: str) -> dict:
@@ -201,12 +235,20 @@ def install_log_classifier(runtime_sha256: str, *, confirmation: str) -> dict:
     )
 
 
+def install_owner_exhaustion(runtime_sha256: str, *, confirmation: str) -> dict:
+    return _install_file(
+        runtime_sha256, confirmation=confirmation, log_reader=True,
+        log_classifier=True, owner_exhaustion=True,
+    )
+
+
 def _install_file(
     runtime_sha256: str,
     *,
     confirmation: str,
     log_reader: bool,
     log_classifier: bool = False,
+    owner_exhaustion: bool = False,
 ) -> dict:
     """One fixed-file receiver repair, not the historical receiver/VPS upgrade.
 
@@ -224,11 +266,18 @@ def _install_file(
             INSTALLED_LOG_RUNTIME,
             CLASSIFIER_REPAIR_RECEIPT,
         )
+    if owner_exhaustion:
+        marker, previous, receipt = (
+            "INSTALL OWNER EXHAUSTION CHECK", INSTALLED_CLASSIFIER_RUNTIME,
+            EXHAUSTION_REPAIR_RECEIPT,
+        )
     if confirmation != f"{marker} {runtime_sha256}":
         raise DeploymentError("Separate exact receiver-repair approval is required")
     verify_pins(runtime_sha256, installed_sha256=previous)
     parent_receipt = (
-        verify_log_repair(INSTALLED_LOG_RUNTIME)
+        verify_classifier_repair(INSTALLED_CLASSIFIER_RUNTIME)
+        if owner_exhaustion
+        else verify_log_repair(INSTALLED_LOG_RUNTIME)
         if log_classifier
         else _verify_worker_repair()
         if log_reader
@@ -249,6 +298,8 @@ def _install_file(
     )
     if log_classifier:
         backup = _classifier_repair_backup(runtime_sha256)
+    if owner_exhaustion:
+        backup = _exhaustion_repair_backup(runtime_sha256)
     # Validate the existing root-only parent, never mkdir through a replaceable path.
     from .receiver import _verify_root_owned_ancestors
 
@@ -268,6 +319,11 @@ def _install_file(
             0o600,
             owner=(0, 0),
         )
+    if owner_exhaustion:
+        _atomic_bytes(
+            backup / "LOG-CLASSIFIER-REPAIR.json",
+            read_file(CLASSIFIER_REPAIR_RECEIPT)[1], 0o600, owner=(0, 0),
+        )
     result = {
         "schema_version": 1,
         "result": "receiver-file-repaired",
@@ -283,10 +339,15 @@ def _install_file(
         result = _log_repair_record(runtime_sha256, parent_receipt)
     if log_classifier:
         result = _classifier_repair_record(runtime_sha256, parent_receipt)
+    if owner_exhaustion:
+        result = _exhaustion_repair_record(runtime_sha256, parent_receipt)
     try:
         _atomic_bytes(target, new, 0o644, owner=(0, 0))
         verify_pins(runtime_sha256)
-        if log_classifier:
+        if owner_exhaustion:
+            if verify_classifier_repair(INSTALLED_CLASSIFIER_RUNTIME) != parent_receipt:
+                raise DeploymentError("Classifier repair receipt changed during activation")
+        elif log_classifier:
             if verify_log_repair(INSTALLED_LOG_RUNTIME) != parent_receipt:
                 raise DeploymentError(
                     "Retained-log repair receipt changed during activation"
@@ -414,7 +475,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=("install", "install-logs", "install-classifier", "verify", "complete"),
+        choices=("install", "install-logs", "install-classifier", "install-exhaustion", "verify", "complete"),
     )
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--archive-sha256")
@@ -433,9 +494,12 @@ def main(argv=None) -> int:
                 "install": ORIGINAL_RUNTIME,
                 "install-logs": INSTALLED_WORKER_RUNTIME,
                 "install-classifier": INSTALLED_LOG_RUNTIME,
+                "install-exhaustion": INSTALLED_CLASSIFIER_RUNTIME,
             }.get(args.operation),
         )
-        if args.operation == "install-classifier":
+        if args.operation == "install-exhaustion":
+            verify_classifier_repair(INSTALLED_CLASSIFIER_RUNTIME)
+        elif args.operation == "install-classifier":
             verify_log_repair(INSTALLED_LOG_RUNTIME)
         elif args.operation == "install-logs":
             _verify_worker_repair()
@@ -443,11 +507,12 @@ def main(argv=None) -> int:
             verify_classifier_repair(args.runtime_sha256)
         config = ReceiverConfig.load(Path("/etc/buh-platform-v2/receiver.json"))
         lock = _open_lock(config)
-        if args.operation in {"install", "install-logs", "install-classifier"}:
+        if args.operation in {"install", "install-logs", "install-classifier", "install-exhaustion"}:
             installer = {
                 "install": install,
                 "install-logs": install_log_reader,
                 "install-classifier": install_log_classifier,
+                "install-exhaustion": install_owner_exhaustion,
             }[args.operation]
             print(
                 json.dumps(
