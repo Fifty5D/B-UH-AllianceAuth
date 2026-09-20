@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Use configured sync cadence and stable asset identity in reviewed recovery, retaining complete historical error evidence and the original approved installer."

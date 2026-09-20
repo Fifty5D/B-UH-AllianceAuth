@@ -33,6 +33,19 @@ $sourceArchive = Join-Path $taskDirectory 'source.tar'
 git -C $RepositoryPath archive --format=tar --output=$sourceArchive $ReviewedCommit
 if ($LASTEXITCODE -ne 0) { throw 'Could not archive the reviewed source.' }
 $sourceHash = (Get-FileHash -Algorithm SHA256 $sourceArchive).Hash.ToLowerInvariant()
+$installerHash = '-'
+$installerCommit = '-'
+if ($Operation -eq 'InstallAndVerify') {
+    # Keep the previously approved installer source separate from staged checks.
+    $installerCommit = $review.installer_commit
+    if ($installerCommit -notmatch '^[0-9a-f]{40}$') { throw 'Approved installer commit is missing.' }
+    git -C $RepositoryPath fetch https://github.com/Fifty5D/B-UH-AllianceAuth.git $installerCommit
+    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the approved installer commit.' }
+    $installerArchive = Join-Path $taskDirectory 'installer.tar'
+    git -C $RepositoryPath archive --format=tar --output=$installerArchive $installerCommit ops
+    if ($LASTEXITCODE -ne 0) { throw 'Could not archive the approved installer.' }
+    $installerHash = (Get-FileHash -Algorithm SHA256 $installerArchive).Hash.ToLowerInvariant()
+}
 $uploadDirectory = (ssh $SshHost 'umask 077; mktemp -d /tmp/buh-review-upload.XXXXXXXXXX').Trim()
 if ($LASTEXITCODE -ne 0 -or $uploadDirectory -notmatch '^/tmp/buh-review-upload\.[A-Za-z0-9]+$') {
     throw 'Could not create a private upload directory.'
@@ -40,6 +53,10 @@ if ($LASTEXITCODE -ne 0 -or $uploadDirectory -notmatch '^/tmp/buh-review-upload\
 foreach ($item in @(@($sourceArchive, 'source.tar'), @($ReviewPath, 'review.json'), @($HistoricalLogPath, 'historical-log-details.json'))) {
     scp $item[0] "${SshHost}:${uploadDirectory}/$($item[1])"
     if ($LASTEXITCODE -ne 0) { throw 'Recovery evidence upload failed.' }
+}
+if ($Operation -eq 'InstallAndVerify') {
+    scp $installerArchive "${SshHost}:${uploadDirectory}/installer.tar"
+    if ($LASTEXITCODE -ne 0) { throw 'Approved installer upload failed.' }
 }
 $encodedConfirmation = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Confirmation))
 if (-not $encodedConfirmation) { $encodedConfirmation = '-' }
@@ -56,7 +73,7 @@ import tarfile
 import tempfile
 
 try:
-    upload, source_hash, commit, runtime, review_hash, operation, encoded = sys.argv[1:]
+    upload, source_hash, commit, runtime, review_hash, operation, encoded, installer_hash, installer_commit = sys.argv[1:]
     confirmation = "" if encoded == "-" else base64.b64decode(encoded, validate=True).decode("utf-8")
     required = {
         "Verify": "",
@@ -81,18 +98,29 @@ try:
         raise SystemExit("Reviewed receiver payload differs")
     historical = uploaded("historical-log-details.json", 1024 * 1024, review["historical_log_evidence_sha256"])
     stage = Path(tempfile.mkdtemp(prefix="buh-reviewed-recovery-" + commit[:8] + "-", dir="/root"))
+    def extract_source(raw, destination):
+        destination.mkdir(mode=0o700)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
+            members = tar.getmembers()
+            if len(members) > 10000 or any(
+                not (m.isfile() or m.isdir()) or PurePosixPath(m.name).is_absolute()
+                or ".." in PurePosixPath(m.name).parts for m in members
+            ):
+                raise SystemExit("Source archive contains unsafe entries")
+            tar.extractall(destination, filter="data")
+
     source = stage / "source"
-    source.mkdir(mode=0o700)
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-        members = tar.getmembers()
-        if len(members) > 10000 or any(
-            not (m.isfile() or m.isdir()) or PurePosixPath(m.name).is_absolute()
-            or ".." in PurePosixPath(m.name).parts for m in members
-        ):
-            raise SystemExit("Source archive contains unsafe entries")
-        tar.extractall(source, filter="data")
+    extract_source(archive, source)
     if hashlib.sha256((source / "ops/deploy/docker_host.py").read_bytes()).hexdigest() != runtime:
         raise SystemExit("The commit does not contain the approved receiver bytes")
+    installer = None
+    if operation == "InstallAndVerify":
+        if installer_commit != review.get("installer_commit"):
+            raise SystemExit("Installer differs from the separately approved source")
+        installer = stage / "approved-installer"
+        extract_source(uploaded("installer.tar", 128 * 1024 * 1024, installer_hash), installer)
+        if hashlib.sha256((installer / "ops/deploy/docker_host.py").read_bytes()).hexdigest() != runtime:
+            raise SystemExit("Approved installer receiver payload differs")
     (stage / "review.json").write_bytes(review_raw)
     (stage / "historical-log-details.json").write_bytes(historical)
     expected_archive = "0d1dec44c94a5cad8c6568b195a206954d3f8b660c304af418de4f6e12273ad0"
@@ -115,12 +143,11 @@ try:
             break
     if verification_archive is None:
         raise SystemExit("Pinned verification archive is unavailable; preserve resources")
-    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "PYTHONPATH": str(source)}
-
-    def run(module, arguments, report_name=None):
+    def run(module, arguments, report_name=None, *, source_root=source):
+        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "PYTHONPATH": str(source_root)}
         result = subprocess.run(
             ["/usr/bin/python3", "-B", "-P", "-m", module, *arguments],
-            cwd=source, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=source_root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=1800,
         )
         if not result.stdout.strip():
@@ -131,7 +158,8 @@ try:
             raise SystemExit(result.returncode)
         return json.loads(result.stdout)
 
-    print(json.dumps({"staging_directory": str(stage), "reviewed_commit": commit, "operation": operation}), flush=True)
+    print(json.dumps({"staging_directory": str(stage), "reviewed_commit": commit,
+                      "installer_commit": installer_commit, "operation": operation}), flush=True)
     arguments = [
         "complete" if operation == "Complete" else "verify", "--runtime-sha256", runtime,
         "--archive", str(verification_archive), "--review", str(stage / "review.json"),
@@ -143,7 +171,7 @@ try:
         run("ops.deploy.reviewed_recovery", arguments + ["--before-install"], "before-install")
         receipt = run("ops.deploy.worker_recovery", [
             "install-exhaustion", "--runtime-sha256", runtime, "--confirm", confirmation,
-        ])
+        ], source_root=installer)
         if receipt.get("result") != "receiver-owner-exhaustion-repaired" or receipt.get("sha256") != runtime:
             raise SystemExit("Unexpected installation receipt; verification not run")
     if operation == "Complete":
@@ -160,7 +188,7 @@ except Exception as error:
     raise SystemExit(1)
 '@
 $reportPath = Join-Path $taskDirectory 'recovery-report.txt'
-$rootScript | ssh $SshHost "sudo -n timeout 3700s /usr/bin/python3 -B - $uploadDirectory $sourceHash $ReviewedCommit $ReceiverSha256 $ReviewSha256 $Operation $encodedConfirmation" |
+$rootScript | ssh $SshHost "sudo -n timeout 3700s /usr/bin/python3 -B - $uploadDirectory $sourceHash $ReviewedCommit $ReceiverSha256 $ReviewSha256 $Operation $encodedConfirmation $installerHash $installerCommit" |
     Tee-Object -FilePath $reportPath -OutVariable buhRecoveryOutput
 $recoveryExitCode = $LASTEXITCODE
 $buhRecoveryOutput | Set-Clipboard

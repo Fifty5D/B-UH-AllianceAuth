@@ -14,7 +14,8 @@ from unittest import mock
 
 from ops.deploy import reviewed_recovery as reviewed
 from ops.deploy.contracts import DeploymentError
-from ops.deploy.docker_host import DockerHost, LogScanError
+from ops.deploy.docker_host import LogScanError
+from ops.deploy.recovered_logs import ReviewedDockerHost
 from tests.deploy.test_docker_host import discord_exhausted_record, make_config
 
 
@@ -95,6 +96,8 @@ def fixture():
         "historical_esi_root_cause": "not-recorded",
         "historical_log_evidence_sha256": "b" * 64,
         "sync_evidence_at": "2026-09-14T19:27:35+00:00",
+        "current_evidence_policy": "scheduled-sync-and-retained-errors-v1",
+        "asset_recoveries": [{"previous_character_pk": 5, "eve_character_id": 90000001}],
         "structures_owners": [101],
         "moonmining_owners": [101],
         "refineries": [10001],
@@ -126,6 +129,46 @@ def fixture():
             }
         ],
     }
+
+    def schedule(seconds):
+        return [
+            {
+                "enabled": True,
+                "last_run_at": clock,
+                "interval__every": seconds,
+                "interval__period": "seconds",
+                "crontab_id": None,
+                "solar_id": None,
+                "clocked_id": None,
+            }
+        ]
+
+    requested = (NOW - timedelta(minutes=10)).isoformat()
+    status.update(
+        log_timezone="UTC",
+        moon_tax_config=[{"audit_interval_hours": 4}],
+        moon_tax_schedule=schedule(3600),
+        completed_audits=[
+            {
+                "queued_at": requested,
+                "source_refresh_requested_at": requested,
+                "finished_at": clock,
+            }
+        ],
+        asset_stale_minutes=240,
+        memberaudit_schedule=schedule(900),
+        asset_characters=[
+            {"pk": 123, "is_disabled": False, "eve_character__character_id": 90000001}
+        ],
+        asset_status=[
+            {
+                "character_id": 123,
+                "is_success": True,
+                "has_token_error": False,
+                "run_finished_at": clock,
+            }
+        ],
+    )
     return evidence, review, status
 
 
@@ -225,7 +268,7 @@ class ReviewedRecoveryTests(unittest.TestCase):
             archive.write_bytes(b"synthetic immutable archive")
             config = make_config(root)
             config.state_dir.mkdir(parents=True, exist_ok=True)
-            host = DockerHost(config)
+            host = ReviewedDockerHost(config)
             host.original_dockerfile = root / "original"
             host.traffic_switch_started = host.migration_started = True
             host.previous_web_slots = ("synthetic-previous-slot",)
@@ -309,7 +352,7 @@ class ReviewedRecoveryTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    reviewed.DockerHost,
+                    reviewed.ReviewedDockerHost,
                     "load_incomplete_plan",
                     return_value=(host, {"phase": "failed"}),
                 )
@@ -371,6 +414,11 @@ class ReviewedRecoveryTests(unittest.TestCase):
                     self.assertTrue(
                         any(check["result"] == "failed" for check in result["checks"])
                     )
+                if fail == "sync":
+                    self.assertEqual(
+                        result["sync_failures"]["findings"][0]["field"], "last_update_ok"
+                    )
+                    self.assertIn("current_sync_status", result)
                 return
             self.assertEqual(code, 0, result)
             self.assertFalse(result["historical_interval_clean"])
