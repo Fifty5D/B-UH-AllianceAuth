@@ -24,9 +24,10 @@ from .contracts import (
     extract_archive,
     load_validated_bundle,
 )
-from .docker_host import DockerHost
 from .engine import _atomic_write
 from .receiver import _open_lock, _verify_root_owned_ancestors
+from .recovered_logs import RecoveredLogReview, ReviewedDockerHost
+from .recovery_sync import SyncEvidenceError, live_sync_probe, validate_sync
 
 
 TASKS = {
@@ -39,11 +40,11 @@ RECEIPT_NAME = f"worker-recovery-{recovery.ATTEMPT}.json"
 
 
 class ReviewedHealthError(DeploymentError):
-    def __init__(self, checks):
+    def __init__(self, report):
         super().__init__(
             "Reviewed recovery health checks failed; inspect the combined report"
         )
-        self.checks = checks
+        self.report = report
 
 
 def require(condition, message):
@@ -216,6 +217,31 @@ def validate_review(review, evidence, *, now):
         review.get("historical_esi_root_cause") == "not-recorded",
         "Review must preserve the unknown historical ESI cause",
     )
+    require(
+        review.get("current_evidence_policy") == "scheduled-sync-and-retained-errors-v1",
+        "An explicit review of the current-evidence policy is required",
+    )
+    bindings = review.get("asset_recoveries")
+    require(
+        isinstance(bindings, list) and 0 < len(bindings) <= 100,
+        "Reviewed stable asset identities are required",
+    )
+    previous = set()
+    identities = set()
+    for binding in bindings:
+        require(
+            isinstance(binding, dict)
+            and set(binding) == {"previous_character_pk", "eve_character_id"}
+            and all(type(item) is int and item > 0 for item in binding.values()),
+            "Invalid asset identity review",
+        )
+        require(
+            binding["previous_character_pk"] not in previous
+            and binding["eve_character_id"] not in identities,
+            "Duplicate asset identity review",
+        )
+        previous.add(binding["previous_character_pk"])
+        identities.add(binding["eve_character_id"])
     cutoff = stamp(evidence["until"])
     require(
         stamp(audit.LOG_SINCE) < cutoff <= stamp(review["sync_evidence_at"]) <= now,
@@ -236,77 +262,6 @@ def validate_review(review, evidence, *, now):
     return cutoff
 
 
-def live_sync_probe(host):
-    # Fixed SELECTs only; no tasks, token refresh, API access or model saves.
-    code = (
-        "import json;from django.utils.timezone import now;"
-        "from structures.models import Owner as S;"
-        "from moonmining.models import Owner as M,Refinery as R;"
-        "print('BUH_SYNC='+json.dumps({'captured_at':now().isoformat(),"
-        "'structures_owners':list(S.objects.order_by('pk').values('pk','is_active','is_up',"
-        "'is_included_in_service_status','structures_last_update_at','assets_last_update_at',"
-        "'notifications_last_update_at','forwarding_last_update_at')[:501]),"
-        "'moonmining_owners':list(M.objects.order_by('pk').values('pk','is_enabled',"
-        "'last_update_at','last_update_ok')[:501]),"
-        "'refineries':list(R.objects.order_by('pk').values('pk','owner_id',"
-        "'ledger_last_update_at','ledger_last_update_ok')[:501])},default=str))"
-    )
-    output = host._manage_live(
-        "shell", "-c", code, context="Read-only recovered data sync status"
-    )
-    records = [
-        line.removeprefix("BUH_SYNC=")
-        for line in output.splitlines()
-        if line.startswith("BUH_SYNC=")
-    ]
-    require(len(records) == 1, "Live sync report is missing or ambiguous")
-    return json.loads(records[0])
-
-
-def validate_sync(status, review, cutoff, *, now):
-    require(
-        abs((stamp(status["captured_at"]) - now).total_seconds()) <= 120,
-        "Live sync report is stale",
-    )
-    fields = {
-        "structures_owners": (
-            {"is_active", "is_up", "is_included_in_service_status"},
-            {
-                "structures_last_update_at": 7200,
-                "assets_last_update_at": 7200,
-                "notifications_last_update_at": 1800,
-                "forwarding_last_update_at": 1800,
-            },
-        ),
-        "moonmining_owners": ({"is_enabled", "last_update_ok"}, {"last_update_at": 1800}),
-        "refineries": ({"ledger_last_update_ok"}, {"ledger_last_update_at": 7200}),
-    }
-    for name, (flags, clocks) in fields.items():
-        rows = status.get(name, [])
-        require(
-            len(rows) == len(review[name])
-            and {row.get("pk") for row in rows} == set(review[name]),
-            "Recovered data population changed",
-        )
-        for row in rows:
-            require(
-                all(row.get(flag) is True for flag in flags),
-                "A reviewed data sync is disabled or unsuccessful",
-            )
-            if name == "refineries":
-                require(
-                    row.get("owner_id") in review["moonmining_owners"],
-                    "Refinery owner changed",
-                )
-            for field, maximum_age in clocks.items():
-                updated = stamp(row.get(field))
-                require(
-                    cutoff < updated <= now
-                    and (now - updated).total_seconds() <= maximum_age,
-                    "A data sync has not recovered or is stale",
-                )
-
-
 def verify(host, value, bundle, review, evidence):
     recovery.prepare_verification(host, value, bundle)
     cutoff = validate_review(review, evidence, now=datetime.now(timezone.utc))
@@ -323,14 +278,35 @@ def verify(host, value, bundle, review, evidence):
     require(
         live == identities, "Historical evidence no longer matches the retained workers"
     )
+    require(isinstance(host, ReviewedDockerHost), "Reviewed host adapter is required")
+    started_at = datetime.now(timezone.utc)
     sync = {}
+    thresholds = {}
+    sync_findings = {}
+    host.recovered_log_review = None
+    host.reviewed_worker_ids = frozenset(identities)
 
     def check_sync():
+        host.recovered_log_review = None
+        sync.clear()
+        thresholds.clear()
+        sync_findings.clear()
         sync.update(live_sync_probe(host))
-        validate_sync(sync, review, cutoff, now=datetime.now(timezone.utc))
+        try:
+            thresholds.update(
+                validate_sync(sync, review, cutoff, now=datetime.now(timezone.utc))
+            )
+        except SyncEvidenceError as error:
+            sync_findings.update(
+                findings=error.findings, findings_truncated=error.truncated
+            )
+            raise
+        host.recovered_log_review = RecoveredLogReview(sync, review, started_at=started_at)
 
-    # Explicit reviewed boundary: historical evidence remains attached to the
-    # result. Everything after this fixed boundary uses the ordinary strict scan.
+    host.recheck_recovered_sync = check_sync
+
+    # Keep the original inventory and scan every subsequent byte. Only the
+    # reviewed categories with current evidence use the incident-only adapter.
     host.log_since = evidence["until"]
     checks = audit.run_checks(
         [
@@ -339,9 +315,7 @@ def verify(host, value, bundle, review, evidence):
             *host.restored_health_checks(bundle, set()),
         ]
     )
-    if not all(check["result"] == "passed" for check in checks):
-        raise ReviewedHealthError(checks)
-    return {
+    result = {
         "schema_version": 1,
         "attempt_id": recovery.ATTEMPT,
         "result": "restored-production-verified-with-reviewed-history",
@@ -351,6 +325,13 @@ def verify(host, value, bundle, review, evidence):
         "historical_esi_root_cause": "not-recorded",
         "historical_log_evidence_sha256": review["historical_log_evidence_sha256"],
         "current_sync_status": sync,
+        "sync_thresholds": thresholds,
+        "sync_failures": sync_findings,
+        "reviewed_log_findings": (
+            host.recovered_log_review.summary() if host.recovered_log_review else []
+        ),
+        "verification_started_at": started_at.isoformat(),
+        "discord_recovery_established": False,
         "checks": checks,
         "cleanup": "not-run",
         "deployment_performed": False,
@@ -359,6 +340,10 @@ def verify(host, value, bundle, review, evidence):
         "retained_plan_sha256": recovery.PLAN_SHA256,
         "original_journal_sha256": recovery.JOURNAL_SHA256,
     }
+    if not all(check["result"] == "passed" for check in checks):
+        result.update(result="failed", preserve_resources=True)
+        raise ReviewedHealthError(result)
+    return result
 
 
 def main(argv=None):
@@ -377,6 +362,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     lock = None
     cleanup = "not-run"
+    result = {}
     try:
         require(os.geteuid() == 0, "Root-owned reviewed source is required")
         require(
@@ -415,7 +401,7 @@ def main(argv=None):
                 recovery.verify_exhaustion_repair(args.runtime_sha256)
 
         verify_receiver()
-        loaded = DockerHost.load_incomplete_plan(config)
+        loaded = ReviewedDockerHost.load_incomplete_plan(config)
         require(
             loaded is not None, "Pinned recovery plan is missing; do not replay completion"
         )
@@ -471,6 +457,7 @@ def main(argv=None):
                 )
                 cleanup = "not-established"
                 result["recovery"] = host.rollback(bundle, value["phase"])
+                result["reviewed_log_findings"] = host.recovered_log_review.summary()
                 cleanup = result["cleanup"] = "passed"
             result.update(
                 review_sha256=args.review_sha256,
@@ -492,14 +479,10 @@ def main(argv=None):
         print(
             json.dumps(
                 {
+                    **(error.report if isinstance(error, ReviewedHealthError) else result),
                     "result": "failed",
                     "cleanup": cleanup,
                     "preserve_resources": True,
-                    **(
-                        {"checks": error.checks}
-                        if isinstance(error, ReviewedHealthError)
-                        else {}
-                    ),
                     "error": str(error)[:500]
                     if isinstance(error, DeploymentError)
                     else "Invalid or unavailable recovery evidence",

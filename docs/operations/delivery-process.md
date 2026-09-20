@@ -5,18 +5,27 @@ available on the live Auth site still requires verified recovery and a separatel
 approved deployment. A GitHub merge, published release, installed receiver fix,
 and healthy production installation are four different states.
 
-## State established on September 14, 2026
+## State established on September 20, 2026
 
 | Area | Established state | Remaining action |
 | --- | --- | --- |
-| Source | PRs #60–#66 merged; PR #66 merge was `9f607309d38de8d579a5e79a68c5774694ad30a3` | History collection and the owner nickname guard are in source; they are not installed application updates |
+| Source | PRs #60–#67 merged; PR #67 merge was `fd09e816917e263997ef8c0a8933fdf9de30c0b9` | History collection and the owner nickname guard are in source; they are not installed application updates |
 | Release | Immutable v0.6.2 exists at `6074b965cbd2e6ab2630cd539ee455b8d419aef6` | Preserve its bytes; do not infer installation from publication |
-| Server receiver | Owner reported PR #63 installation succeeded; SHA-256 `5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c` | Recheck installed identity when collecting diagnosis |
+| Server receiver | Owner reported PR #63 installation succeeded; SHA-256 `5891086d9656114f2245bed9eea0870f0e8c07c0cd54a8afeaeaef95e702c38c` | PR #67 staged verification failed before installation; recheck pins during the next reviewed operation |
 | Production recovery | Attempt `gh-34713182347-1` reached migrations. Full rollback verification and cleanup remain unresolved | Complete diagnosis, resolve findings, then obtain the applicable recovery approval |
-| Diagnostic health | All 22 functional probes passed; only the original retained log interval failed | Recheck live health during reviewed recovery |
-| Data syncs | A later owner-provided snapshot reports 12/12 Structures owners healthy, 12/12 Moon Mining owners successful and 10/10 refinery ledgers successful | Preserve that evidence and require fresh success flags and timestamps |
-| Remaining receiver case | The installed guard is absent; the final owner nickname retry emits an additional ERROR | Review the exhausted-owner correction and the explicit historical assessment in [reviewed recovery](../../ops/deploy/REVIEWED-RECOVERY.md) |
+| Diagnostic health | PR #67 staged run passed 21 checks; current-sync timing and retained logs blocked it | Recheck live health during reviewed recovery |
+| Data syncs | September 20 snapshots report 12/12 Structures owners healthy, 12/12 Moon Mining owners successful, 10/10 refinery ledgers successful, and 133/133 active Member Audit asset attempts successful | Preserve that evidence and require fresh success flags and timestamps |
+| Remaining receiver case | The installed guard is absent; the final owner nickname retry emits an additional ERROR | Use the approved exhausted-owner payload with corrected staged checks and the explicit historical assessment in [reviewed recovery](../../ops/deploy/REVIEWED-RECOVERY.md) |
 | New publication/deployment | Active recovery hold; the previous continuation was consumed | Keep production held until recovery is verified and its hold is retired through review |
+
+The September 20 review confirmed two additional causes of misleading failures:
+Moon Tax refreshes ledgers every four hours, while PR #67 required two-hour
+freshness; and the character from the historical assets 404 was re-registered
+under a new internal primary key. Its stable EVE identity now has a successful
+assets update. Five consecutive four-hour Moon Tax audits were COMPLETE. These
+observations support the corrected staged checks; they are not a production
+verification or cleanup receipt. No more broad diagnostic collection is needed
+unless a named check returns new evidence.
 
 The complete historical inventory accounts for 26 ESI task errors whose HTTP
 status was not recorded, owner nickname 403/code 50013 responses and exhausted
