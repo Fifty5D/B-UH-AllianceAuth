@@ -164,6 +164,7 @@ class RecoveredLogReview:
             item["previous_character_pk"]: by_identity[item["eve_character_id"]]
             for item in review["asset_recoveries"]
         }
+        self.asset_incidents = {}
         self.groups = {}
 
     def retain(self, kind, source, lines, event):
@@ -195,7 +196,7 @@ class RecoveredLogReview:
             for (kind, source), group in sorted(self.groups.items())
         ]
 
-    def classify(self, lines, *, services_worker):
+    def classify(self, lines, *, services_worker, source):
         details = header(lines[0]) if lines else None
         if details is None:
             return None
@@ -241,7 +242,14 @@ class RecoveredLogReview:
             if name in self.task_success and self.task_success[name] >= event_end:
                 return "ESI-task-error-followed-by-success"
             if name == ASSET_TASK and self.all_assets_success >= event_end:
-                return "assets-task-error-followed-by-success"
+                incident = self.asset_incidents.get(source)
+                if (
+                    incident
+                    and incident["at"] == event
+                    and incident["consumed"] < len(incident["characters"])
+                ):
+                    incident["consumed"] += 1
+                    return "assets-task-error-followed-by-success"
         if level == "ERROR" and logger in {"celery", "memberaudit.models.characters"}:
             match = re.fullmatch(
                 r".{1,200} \(ID:([1-9][0-9]*)\): assets: Error occurred: HTTPClientError:.*",
@@ -261,6 +269,14 @@ class RecoveredLogReview:
                     )
                     >= event_end
                 ):
+                    incident = self.asset_incidents.get(source)
+                    if incident is None or incident["at"] != event:
+                        incident = self.asset_incidents[source] = {
+                            "at": event,
+                            "characters": set(),
+                            "consumed": 0,
+                        }
+                    incident["characters"].add(original)
                     return "assets-404-followed-by-success"
         if (
             services_worker
@@ -333,7 +349,7 @@ class ReviewedDockerHost(DockerHost):
             for record in records(text):
                 try:
                     kind = review.classify(
-                        record, services_worker=service.endswith("_services")
+                        record, services_worker=service.endswith("_services"), source=source
                     )
                 except MetadataLogError:
                     remaining.append(

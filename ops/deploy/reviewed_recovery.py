@@ -362,6 +362,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     lock = None
     cleanup = "not-run"
+    result = {}
     try:
         require(os.geteuid() == 0, "Root-owned reviewed source is required")
         require(
@@ -478,10 +479,10 @@ def main(argv=None):
         print(
             json.dumps(
                 {
+                    **(error.report if isinstance(error, ReviewedHealthError) else result),
                     "result": "failed",
                     "cleanup": cleanup,
                     "preserve_resources": True,
-                    **(error.report if isinstance(error, ReviewedHealthError) else {}),
                     "error": str(error)[:500]
                     if isinstance(error, DeploymentError)
                     else "Invalid or unavailable recovery evidence",

@@ -325,7 +325,7 @@ class ReviewedRecoveryTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(host, "restored_health_checks", side_effect=health)
             )
-            stack.enter_context(
+            probe = stack.enter_context(
                 mock.patch.object(reviewed, "live_sync_probe", return_value=status)
             )
             stack.enter_context(
@@ -381,6 +381,10 @@ class ReviewedRecoveryTests(unittest.TestCase):
             clock.fromisoformat.side_effect = datetime.fromisoformat
             if fail == "sync":
                 status["moonmining_owners"][0]["last_update_ok"] = False
+            if fail == "resync":
+                changed = deepcopy(status)
+                changed["moonmining_owners"][0]["last_update_ok"] = False
+                probe.side_effect = [status, changed]
             if fail == "pins":
                 pins.side_effect = DeploymentError("receiver changed")
             if fail == "receipt":
@@ -414,7 +418,7 @@ class ReviewedRecoveryTests(unittest.TestCase):
                     self.assertTrue(
                         any(check["result"] == "failed" for check in result["checks"])
                     )
-                if fail == "sync":
+                if fail in {"sync", "resync"}:
                     self.assertEqual(
                         result["sync_failures"]["findings"][0]["field"], "last_update_ok"
                     )
@@ -456,6 +460,6 @@ class ReviewedRecoveryTests(unittest.TestCase):
     def test_failures_keep_resources_and_do_not_hide_later_health_results(self):
         self.exercise_main("verify", before_install=True, fail="logs")
         self.exercise_main("complete", before_install=True, fail="approval")
-        for failure in ("approval", "pins", "receipt", "sync", "logs"):
+        for failure in ("approval", "pins", "receipt", "sync", "resync", "logs"):
             with self.subTest(failure=failure):
                 self.exercise_main("complete", fail=failure)

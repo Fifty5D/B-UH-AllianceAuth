@@ -150,7 +150,7 @@ class RecoveredLogTests(unittest.TestCase):
         )
 
     def test_every_reviewed_task_requires_later_success_and_retains_digest(self):
-        for task in (*TASK_CLOCKS, ASSET_TASK):
+        for task in TASK_CLOCKS:
             text = task_error(task)
             self.assertTrue(self.classify(text))
             self.assertTrue(self.host.recovered_log_review.summary())
@@ -159,7 +159,7 @@ class RecoveredLogTests(unittest.TestCase):
             with self.assertRaises(LogScanError):
                 self.classify(task_error(task, clock="2026-10-01 12:00:00"))
         self.assertEqual(
-            sum(x["log_records"] for x in self.host.recovered_log_review.summary()), 5
+            sum(x["log_records"] for x in self.host.recovered_log_review.summary()), 4
         )
         self.assertNotIn("synthetic/tasks", str(self.host.recovered_log_review.summary()))
 
@@ -182,6 +182,8 @@ class RecoveredLogTests(unittest.TestCase):
                 self.classify(task_error(task), phase=phase)
         with self.assertRaises(LogScanError):
             self.classify(task_error("unrelated.tasks.update"))
+        with self.assertRaises(LogScanError):
+            self.classify(task_error(ASSET_TASK))  # No identified assets failure.
         with self.assertRaises(LogScanError):
             self.classify(task_error(task), source=self.service + "/000000000002")
         self.host.recovery_baseline_verified = False
@@ -207,6 +209,9 @@ class RecoveredLogTests(unittest.TestCase):
             "esi.exceptions.HTTPClientError\n"
         )
         self.assertTrue(self.classify(text))
+        self.assertTrue(self.classify(task_error(ASSET_TASK)))
+        with self.assertRaises(LogScanError):
+            self.classify(task_error(ASSET_TASK))  # Cannot reuse a matched incident.
         for changed in (
             text.replace("ID:5", "ID:6"),
             text.replace("404", "403"),

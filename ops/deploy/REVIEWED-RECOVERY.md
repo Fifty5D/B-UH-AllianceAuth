@@ -55,6 +55,8 @@ Ordinary deployment, candidate, infrastructure, and new-worker checks stay stric
   active character. An explicit stable EVE identity binds a retired internal
   primary key to its current registration. A missing or disabled replacement,
   unsuccessful status, token error, or missing status row blocks recovery.
+  A generic assets-task error also requires an identified, recovered 404 on the
+  same worker and second; that matching incident cannot be reused for another task.
 - Complete historical Discord 429/503 response records remain dependency warnings;
   this does not establish Discord recovery. Permission errors, other operations,
   malformed responses and errors during the current verification remain blocking.
