@@ -82,9 +82,15 @@ Timestamps must follow the original reviewed boundary and be fresh:
 
 The installed Moon Tax dispatcher wakes hourly but refreshes sources only when
 its configured four-hour audit is due. That gives a **5 hour 15 minute** ledger
-bound, not the old two-hour bound. A recent COMPLETE audit, chronological source
-refresh, fresh scheduler heartbeat and ledger successes after that audit's source
-request are all required. Missing, disabled, ambiguous or unsupported schedules
+bound, not the old two-hour bound. The newest audit must have reconciled with
+status COMPLETE or a narrowly evidenced WARNING. A WARNING is accepted as
+source-refresh evidence only when every warning records insufficient Jita buy
+depth and the count matches incomplete price snapshots belonging to that audit.
+Its valuation remains explicitly incomplete in the report; pricing, tax amounts
+and accounting warnings are unchanged. Unknown warnings, an error, inconsistent
+snapshot counts, or a newer failed or unfinished audit block verification.
+Chronological source refresh, a fresh scheduler heartbeat and ledger successes
+after that audit's source request are all required. Missing, disabled, ambiguous or unsupported schedules
 never silently use a default. Member Audit likewise uses its actual section
 configuration instead of treating its 15-minute dispatcher as the assets cadence.
 Completion re-reads sync evidence before the final rollback health checks.

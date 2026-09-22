@@ -13,8 +13,10 @@ class BuhMaxHistoryConfig(AppConfig):
     def ready(self) -> None:
         from . import checks  # noqa: F401
         from .capture import install_esi_archive_hooks
+        from .memberaudit_compat import install_memberaudit_esi_status_guard
 
         install_esi_archive_hooks()
+        install_memberaudit_esi_status_guard()
         from .local_history import install_business_history_hooks
 
         install_business_history_hooks()

@@ -26,18 +26,88 @@ def stamp(value):
 
 PROBE_CODE = """
 import json
+import re
+from decimal import Decimal
 from django.conf import settings
 from django.utils.timezone import now
 from django_celery_beat.models import PeriodicTask
 from structures.models import Owner as S
 from moonmining.models import Owner as M, Refinery as R
-from buh_moon_tax.models import TaxConfiguration, AuditRun
+from buh_moon_tax.models import TaxConfiguration, AuditRun, PriceSnapshot
 from memberaudit.models import Character, CharacterUpdateStatus
 
 def schedules(task):
     return list(PeriodicTask.objects.filter(task=task).values(
         'enabled', 'last_run_at', 'interval__every', 'interval__period',
         'crontab_id', 'clocked_id', 'solar_id')[:21])
+
+def latest_audit():
+    row = AuditRun.objects.order_by('-queued_at', '-pk').values(
+        'pk', 'status', 'queued_at', 'source_refresh_requested_at', 'finished_at',
+        'warnings', 'error').first()
+    if row is None:
+        return []
+    audit_pk = row.pop('pk')
+    warnings = row.pop('warnings')
+    categories = {}
+    schema_valid = isinstance(warnings, list)
+    if schema_valid:
+        depth_warning = re.compile(
+            r'Jita buy depth was insufficient for .+; '
+            r'[0-9]+(?:\\.[0-9]+)?(?:E[+-]?[0-9]+)? '
+            r'compressed units were not priced\\.'
+        )
+        for warning in warnings:
+            if isinstance(warning, str) and depth_warning.fullmatch(warning):
+                category = 'jita-depth-insufficient'
+            else:
+                schema_valid = False
+                category = 'unrecognized'
+            categories[category] = categories.get(category, 0) + 1
+    snapshots = PriceSnapshot.objects.filter(audit_run_id=audit_pk)
+    incomplete = list(snapshots.filter(complete=False).values(
+        'requested_quantity', 'priced_quantity', 'source', 'raw_evidence'))
+    depth_snapshots = 0
+    snapshot_schema_valid = True
+    evidence_fields = {
+        'orders_considered', 'orders_used', 'best_price', 'worst_price', 'shortfall'
+    }
+    for snapshot in incomplete:
+        evidence = snapshot['raw_evidence']
+        try:
+            shortfall = Decimal(evidence['shortfall'])
+            is_depth = (
+                snapshot['source'] == 'ESI Jita 4-4 buy-order depth'
+                and isinstance(evidence, dict)
+                and set(evidence) == evidence_fields
+                and type(evidence['orders_considered']) is int
+                and type(evidence['orders_used']) is int
+                and 0 <= evidence['orders_used'] <= evidence['orders_considered']
+                and isinstance(evidence['best_price'], str)
+                and isinstance(evidence['worst_price'], str)
+                and snapshot['requested_quantity'] > snapshot['priced_quantity'] >= 0
+                and shortfall > 0
+                and shortfall == (
+                    snapshot['requested_quantity'] - snapshot['priced_quantity']
+                )
+            )
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            is_depth = False
+        if is_depth:
+            depth_snapshots += 1
+        else:
+            snapshot_schema_valid = False
+    row.update(
+        warning_schema_valid=schema_valid,
+        warning_count=len(warnings) if isinstance(warnings, list) else None,
+        warning_categories=categories,
+        has_error=bool(row.pop('error')),
+        price_snapshot_count=snapshots.count(),
+        incomplete_price_snapshot_count=len(incomplete),
+        incomplete_price_snapshot_schema_valid=snapshot_schema_valid,
+        jita_depth_incomplete_price_snapshot_count=depth_snapshots,
+    )
+    return [row]
 
 result = {
     'captured_at': now().isoformat(), 'log_timezone': settings.TIME_ZONE,
@@ -52,9 +122,9 @@ result = {
     'moon_tax_config': list(TaxConfiguration.objects.filter(singleton_id=1)
         .values('audit_interval_hours')[:2]),
     'moon_tax_schedule': schedules('buh_moon_tax.tasks.run_scheduled_audit'),
-    'completed_audits': list(AuditRun.objects.filter(status='COMPLETE')
-        .order_by('-queued_at').values('queued_at', 'source_refresh_requested_at',
-        'finished_at')[:1]),
+    # Keep the established key while making the newest audit authoritative. A
+    # newer failed or unfinished run must not be hidden by an older COMPLETE run.
+    'completed_audits': latest_audit(),
     'asset_stale_minutes': Character.UpdateSection.time_until_section_updates_are_stale()
         .get(Character.UpdateSection.ASSETS),
     'memberaudit_schedule': schedules('memberaudit.tasks.run_regular_updates'),
@@ -150,6 +220,10 @@ def validate_sync(status, review, cutoff, *, now):
     )
     audits = status.get("completed_audits", [])
     ledger_after = cutoff
+    audit_status = None
+    warning_categories = None
+    incomplete_valuations = None
+    valuation_complete = None
     if len(audits) != 1 or ledger_age is None:
         fail(
             "completed_audits",
@@ -159,6 +233,95 @@ def validate_sync(status, review, cutoff, *, now):
         )
     else:
         row = audits[0]
+        audit_status = row.get("status")
+        warning_count = row.get("warning_count")
+        warning_categories = row.get("warning_categories")
+        incomplete_valuations = row.get("incomplete_price_snapshot_count")
+        depth_incomplete_valuations = row.get(
+            "jita_depth_incomplete_price_snapshot_count"
+        )
+        snapshot_count = row.get("price_snapshot_count")
+        warning_shape_valid = (
+            row.get("warning_schema_valid") is True
+            and type(warning_count) is int
+            and warning_count >= 0
+            and isinstance(warning_categories, dict)
+            and all(
+                isinstance(category, str)
+                and type(count) is int
+                and count > 0
+                for category, count in warning_categories.items()
+            )
+            and sum(warning_categories.values()) == warning_count
+        )
+        snapshot_shape_valid = (
+            type(snapshot_count) is int
+            and snapshot_count >= 0
+            and type(incomplete_valuations) is int
+            and 0 <= incomplete_valuations <= snapshot_count
+            and row.get("incomplete_price_snapshot_schema_valid") is True
+            and type(depth_incomplete_valuations) is int
+            and 0 <= depth_incomplete_valuations <= incomplete_valuations
+        )
+        if audit_status not in {"COMPLETE", "WARNING"}:
+            fail(
+                "completed_audits",
+                None,
+                "status",
+                "latest-audit-not-reconciled",
+                value=audit_status,
+            )
+        if row.get("has_error") is not False:
+            fail(
+                "completed_audits",
+                None,
+                "has_error",
+                "latest-audit-has-error-or-invalid-error-evidence",
+            )
+        if not warning_shape_valid:
+            fail(
+                "completed_audits",
+                None,
+                "warning_categories",
+                "invalid-audit-warning-evidence",
+            )
+        if not snapshot_shape_valid:
+            fail(
+                "completed_audits",
+                None,
+                "incomplete_price_snapshot_count",
+                "invalid-valuation-snapshot-evidence",
+            )
+        if warning_shape_valid and snapshot_shape_valid:
+            if audit_status == "COMPLETE":
+                valuation_complete = True
+                if warning_count != 0 or warning_categories or incomplete_valuations != 0:
+                    fail(
+                        "completed_audits",
+                        None,
+                        "warning_categories",
+                        "complete-audit-has-warning-or-incomplete-valuation",
+                    )
+            elif audit_status == "WARNING":
+                valuation_complete = False
+                expected = {"jita-depth-insufficient": warning_count}
+                if (
+                    warning_count == 0
+                    or warning_categories != expected
+                    or incomplete_valuations != warning_count
+                    or depth_incomplete_valuations != warning_count
+                ):
+                    fail(
+                        "completed_audits",
+                        None,
+                        "warning_categories",
+                        "warning-audit-not-limited-to-matched-jita-depth",
+                        warning_count=warning_count,
+                        incomplete_price_snapshot_count=incomplete_valuations,
+                        jita_depth_incomplete_price_snapshot_count=(
+                            depth_incomplete_valuations
+                        ),
+                    )
         for field in ("queued_at", "source_refresh_requested_at", "finished_at"):
             clock("completed_audits", row, field, ledger_age)
         try:
@@ -274,6 +437,11 @@ def validate_sync(status, review, cutoff, *, now):
         "ledger_max_age_seconds": ledger_age,
         "audit_interval_hours": hours,
         "audit_dispatch_seconds": dispatch,
+        "moon_tax_audit_status": audit_status,
+        "moon_tax_reconciliation_complete": True,
+        "moon_tax_warning_categories": warning_categories,
+        "moon_tax_incomplete_valuation_count": incomplete_valuations,
+        "moon_tax_valuation_complete": valuation_complete,
         "queue_grace_seconds": QUEUE_GRACE_SECONDS,
         "asset_max_age_seconds": asset_age,
         "active_asset_characters": len(active),

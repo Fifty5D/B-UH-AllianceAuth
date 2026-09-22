@@ -41,11 +41,20 @@ class SyncScheduleTests(unittest.TestCase):
             clock = NOW - timedelta(hours=hours)
             candidate["completed_audits"] = [
                 {
+                    "status": "COMPLETE",
                     "queued_at": (clock - timedelta(minutes=3)).isoformat(),
                     "source_refresh_requested_at": (
                         clock - timedelta(minutes=3)
                     ).isoformat(),
                     "finished_at": (clock + timedelta(minutes=1)).isoformat(),
+                    "warning_schema_valid": True,
+                    "warning_count": 0,
+                    "warning_categories": {},
+                    "has_error": False,
+                    "price_snapshot_count": 0,
+                    "incomplete_price_snapshot_count": 0,
+                    "incomplete_price_snapshot_schema_valid": True,
+                    "jita_depth_incomplete_price_snapshot_count": 0,
                 }
             ]
             candidate["refineries"][0]["ledger_last_update_at"] = clock.isoformat()
@@ -63,6 +72,73 @@ class SyncScheduleTests(unittest.TestCase):
                     self.assertEqual(finding["field"], "ledger_last_update_at")
                     self.assertEqual(finding["maximum_age_seconds"], 18900)
                     self.assertEqual(finding["age_seconds"], 21600)
+
+    def test_jita_depth_warning_proves_reconciliation_but_retains_incomplete_valuation(
+        self,
+    ):
+        _, review, status = fixture()
+        audit = status["completed_audits"][0]
+        audit.update(
+            status="WARNING",
+            warning_count=1,
+            warning_categories={"jita-depth-insufficient": 1},
+            price_snapshot_count=3,
+            incomplete_price_snapshot_count=1,
+            jita_depth_incomplete_price_snapshot_count=1,
+        )
+
+        result = validate_sync(status, review, stamp(CUTOFF), now=NOW)
+
+        self.assertEqual(result["moon_tax_audit_status"], "WARNING")
+        self.assertTrue(result["moon_tax_reconciliation_complete"])
+        self.assertFalse(result["moon_tax_valuation_complete"])
+        self.assertEqual(
+            result["moon_tax_warning_categories"], {"jita-depth-insufficient": 1}
+        )
+        self.assertEqual(result["moon_tax_incomplete_valuation_count"], 1)
+
+    def test_latest_failed_or_unfinished_audit_cannot_fall_back_to_older_success(self):
+        _, review, status = fixture()
+        for audit_status in ("FAILED", "QUEUED", "REFRESHING", "RUNNING"):
+            candidate = deepcopy(status)
+            candidate["completed_audits"][0]["status"] = audit_status
+            with self.subTest(status=audit_status), self.assertRaises(
+                SyncEvidenceError
+            ) as caught:
+                validate_sync(candidate, review, stamp(CUTOFF), now=NOW)
+            self.assertTrue(
+                any(
+                    finding["reason"] == "latest-audit-not-reconciled"
+                    for finding in caught.exception.findings
+                )
+            )
+
+    def test_malformed_unknown_error_and_mismatched_warning_evidence_blocks(self):
+        _, review, status = fixture()
+        base = deepcopy(status)
+        base["completed_audits"][0].update(
+            status="WARNING",
+            warning_count=1,
+            warning_categories={"jita-depth-insufficient": 1},
+            price_snapshot_count=1,
+            incomplete_price_snapshot_count=1,
+            jita_depth_incomplete_price_snapshot_count=1,
+        )
+        mutations = (
+            ("warning_schema_valid", False),
+            ("warning_count", 2),
+            ("warning_categories", {"unrecognized": 1}),
+            ("has_error", True),
+            ("price_snapshot_count", 0),
+            ("incomplete_price_snapshot_count", 0),
+            ("incomplete_price_snapshot_schema_valid", False),
+            ("jita_depth_incomplete_price_snapshot_count", 0),
+        )
+        for field, value in mutations:
+            candidate = deepcopy(base)
+            candidate["completed_audits"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(SyncEvidenceError):
+                validate_sync(candidate, review, stamp(CUTOFF), now=NOW)
 
     def test_missing_ambiguous_disabled_stale_or_unknown_cadence_never_defaults(self):
         _, review, status = fixture()
