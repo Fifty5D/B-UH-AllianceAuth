@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Use the newest reconciled Moon Tax audit as source-refresh evidence, retain insufficient market-depth warnings, and reject failed or unfinished audits and inconsistent valuation evidence."

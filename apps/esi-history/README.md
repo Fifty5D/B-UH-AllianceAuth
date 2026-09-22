@@ -1,5 +1,13 @@
 # ESI History Archive
 
+The application also installs a compatibility fix for Member Audit 5.0.4's ESI
+status parser. Valid unavailable routes unrelated to Member Audit's data sections
+(including DELETE fittings routes) no longer abort every character update. Required
+GET and POST routes still suppress their affected sections, and malformed status
+evidence prevents dispatch. The fix is idempotent and limited to that dependency
+version. It does not change token scopes, token-error flags, permissions or the
+update schedule; existing token failures still require separate investigation.
+
 Owned source for `aa-buh-max-history`. Distribution, Django label, permissions,
 URLs and existing task names retain their identities. The ordinary release
 planner versions and builds this application; no receiver patch is needed.

@@ -1,0 +1,4 @@
+schema_version = 1
+app = "esi-history"
+kind = "fix"
+summary = "Keep Member Audit updates running when ESI reports unrelated non-GET routes down while preserving unavailable-section and malformed-status safeguards."

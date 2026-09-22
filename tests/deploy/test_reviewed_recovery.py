@@ -150,9 +150,18 @@ def fixture():
         moon_tax_schedule=schedule(3600),
         completed_audits=[
             {
+                "status": "COMPLETE",
                 "queued_at": requested,
                 "source_refresh_requested_at": requested,
                 "finished_at": clock,
+                "warning_schema_valid": True,
+                "warning_count": 0,
+                "warning_categories": {},
+                "has_error": False,
+                "price_snapshot_count": 0,
+                "incomplete_price_snapshot_count": 0,
+                "incomplete_price_snapshot_schema_valid": True,
+                "jita_depth_incomplete_price_snapshot_count": 0,
             }
         ],
         asset_stale_minutes=240,

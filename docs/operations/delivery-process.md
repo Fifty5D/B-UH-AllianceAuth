@@ -5,6 +5,30 @@ available on the live Auth site still requires verified recovery and a separatel
 approved deployment. A GitHub merge, published release, installed receiver fix,
 and healthy production installation are four different states.
 
+## September 22 diagnostic follow-up
+
+The later read-only report confirms that Moon Tax continues to reconcile with
+the configured four-hour interval. Recent WARNING audits report insufficient Jita buy depth; the old
+COMPLETE-only selector overlooked them. The updated sync check recognizes only
+that specific warning with matching incomplete price snapshots, while retaining
+the valuation warning. Moon Mining's previously pending owner subsequently
+reported success, as did the other enabled owners.
+
+Member Audit 5.0.4 also reproduces a parser failure when an unrelated DELETE
+route is Down. The owned compatibility fix keeps required unavailable sections
+effective and rejects malformed evidence. It takes effect only after the new
+application release is installed. It does not repair stored token-error flags.
+
+Recovery remains unresolved while active token failures, continuing Discord
+nickname permission failures and unclassified database OperationalError records
+are being investigated. Reading all retained streams does not reconstruct logs
+already rotated away, and capped traceback metadata is not evidence of a clean
+interval. A targeted follow-up needs grant metadata without token refresh,
+current Structures eligibility, exact database error codes and exact configured
+Discord-owner matching. Preserve every unresolved category and the active holds;
+do not rerun the earlier installation launcher unchanged or weaken historical
+classification to make it pass.
+
 ## State established on September 20, 2026
 
 | Area | Established state | Remaining action |
