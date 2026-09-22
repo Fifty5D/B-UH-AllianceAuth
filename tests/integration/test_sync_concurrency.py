@@ -5,16 +5,16 @@ from datetime import timedelta
 from threading import Barrier, Lock
 from unittest.mock import patch
 
-from app_utils.testdata_factories import EveCharacterFactory
+from allianceauth.eveonline.models import EveCharacter, EveCorporationInfo
 from django.contrib.auth import get_user_model
 from django.db import OperationalError, close_old_connections, connection
 from django.test import TransactionTestCase
 from django.utils.timezone import now
 from esi.managers import TokenManager
 from esi.models import Token
+from eveuniverse.models import EveCategory, EveGroup, EveType
 from moonmining.managers import ExtractionQuerySet
-from moonmining.models import Extraction, Owner
-from moonmining.tests.testdata.factories import ExtractionFactory
+from moonmining.models import Extraction, Owner, Refinery
 from oauthlib.oauth2.rfc6749.errors import InvalidGrantError
 
 
@@ -25,7 +25,10 @@ class SyncConcurrencyTests(TransactionTestCase):
 
     def test_concurrent_refresh_and_cleanup_preserve_one_rotating_grant(self):
         user = get_user_model().objects.create_user("integration-token-owner")
-        EveCharacterFactory(character_id=90000002)
+        EveCharacter.objects.create(
+            character_id=90000002, character_name="Synthetic",
+            corporation_id=98000001, corporation_name="Synthetic Corporation",
+        )
         token = Token.objects.create(
             user=user, character_id=90000002, character_name="Synthetic",
             character_owner_hash="owner", access_token="old-access", refresh_token="old-refresh",
@@ -67,7 +70,23 @@ class SyncConcurrencyTests(TransactionTestCase):
         self.assertEqual(Token.objects.get(pk=token.pk).refresh_token, "new-refresh")
 
     def test_deadlock_retries_only_sql_after_rolling_back_partial_transition(self):
-        extraction = ExtractionFactory(
+        corporation = EveCorporationInfo.objects.create(
+            corporation_id=98000002, corporation_name="Synthetic Moon Corporation",
+            corporation_ticker="SYN",
+        )
+        owner = Owner.objects.create(corporation=corporation)
+        category = EveCategory.objects.create(id=65, name="Structure", published=True)
+        group = EveGroup.objects.create(
+            id=1406, name="Refinery", eve_category=category, published=True,
+        )
+        eve_type = EveType.objects.create(
+            id=35835, name="Synthetic Athanor", eve_group=group, published=True,
+        )
+        refinery = Refinery.objects.create(
+            id=1000000000001, name="Synthetic Refinery", owner=owner, eve_type=eve_type,
+        )
+        extraction = Extraction.objects.create(
+            refinery=refinery, started_at=now() - timedelta(days=1),
             chunk_arrival_at=now() - timedelta(hours=1),
             auto_fracture_at=now() + timedelta(hours=1), status=Extraction.Status.STARTED,
         )
