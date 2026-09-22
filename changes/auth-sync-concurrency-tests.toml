@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "internal"
+summary = "Verify ESI refresh versus cleanup and extraction deadlock rollback boundaries against MariaDB with synthetic grants and extraction data."
