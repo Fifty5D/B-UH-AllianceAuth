@@ -217,12 +217,17 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
         event_path.write_text(json.dumps(request or event()), encoding="ascii")
         output = self.root / "approval.json"
         stdout, stderr = io.StringIO(), io.StringIO()
-        status = approval.main([
-            "boundary", "--owner", "Fifty5D", "--repository", continuation.REPOSITORY,
-            "--actor", "Fifty5D", "--triggering-actor", "Fifty5D", "--run-attempt", "1",
-            "--api-url", "https://api.github.com", "--server-url", "https://github.com",
-            "--event", str(event_path), "--output", str(output),
-        ], environment=env or environment(), stdout=stdout, stderr=stderr)
+        with mock.patch.object(
+            approval.validation_recovery,
+            "DEFAULT_CONTRACT",
+            approval.validation_recovery.HISTORICAL_CONTRACT,
+        ):
+            status = approval.main([
+                "boundary", "--owner", "Fifty5D", "--repository", continuation.REPOSITORY,
+                "--actor", "Fifty5D", "--triggering-actor", "Fifty5D", "--run-attempt", "1",
+                "--api-url", "https://api.github.com", "--server-url", "https://github.com",
+                "--event", str(event_path), "--output", str(output),
+            ], environment=env or environment(), stdout=stdout, stderr=stderr)
         if status:
             raise AssertionError(stderr.getvalue())
         return json.loads(output.read_text(encoding="ascii"))
@@ -359,7 +364,13 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
             _git(checkout, "merge", "--quiet", "--no-ff", head, "-m", "test-only repair merge")
             merge = _git(checkout, "rev-parse", "HEAD")
             tree = _git(checkout, "rev-parse", "HEAD^{tree}")
-            held = approval.validation_recovery.validate_hold(checkout, merge, contract=approval.validation_recovery.load_contract())
+            held = approval.validation_recovery.validate_hold(
+                checkout,
+                merge,
+                contract=approval.validation_recovery.load_contract(
+                    approval.validation_recovery.HISTORICAL_CONTRACT
+                ),
+            )
             self.assertEqual(held["state"], "approved-deployment-continuation-held")
             self.assertEqual(_git(checkout, "diff", "--name-only", continuation.SYNC_MERGE, merge, "--", "releases"), "")
             # Reject even a single out-of-scope runtime edit in the hold.

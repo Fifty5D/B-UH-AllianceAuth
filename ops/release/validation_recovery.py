@@ -248,7 +248,9 @@ def _sha256(value: Any, *, context: str, prefixed: bool = False) -> str:
     return value
 
 
-def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
+def load_contract(path: Path | None = None) -> dict[str, Any]:
+    if path is None:
+        path = DEFAULT_CONTRACT
     try:
         raw = path.read_bytes()
     except OSError as exc:

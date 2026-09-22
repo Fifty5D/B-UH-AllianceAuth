@@ -374,6 +374,18 @@ class RecoveryRepository:
 
 
 class PublishedReleaseRecoveryTests(unittest.TestCase):
+    def test_default_contract_stays_bound_to_the_active_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "retired-recovery-contract.json"
+            with mock.patch.object(recovery, "DEFAULT_CONTRACT", missing):
+                with self.assertRaisesRegex(
+                    recovery.ValidationRecoveryError,
+                    "contract is unavailable",
+                ):
+                    recovery.load_contract()
+        historical = recovery.load_contract(recovery.HISTORICAL_CONTRACT)
+        self.assertEqual(historical["recovery_id"], recovery.RECOVERY_ID)
+
     def test_repository_contract_is_canonical_and_pinned(self) -> None:
         contract = recovery.load_contract(
             ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"

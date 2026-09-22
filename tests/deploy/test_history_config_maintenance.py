@@ -89,6 +89,16 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
             runtime=runtime,
             backup_root=maintenance_backup,
         )
+        # Model root-owned fixture files without requiring the test runner to
+        # be root. Reads, mode checks, atomic replacement and fsync remain real.
+        real_fstat = os.fstat
+        real_lstat = Path.lstat
+
+        def root_owned(details):
+            values = list(details)
+            values[4:6] = [0, 0]
+            return os.stat_result(values)
+
         self.patches = (
             mock.patch.object(
                 maintenance, "_verify_root_owned_ancestors", return_value=None
@@ -99,6 +109,17 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
                 return_value=None,
             ),
             mock.patch.object(os, "geteuid", return_value=0),
+            mock.patch.object(
+                os, "fstat", side_effect=lambda fd: root_owned(real_fstat(fd))
+            ),
+            mock.patch.object(
+                Path, "lstat", autospec=True,
+                side_effect=lambda path: root_owned(real_lstat(path)),
+            ),
+            mock.patch.object(
+                os, "fchown", create=True,
+                side_effect=AssertionError("Fixtures must not require privileged chown"),
+            ),
             mock.patch.object(maintenance, "_open_lock", side_effect=self._lock),
         )
         for patcher in self.patches:
@@ -163,6 +184,18 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
         self._write(state / "active-recovery.json", b"{}\n")
         with self.assertRaisesRegex(DeploymentError, "Recovery is still active"):
             maintenance.build_plan(self.paths, verify_repairs=False)
+
+    def test_untrusted_file_owner_is_blocked(self):
+        fixture_stat = os.fstat
+
+        def untrusted_owner(descriptor):
+            values = list(fixture_stat(descriptor))
+            values[4] = 1001
+            return os.stat_result(values)
+
+        with mock.patch.object(os, "fstat", side_effect=untrusted_owner):
+            with self.assertRaisesRegex(DeploymentError, "provenance is unsafe"):
+                maintenance.build_plan(self.paths, verify_repairs=False)
 
     def test_incomplete_recovery_receipt_is_blocked(self):
         state = Path(json.loads(self.original)["state_dir"])

@@ -9,6 +9,7 @@ import unittest
 from ops.release import ci_scope, delivery_state
 
 ROOT = Path(__file__).resolve().parents[2]
+HISTORICAL_HOLD = ROOT / "ops/release/history/recovery-hold.json"
 
 
 class DeliveryProcessTests(unittest.TestCase):
@@ -54,7 +55,7 @@ class DeliveryProcessTests(unittest.TestCase):
         return path
 
     def test_active_hold_allows_arbitrary_feature_commits_without_claiming_deployment(self):
-        hold = json.loads((ROOT / delivery_state.HOLD_PATH).read_text())
+        hold = json.loads(HISTORICAL_HOLD.read_text())
         self.write_hold(hold)
         (self.root / "feature.py").write_text("print('new feature')\n")
         head = self.commit()
@@ -65,7 +66,7 @@ class DeliveryProcessTests(unittest.TestCase):
         self.assertIsNone(report["installed_release"])
 
     def test_malformed_and_symlink_holds_fail_closed(self):
-        valid = json.loads((ROOT / delivery_state.HOLD_PATH).read_text())
+        valid = json.loads(HISTORICAL_HOLD.read_text())
         for key, value in (("state", "inactive"), ("attempt_id", []), ("target_release", None), ("reason", "")):
             path = self.write_hold({**valid, key: value})
             with self.assertRaises(ValueError):

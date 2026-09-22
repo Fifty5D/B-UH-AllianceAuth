@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "repository": "Fifty5D/B-UH-AllianceAuth",
+  "state": "active",
+  "attempt_id": "gh-34713182347-1",
+  "target_release": "0.6.2",
+  "reason": "Recovery verification and completion remain unresolved. Receiver repairs alone do not establish recovery.",
+  "next_action": "Collect the complete read-only recovery audit, resolve its findings, then approve and verify recovery completion before retiring this hold."
+}

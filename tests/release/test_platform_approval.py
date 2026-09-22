@@ -3384,7 +3384,9 @@ class PlatformApprovalTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        contract = approval.validation_recovery.load_contract()
+        contract = approval.validation_recovery.load_contract(
+            approval.validation_recovery.HISTORICAL_CONTRACT
+        )
         release = contract["release"]
         config = approval._config(
             owner=OWNER,
@@ -4174,6 +4176,10 @@ class PlatformApprovalTests(unittest.TestCase):
                 approval.validation_recovery,
                 "load_contract",
                 return_value=contract,
+            ), patch.object(
+                approval.validation_recovery,
+                "DEFAULT_CONTRACT",
+                approval.validation_recovery.HISTORICAL_CONTRACT,
             ):
                 temporary = Path(temp)
                 sync_update_path = temporary / "sync-update.json"
@@ -4358,6 +4364,10 @@ class PlatformApprovalTests(unittest.TestCase):
                 approval.validation_recovery,
                 "load_contract",
                 return_value=contract,
+            ), patch.object(
+                approval.validation_recovery,
+                "DEFAULT_CONTRACT",
+                approval.validation_recovery.HISTORICAL_CONTRACT,
             ):
                 behind = FinalRecoveryTransport(ready=True)
                 behind.pr_mergeable_state = "behind"

@@ -66,7 +66,9 @@ class WorkerRepairHoldTests(unittest.TestCase):
             )
             merge = git(checkout, "rev-parse", "HEAD")
             held = recovery.validate_hold(
-                checkout, merge, contract=recovery.load_contract()
+                checkout,
+                merge,
+                contract=recovery.load_contract(recovery.HISTORICAL_CONTRACT),
             )
             self.assertEqual(held["state"], "worker-recovery-unverified-held")
             self.assertEqual(
@@ -100,4 +102,8 @@ class WorkerRepairHoldTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 recovery.ValidationRecoveryError, "bounded release hold"
             ):
-                recovery.validate_hold(checkout, "HEAD", contract=recovery.load_contract())
+                recovery.validate_hold(
+                    checkout,
+                    "HEAD",
+                    contract=recovery.load_contract(recovery.HISTORICAL_CONTRACT),
+                )
