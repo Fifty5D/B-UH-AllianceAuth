@@ -41,6 +41,31 @@ claims a production version from GitHub alone.
 
 ## One path for ordinary work
 
+### Finish the retained recovery and deliver history collection
+
+The merged history changes still need installation. Complete the existing
+reviewed recovery first and verify its host completion receipt. Then apply the
+bounded [history receiver configuration update](../../ops/deploy/HISTORY-CONFIG-MAINTENANCE.md).
+It adds the missing archive setup command without changing existing arguments,
+permissions, service state, or the original installation receipt.
+
+Before merging the reviewed removal of both active recovery hold files, pause
+the **Prepare Release** workflow using GitHub's workflow controls. This prevents
+automatic publication from racing the required intermediate installation.
+Preserve the archived historical contract and all host recovery evidence.
+Use the existing **Deploy Platform v2** workflow from current, validated `main`
+for a new no-change preflight of immutable v0.6.2, then one owner deployment
+bound to that exact preflight's run and artifact. Do not retry the consumed
+attempt or use the old continuation workflow.
+
+After v0.6.2 is verified on the host, resume **Prepare Release** and qualify the
+pending history release through the ordinary flow below. Verify the archive
+mount, migrations, enabled collection schedules, successful new observations,
+and advancing retry/backfill progress. A successful release installation does
+not mean every historical dataset has finished downloading.
+
+### Subsequent updates
+
 1. Start one branch/PR from current main. Implement the feature, add focused
    regressions and the required app/platform change fragment.
 2. Run the fast checks once the change is ready, then use the hosted source

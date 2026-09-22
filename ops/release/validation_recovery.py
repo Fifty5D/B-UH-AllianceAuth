@@ -38,6 +38,10 @@ CONTINUATION_WORKFLOW_PATH = (
 DEFAULT_CONTRACT = Path(__file__).with_name(
     "published-release-recovery-v0.6.2.json"
 )
+HISTORICAL_CONTRACT = (
+    Path(__file__).with_name("history")
+    / "published-release-recovery-v0.6.2.json"
+)
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -244,7 +248,9 @@ def _sha256(value: Any, *, context: str, prefixed: bool = False) -> str:
     return value
 
 
-def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
+def load_contract(path: Path | None = None) -> dict[str, Any]:
+    if path is None:
+        path = DEFAULT_CONTRACT
     try:
         raw = path.read_bytes()
     except OSError as exc:

@@ -6,6 +6,9 @@ Current recovery state, aggregate diagnosis and approval boundaries:
 Historical repair provenance:
 [September 12 worker recovery](WORKER-RECOVERY.md). Earlier one-time maintenance
 commands below must not be repeated against its retained active recovery plan.
+After that recovery is complete, use the bounded
+[ESI History receiver configuration maintenance](HISTORY-CONFIG-MAINTENANCE.md)
+before delivering a release that invokes `buh_archive_setup`.
 
 This directory contains the separately gated Platform v2 deployment path. It
 does not replace or modify the legacy Moon Tax receiver during repository tests,

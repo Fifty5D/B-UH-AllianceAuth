@@ -374,9 +374,21 @@ class RecoveryRepository:
 
 
 class PublishedReleaseRecoveryTests(unittest.TestCase):
+    def test_default_contract_stays_bound_to_the_active_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "retired-recovery-contract.json"
+            with mock.patch.object(recovery, "DEFAULT_CONTRACT", missing):
+                with self.assertRaisesRegex(
+                    recovery.ValidationRecoveryError,
+                    "contract is unavailable",
+                ):
+                    recovery.load_contract()
+        historical = recovery.load_contract(recovery.HISTORICAL_CONTRACT)
+        self.assertEqual(historical["recovery_id"], recovery.RECOVERY_ID)
+
     def test_repository_contract_is_canonical_and_pinned(self) -> None:
         contract = recovery.load_contract(
-            ROOT / "ops/release/published-release-recovery-v0.6.2.json"
+            ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
         )
         self.assertEqual(contract["release"]["commit"], "6074b965cbd2e6ab2630cd539ee455b8d419aef6")
         self.assertEqual(contract["activation"]["pull_request"], 53)
@@ -821,7 +833,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 run(mirror, "update-ref", f"refs/heads/{branch}", commit)
 
             contract = recovery.load_contract(
-                ROOT / "ops/release/published-release-recovery-v0.6.2.json"
+                ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
             )
             review = base / "review"
             run(base, "clone", "--quiet", str(mirror), str(review))
@@ -843,7 +855,10 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
             for relative in contract["check_association_repair"]["allowed_paths"]:
                 destination = review / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ROOT / relative, destination)
+                source = ROOT / relative
+                if relative == "ops/release/published-release-recovery-v0.6.2.json":
+                    source = recovery.HISTORICAL_CONTRACT
+                shutil.copyfile(source, destination)
             run(review, "add", "--all")
             run(
                 review,
@@ -896,7 +911,7 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                         "--contract",
                         str(
                             ROOT
-                            / "ops/release/published-release-recovery-v0.6.2.json"
+                            / "ops/release/history/published-release-recovery-v0.6.2.json"
                         ),
                         "ledger",
                         "--root",

@@ -1,4 +1,5 @@
 name: Deploy Platform v2
+run-name: "Platform v2 ${{ inputs.mode }} / v${{ inputs.platform_version }} / preflight ${{ inputs.preflight_run_id || 'none' }}-${{ inputs.preflight_run_attempt || 'none' }}"
 
 on:
   workflow_call:
@@ -157,6 +158,22 @@ on:
         description: Type PREFLIGHT PLATFORM V2 or DEPLOY PLATFORM V2
         required: true
         type: string
+      preflight_run_id:
+        description: Exact fresh preflight run required for deploy mode
+        required: false
+        type: string
+      preflight_run_attempt:
+        description: Exact fresh preflight run attempt required for deploy mode
+        required: false
+        type: string
+      preflight_artifact_id:
+        description: Exact fresh preflight artifact ID required for deploy mode
+        required: false
+        type: string
+      preflight_artifact_digest:
+        description: Exact fresh preflight artifact digest required for deploy mode
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -275,7 +292,7 @@ jobs:
               [[ "${SYNC_VALIDATION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
               [[ "${SYNC_VALIDATION_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
               ;;
-            workflow_dispatch:preflight|workflow_dispatch:deploy)
+            workflow_dispatch:preflight)
               [[ "${ACTOR}" == "${OWNER}" ]]
               [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
               [[ -z "${FEATURE_PR_NUMBER}" && -z "${FEATURE_HEAD_SHA}" &&
@@ -290,6 +307,24 @@ jobs:
                  -z "${SYNC_HEAD_TREE}" &&
                  -z "${SYNC_VALIDATION_RUN_ID}" &&
                  -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
+              ;;
+            workflow_dispatch:deploy)
+              [[ "${ACTOR}" == "${OWNER}" ]]
+              [[ "${TRIGGERING_ACTOR}" == "${OWNER}" ]]
+              [[ -z "${FEATURE_PR_NUMBER}" && -z "${FEATURE_HEAD_SHA}" &&
+                 -z "${SOURCE_COMMIT}" && -z "${FEATURE_READINESS}" &&
+                 -z "${MAIN_VALIDATION_RUN_ID}" &&
+                 -z "${MAIN_VALIDATION_RUN_ATTEMPT}" &&
+                 -z "${MANIFEST_SHA256}" &&
+                 -z "${PREFLIGHT_ARTIFACT}" &&
+                 -z "${SYNC_BASE_COMMIT}" && -z "${SYNC_HEAD_COMMIT}" &&
+                 -z "${SYNC_HEAD_TREE}" &&
+                 -z "${SYNC_VALIDATION_RUN_ID}" &&
+                 -z "${SYNC_VALIDATION_RUN_ATTEMPT}" ]]
+              [[ "${PREFLIGHT_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${PREFLIGHT_RUN_ATTEMPT}" == "1" ]]
+              [[ "${PREFLIGHT_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${PREFLIGHT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
               ;;
             *)
               echo "This event is not authorized for the requested operation." >&2
@@ -345,10 +380,11 @@ jobs:
 
       - name: Stage the merge-owned approval verifier
         id: approval_source
-        if: ${{ (github.event_name == 'pull_request_target' || inputs.approved_continuation) && inputs.mode == 'deploy' }}
+        if: ${{ inputs.mode == 'deploy' && (github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch') }}
         env:
           APPROVED_CONTINUATION: ${{ inputs.approved_continuation }}
           APPROVAL_SOURCE_COMMIT: ${{ github.sha }}
+          REVIEWED_MANUAL: ${{ github.event_name == 'workflow_dispatch' && !inputs.approved_continuation }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           SYNC_HEAD_COMMIT: ${{ inputs.sync_head_commit }}
         run: |
@@ -360,28 +396,40 @@ jobs:
           git fetch --no-tags origin "${APPROVAL_SOURCE_COMMIT}"
           [[ "$(git rev-parse FETCH_HEAD)" == "${APPROVAL_SOURCE_COMMIT}" ]]
           read -r -a parents <<<"$(git show -s --format='%P' "${APPROVAL_SOURCE_COMMIT}")"
-          [[ "${#parents[@]}" -eq 2 ]]
-          if [[ "${APPROVED_CONTINUATION}" == "true" ]]; then
+          if [[ "${REVIEWED_MANUAL}" == "true" ]]; then
+            [[ "$(git rev-parse FETCH_HEAD)" == "${APPROVAL_SOURCE_COMMIT}" ]]
+          elif [[ "${APPROVED_CONTINUATION}" == "true" ]]; then
+            [[ "${#parents[@]}" -eq 2 ]]
             [[ "${parents[0]}" == "73569d32dc4f64fc1733cfc00b1d4c48928d5c5c" ]]
           else
+            [[ "${#parents[@]}" -eq 2 ]]
             [[ "${parents[1]}" == "${expected_sync_head}" ]]
           fi
 
           stage="${RUNNER_TEMP}/buh-platform-approval-source"
           [[ ! -e "${stage}" ]]
           mkdir "${stage}"
-          required=(
-            ops/readiness.py
-            ops/release/approved_deployment_continuation.py
-            ops/release/deployment_evidence.py
+          common=(
             ops/release/buh_release.py
             ops/release/ledger.py
             ops/release/open_sync_pr.py
             ops/release/platform_approval.py
-            ops/release/published-release-recovery-v0.6.2.json
             ops/release/recovery_policy.py
             ops/release/validation_recovery.py
           )
+          if [[ "${REVIEWED_MANUAL}" == "true" ]]; then
+            required=("${common[@]}" ops/release/reviewed_manual_deployment.py)
+          else
+            required=(
+              "${common[@]}"
+              ops/readiness.py
+              ops/release/approved_deployment_continuation.py
+              ops/release/deployment_evidence.py
+            )
+            if [[ "${APPROVED_CONTINUATION}" == "true" ]]; then
+              required+=(ops/release/published-release-recovery-v0.6.2.json)
+            fi
+          fi
           git archive --format=tar "${APPROVAL_SOURCE_COMMIT}" -- "${required[@]}" |
             tar -xf - -C "${stage}"
           [[ "$(find "${stage}" -type f | wc -l)" -eq "${#required[@]}" ]]
@@ -392,6 +440,7 @@ jobs:
                "$(git rev-parse "${APPROVAL_SOURCE_COMMIT}:${path}")" ]]
           done
           echo "tool=${stage}/ops/release/platform_approval.py" >>"${GITHUB_OUTPUT}"
+          echo "manual_tool=${stage}/ops/release/reviewed_manual_deployment.py" >>"${GITHUB_OUTPUT}"
 
       - name: Verify release lineage, bundle, and production compatibility
         id: release
@@ -468,6 +517,7 @@ jobs:
           [[ "${manifest_sha256}" =~ ^[0-9a-f]{64}$ ]]
           echo "release_dir=${release_dir}" >>"${GITHUB_OUTPUT}"
           echo "manifest_sha256=${manifest_sha256}" >>"${GITHUB_OUTPUT}"
+          echo "source_commit=$(jq -er '.source_commit' "${release_dir}/RELEASE.json")" >>"${GITHUB_OUTPUT}"
 
       - name: Build a deterministic bounded deployment archive
         env:
@@ -686,6 +736,75 @@ jobs:
           if approval.get("feature_readiness") != current:
               raise SystemExit("Queued production approval changed feature readiness")
           PY
+
+      - name: Authorize one fresh owner-reviewed manual deployment
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.approved_continuation && inputs.mode == 'deploy' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 "${{ steps.approval_source.outputs.manual_tool }}" \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --workflow-commit "${{ github.sha }}" \
+            --version "${{ inputs.platform_version }}" \
+            --source-commit "${{ steps.release.outputs.source_commit }}" \
+            --release-commit "${{ inputs.release_commit }}" \
+            --manifest-sha256 "${{ steps.release.outputs.manifest_sha256 }}" \
+            --preflight-run-id "${{ inputs.preflight_run_id }}" \
+            --preflight-run-attempt "${{ inputs.preflight_run_attempt }}" \
+            --preflight-artifact-id "${{ inputs.preflight_artifact_id }}" \
+            --preflight-artifact-digest "${{ inputs.preflight_artifact_digest }}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/manual-deploy-boundary-initial.json >/dev/null
+
+      - name: Download the fresh owner-reviewed preflight artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.approved_continuation && inputs.mode == 'deploy' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ inputs.preflight_artifact_id }}
+          path: build/manual-deploy-preflight
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.preflight_run_id }}
+          merge-multiple: true
+
+      - name: Reverify the fresh manual approval immediately before SSH
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.approved_continuation && inputs.mode == 'deploy' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 "${{ steps.approval_source.outputs.tool }}" verify-artifact \
+            --report build/manual-deploy-boundary-initial.json \
+            --artifact-dir build/manual-deploy-preflight >/dev/null
+          python3 "${{ steps.approval_source.outputs.manual_tool }}" \
+            --owner "${{ github.repository_owner }}" \
+            --repository "${{ github.repository }}" \
+            --actor "${{ github.actor }}" \
+            --triggering-actor "${{ github.triggering_actor }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --workflow-commit "${{ github.sha }}" \
+            --version "${{ inputs.platform_version }}" \
+            --source-commit "${{ steps.release.outputs.source_commit }}" \
+            --release-commit "${{ inputs.release_commit }}" \
+            --manifest-sha256 "${{ steps.release.outputs.manifest_sha256 }}" \
+            --preflight-run-id "${{ inputs.preflight_run_id }}" \
+            --preflight-run-attempt "${{ inputs.preflight_run_attempt }}" \
+            --preflight-artifact-id "${{ inputs.preflight_artifact_id }}" \
+            --preflight-artifact-digest "${{ inputs.preflight_artifact_digest }}" \
+            --api-url "${{ github.api_url }}" \
+            --server-url "${{ github.server_url }}" \
+            --output build/manual-deploy-boundary-final.json >/dev/null
+          cmp --silent \
+            build/manual-deploy-boundary-initial.json \
+            build/manual-deploy-boundary-final.json
 
       - name: Configure guarded deploy and observer SSH identities
         env:
