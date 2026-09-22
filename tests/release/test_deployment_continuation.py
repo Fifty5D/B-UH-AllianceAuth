@@ -346,6 +346,8 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
             _git(checkout, "checkout", "--quiet", "-b", "rehearsal-repair", continuation.SYNC_MERGE)
             for name in sorted(continuation.ALLOWED_PATHS):
                 source = ROOT / name
+                if name == "ops/release/published-release-recovery-v0.6.2.json":
+                    source = approval.validation_recovery.HISTORICAL_CONTRACT
                 if source.is_file():
                     target = checkout / name
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +394,7 @@ class ApprovedDeploymentContinuationTests(unittest.TestCase):
                 "WORK_ACTOR": "", "GITHUB_API_URL": "https://api.github.com",
                 "REPOSITORY": continuation.REPOSITORY, "REPOSITORY_OWNER": "Fifty5D",
                 "APPROVED_CONTINUATION": "true", "APPROVAL_SOURCE_COMMIT": merge,
+                "REVIEWED_MANUAL": "false",
             }
 
             def run(workflow, job, name):

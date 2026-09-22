@@ -1,0 +1,3 @@
+app = "platform"
+kind = "internal"
+summary = "Complete history delivery with a pinned receiver configuration update and preflight-bound deployments that reject replay."

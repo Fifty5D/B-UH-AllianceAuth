@@ -337,6 +337,14 @@ The trusted automatic no-change preflight may be initiated by the repository own
 or the exact nonempty `BUH_CHATGPT_WORK_ACTOR`; manual preflight dispatch and every
 production deployment remain owner-only.
 
+A manual owner deployment must name the exact run ID, attempt `1`, artifact ID,
+and artifact digest from a successful manual preflight of the same immutable
+release on the current `main`. The workflow downloads and validates those bytes,
+rechecks the live release ref, current-main validation, artifact retention runway,
+and owner identities immediately before SSH, and rejects a workflow rerun or a
+second deployment dispatch for the same preflight. Generate another preflight
+after any failed or cancelled deployment authorization; never retry the run.
+
 Do not configure a second required-reviewer click on the `production`
 environment when the one-approval ChatGPT flow is active. Keep the environment
 for secret isolation and deployment policy; the approval-marker/merge gate is
@@ -446,7 +454,7 @@ the first-line failure plus a bounded diagnostic tail, avoiding ambiguous
 Every preview-relevant change automatically creates an expiring preview from the
 same source-built test image; `ui-preview` forces the same path for a change that
 falls outside the automatic path policy. It uses a temporary database, fake ESI,
-synthetic users, no production secrets, no Discord/ESI egress, a three-day
+synthetic users, no production secrets, no Discord/ESI egress, a 30-day
 artifact, and unconditional teardown. A change with neither a relevant path nor
 the override records that no preview applies and does not publish preview
 artifacts.

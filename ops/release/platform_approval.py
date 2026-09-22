@@ -4836,7 +4836,11 @@ def authorize(
     release_commit = head.get("sha")
     if not isinstance(release_commit, str) or COMMIT_RE.fullmatch(release_commit) is None:
         raise ApprovalError("Merged synchronization head is not a full commit")
-    if version == "0.6.2" and repository == "Fifty5D/B-UH-AllianceAuth":
+    if (
+        version == "0.6.2"
+        and repository == "Fifty5D/B-UH-AllianceAuth"
+        and validation_recovery.DEFAULT_CONTRACT.is_file()
+    ):
         recovery_contract = validation_recovery.load_contract()
         if release_commit != recovery_contract["release"]["commit"]:
             return _authorize_current_recovery(

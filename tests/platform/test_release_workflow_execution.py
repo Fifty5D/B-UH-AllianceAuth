@@ -445,7 +445,6 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             "ledger.py",
             "open_sync_pr.py",
             "platform_approval.py",
-            "published-release-recovery-v0.6.2.json",
             "recovery_policy.py",
             "validation_recovery.py",
         )
@@ -465,7 +464,9 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             release_dir.mkdir(parents=True)
             (origin / "ops/readiness.py").write_text("reviewed-readiness\n", encoding="utf-8")
             for name in required:
-                (release_dir / name).write_text(
+                destination = release_dir / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
                     f"source:{name}\n", encoding="utf-8"
                 )
             _git(origin, "add", "--all")
@@ -532,6 +533,7 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     "APPROVED_CONTINUATION": "false",
                     "GITHUB_OUTPUT": "../github-output.txt",
                     "RELEASE_COMMIT": published,
+                    "REVIEWED_MANUAL": "false",
                     "RUNNER_TEMP": "../runner-temp",
                     "SYNC_HEAD_COMMIT": sync_head,
                 },
@@ -548,9 +550,10 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             self.assertEqual(
                 staged.read_text(encoding="utf-8"), "activation-verifier\n"
             )
-            output_value = output.read_text(encoding="utf-8").strip()
-            self.assertTrue(output_value.startswith("tool="))
-            self.assertTrue(output_value.endswith("/ops/release/platform_approval.py"))
+            output_values = output.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(output_values[0].startswith("tool="))
+            self.assertTrue(output_values[0].endswith("/ops/release/platform_approval.py"))
+            self.assertTrue(output_values[1].startswith("manual_tool="))
             self.assertEqual(_git(checkout, "rev-parse", "HEAD"), published)
 
     def test_reusable_fast_step_applies_actual_harness_to_exact_v062(self):
@@ -592,11 +595,16 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
             contract = json.loads(
                 (
                     ROOT
-                    / "ops/release/published-release-recovery-v0.6.2.json"
+                    / "ops/release/history/published-release-recovery-v0.6.2.json"
                 ).read_text(encoding="ascii")
             )
             for relative in contract["repair"]["allowed_paths"]:
                 source = ROOT / relative
+                if relative == "ops/release/published-release-recovery-v0.6.2.json":
+                    source = (
+                        ROOT
+                        / "ops/release/history/published-release-recovery-v0.6.2.json"
+                    )
                 destination = origin / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, destination)

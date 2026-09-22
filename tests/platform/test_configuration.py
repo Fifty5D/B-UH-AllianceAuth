@@ -1240,8 +1240,14 @@ class PlatformConfigurationContracts(TestCase):
             self.assertFalse(definition["required"], name)
             self.assertEqual(definition["default"], "", name)
             self.assertEqual(definition["type"], "string", name)
-        self.assertTrue(
-            normal_lineage_inputs.isdisjoint(triggers["workflow_dispatch"]["inputs"])
+        self.assertEqual(
+            normal_lineage_inputs & set(triggers["workflow_dispatch"]["inputs"]),
+            {
+                "preflight_run_id",
+                "preflight_run_attempt",
+                "preflight_artifact_id",
+                "preflight_artifact_digest",
+            },
         )
         self.assertEqual(
             set(triggers["workflow_call"]["outputs"]),
@@ -1284,11 +1290,6 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertGreaterEqual(gate_text.count('[[ -z "${FEATURE_PR_NUMBER}"'), 2)
         step_names = [step["name"] for step in deploy["steps"]]
-        self.assertEqual(
-            step_names.index("Reverify live feature readiness at the production boundary")
-            + 1,
-            step_names.index("Configure guarded deploy and observer SSH identities"),
-        )
         queued_authorize = step_names.index("Reauthorize the queued production operation")
         queued_download = step_names.index(
             "Download the still-retained production preflight artifact"
@@ -1298,6 +1299,35 @@ class PlatformConfigurationContracts(TestCase):
         )
         self.assertLess(queued_authorize, queued_download)
         self.assertLess(queued_download, final_boundary)
+        manual_authorize = step_names.index(
+            "Authorize one fresh owner-reviewed manual deployment"
+        )
+        manual_download = step_names.index(
+            "Download the fresh owner-reviewed preflight artifact"
+        )
+        manual_boundary = step_names.index(
+            "Reverify the fresh manual approval immediately before SSH"
+        )
+        self.assertLess(manual_authorize, manual_download)
+        self.assertLess(manual_download, manual_boundary)
+        self.assertEqual(
+            manual_boundary + 1,
+            step_names.index("Configure guarded deploy and observer SSH identities"),
+        )
+        self.assertIn(
+            "steps.approval_source.outputs.manual_tool",
+            deploy["steps"][manual_authorize]["run"],
+        )
+        stage = next(
+            step for step in deploy["steps"]
+            if step["name"] == "Stage the merge-owned approval verifier"
+        )
+        self.assertIn("ops/release/reviewed_manual_deployment.py", stage["run"])
+        self.assertIn('"${APPROVED_CONTINUATION}" == "true"', stage["run"])
+        self.assertIn(
+            '"${{ steps.approval_source.outputs.tool }}" verify-artifact',
+            deploy["steps"][manual_boundary]["run"],
+        )
         self.assertIn(
             '"${APPROVAL_TOOL}" boundary',
             deploy["steps"][queued_authorize]["run"],
@@ -1571,9 +1601,15 @@ class PlatformConfigurationContracts(TestCase):
         self.assertNotIn("secrets.", text)
 
         contract_path = (
-            ROOT / "ops/release/published-release-recovery-v0.6.2.json"
+            ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
         )
         raw = contract_path.read_text(encoding="ascii")
+        self.assertEqual(
+            raw,
+            (
+                ROOT / "ops/release/published-release-recovery-v0.6.2.json"
+            ).read_text(encoding="ascii"),
+        )
         contract = json.loads(raw)
         self.assertEqual(
             raw,
