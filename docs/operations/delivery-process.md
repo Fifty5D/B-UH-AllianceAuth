@@ -7,6 +7,30 @@ and healthy production installation are four different states.
 
 ## September 22 diagnostic follow-up
 
+The subsequent targeted report completed all requested reads. The two named
+Moon Mining database incidents were MariaDB 1213 deadlocks, and the ongoing
+Discord nickname 403s match the configured guild owner. Its running application
+still lacks the owner guard. Three Structures sync characters are disabled;
+Member Audit has 61 token-failed sections across 41 active characters. All 55
+sections for which scope metadata was collected still have a matching
+refreshable grant; the other six were outside that probe's scope mapping. Grant
+metadata does not prove that SSO will accept the credential.
+
+Synthetic regressions reproduce a race in pinned django-esi: a task holding an
+old refresh token can reject and delete a row a sibling has already refreshed.
+The owned guard serializes refresh and deletion and reloads the locked row.
+This is a confirmed source defect and a plausible contributor to the reported
+failures, not proof that every production token error has that cause. Moon
+Mining's idempotent SQL status transitions gain bounded deadlock retries while
+preserving its global time-based transitions, including disabled owners.
+
+These are source repairs awaiting an approved application installation. Existing
+token failures need validated grants and real successful section/owner updates;
+stored flags must not be relabeled as success. The latest snapshot again has a
+Moon Mining owner with no recorded result. Preserve active recovery resources
+and historical failures. The earlier installation/completion launcher still
+cannot establish recovery, and must not be rerun unchanged.
+
 The later read-only report confirms that Moon Tax continues to reconcile with
 the configured four-hour interval. Recent WARNING audits report insufficient Jita buy depth; the old
 COMPLETE-only selector overlooked them. The updated sync check recognizes only

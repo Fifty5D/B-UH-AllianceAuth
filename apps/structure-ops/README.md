@@ -6,6 +6,24 @@ fuel and extraction monitoring, and operational alerts.
 Compatibility and exact release pins live in `../../platform/compatibility.toml`.
 Published release wheels are immutable build outputs.
 
+## Sync concurrency guards
+
+The app serializes refresh and invalid-grant deletion for django-esi 9.6.0 using
+a database lock on each token row. A caller holding an older token instance
+reuses a sibling's successful refresh. A changed user/character ownership stops
+the operation; rejected grants remain failures, and incomplete SSO responses
+preserve the grant without returning an expired token. These guards do not
+recover previously disabled sync characters or change stored success flags.
+
+For Moon Mining 3.1.0.post1, the two time-based SQL transitions run atomically
+and retry MariaDB error 1213 at most twice. Other errors and errors inside a
+caller's existing transaction propagate. ESI calls and notification processing
+are not replayed by this retry.
+
+The guards are limited to these exact dependency versions and start with Django
+after an approved application release is installed. They do not install
+themselves on existing workers, change permissions, or clear the recovery hold.
+
 ## Discord guild-owner nickname exclusion
 
 Discord does not permit a bot to change the guild owner's nickname. Alliance Auth

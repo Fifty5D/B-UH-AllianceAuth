@@ -1,0 +1,4 @@
+schema_version = 1
+app = "structure-ops"
+kind = "fix"
+summary = "Serialize rotating ESI token refresh and invalid-grant deletion, prevent stale credentials from deleting renewed grants, and retry Moon Mining's idempotent extraction status transitions after deadlocks."
