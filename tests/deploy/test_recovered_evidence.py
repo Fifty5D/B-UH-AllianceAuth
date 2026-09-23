@@ -334,6 +334,7 @@ class RecoveredLogTests(unittest.TestCase):
             'for member ID 900000001 with this response: {"message":"Rate limited","retry_after":60}'
         )
         self.assertTrue(self.classify(template))
+        self.assertTrue(self.classify(template + "\n\n"))
         self.assertEqual(
             self.host.recovered_log_review.summary()[0]["category"],
             "historical-Discord-rate-limit",
