@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Path $taskDirectory | Out-Null
 git -C $RepositoryPath fetch https://github.com/Fifty5D/B-UH-AllianceAuth.git $ReviewedCommit
 if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the reviewed recovery commit.' }
 $sourceArchive = Join-Path $taskDirectory 'source.tar'
-git -C $RepositoryPath archive --format=tar --output=$sourceArchive $ReviewedCommit
+git -C $RepositoryPath -c core.autocrlf=false archive --format=tar --output=$sourceArchive $ReviewedCommit
 if ($LASTEXITCODE -ne 0) { throw 'Could not archive the reviewed source.' }
 $sourceHash = (Get-FileHash -Algorithm SHA256 $sourceArchive).Hash.ToLowerInvariant()
 $installerHash = '-'
@@ -42,7 +42,7 @@ if ($Operation -eq 'InstallAndVerify') {
     git -C $RepositoryPath fetch https://github.com/Fifty5D/B-UH-AllianceAuth.git $installerCommit
     if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the approved installer commit.' }
     $installerArchive = Join-Path $taskDirectory 'installer.tar'
-    git -C $RepositoryPath archive --format=tar --output=$installerArchive $installerCommit ops
+    git -C $RepositoryPath -c core.autocrlf=false archive --format=tar --output=$installerArchive $installerCommit ops
     if ($LASTEXITCODE -ne 0) { throw 'Could not archive the approved installer.' }
     $installerHash = (Get-FileHash -Algorithm SHA256 $installerArchive).Hash.ToLowerInvariant()
 }
