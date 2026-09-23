@@ -316,12 +316,64 @@ class ReviewedDockerHost(DockerHost):
     recovered_log_review = None
     reviewed_worker_ids = frozenset()
     recheck_recovered_sync = None
+    log_start_coverage_since = None
+    worker_log_start_coverage = None
+
+    def _verify_worker_log_start_coverage(self):
+        """Fail if rotation removed the beginning of the reviewed scan window."""
+        self.worker_log_start_coverage = None
+        since = self.log_start_coverage_since
+        if since is None:
+            raise DeploymentError("Worker log start coverage was not configured")
+        until = (stamp(since) + timedelta(minutes=5)).isoformat()
+        workers = (
+            service
+            for service in self.config.auth_services
+            if service not in {self.config.gunicorn_service, self.config.beat_service}
+        )
+        observed = []
+        for service in workers:
+            containers = self._running_service_containers(
+                service, context=f"Fresh log coverage identity for {service}"
+            )
+            for container in containers:
+                if container[:12] not in self.reviewed_worker_ids:
+                    raise DeploymentError("Fresh log coverage worker identity changed")
+                output = self._run(
+                    [
+                        "docker", "logs", "--timestamps",
+                        f"--since={since}", f"--until={until}", container,
+                    ],
+                    bounded_output=True,
+                    context=f"Fresh log coverage for {service}",
+                )
+                lines = output.splitlines()
+                if not lines:
+                    raise DeploymentError("Fresh worker log window is not retained")
+                try:
+                    first = stamp(lines[0].split(" ", 1)[0])
+                except (ValueError, IndexError) as exc:
+                    raise DeploymentError("Fresh worker log timestamp is invalid") from exc
+                if not stamp(since) <= first < stamp(until):
+                    raise DeploymentError("Fresh worker log window is not retained")
+                observed.append({"container": container[:12], "first_at": first.isoformat()})
+        if (
+            len(observed) != len(self.reviewed_worker_ids)
+            or {item["container"] for item in observed} != self.reviewed_worker_ids
+        ):
+            raise DeploymentError("Worker log start coverage is incomplete")
+        self.worker_log_start_coverage = observed
+
+    def restored_health_checks(self, bundle, replaced_services):
+        yield "worker-log-start-coverage", self._verify_worker_log_start_coverage
+        yield from super().restored_health_checks(bundle, replaced_services)
 
     def _verify_restored(self, bundle, replaced_services):
         if self.recheck_recovered_sync is None:
             raise DeploymentError("Current sync recheck is required before completion")
         self.recheck_recovered_sync()
         super()._verify_restored(bundle, replaced_services)
+        self._verify_worker_log_start_coverage()
 
     def _classify_log_batch(
         self, logs_by_source, individually_scanned, owner_transition_phase

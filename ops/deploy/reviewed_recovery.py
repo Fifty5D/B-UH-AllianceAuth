@@ -7,7 +7,7 @@ receiver repair. Completion needs a separate exact owner approval.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -262,9 +262,48 @@ def validate_review(review, evidence, *, now):
     return cutoff
 
 
+def validate_log_gap(review, evidence, *, now):
+    """Require an explicit, short-lived review before scanning a newer interval.
+
+    The original interval remains unverified. This opt-in is only available for
+    the pinned recovery attempt and cannot be inferred from missing Docker logs.
+    """
+    gap = review.get("retained_log_gap")
+    if gap is None:
+        return None
+    require(
+        isinstance(gap, dict)
+        and set(gap)
+        == {
+            "policy",
+            "unverified_since",
+            "fresh_scan_since",
+            "diagnostic_report_sha256",
+            "retained_grouping_sha256",
+        }
+        and gap["policy"] == "documented-worker-log-rotation-v1"
+        and gap["unverified_since"] == evidence["until"],
+        "Reviewed retained-log gap is invalid",
+    )
+    for name in ("diagnostic_report_sha256", "retained_grouping_sha256"):
+        require(
+            re.fullmatch(r"[0-9a-f]{64}", str(gap[name])) is not None,
+            "Reviewed retained-log evidence hash is invalid",
+        )
+    fresh = stamp(gap["fresh_scan_since"])
+    require(
+        stamp(evidence["until"]) < fresh
+        and now - timedelta(hours=24) <= fresh <= now - timedelta(hours=4),
+        "Reviewed fresh log window must cover at least four recent hours",
+    )
+    return gap
+
+
 def verify(host, value, bundle, review, evidence):
     recovery.prepare_verification(host, value, bundle)
-    cutoff = validate_review(review, evidence, now=datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    cutoff = validate_review(review, evidence, now=now)
+    gap = validate_log_gap(review, evidence, now=now)
     identities = validate_history(evidence)
     live = set()
     for service in host.config.auth_services:
@@ -285,6 +324,7 @@ def verify(host, value, bundle, review, evidence):
     sync_findings = {}
     host.recovered_log_review = None
     host.reviewed_worker_ids = frozenset(identities)
+    host.log_start_coverage_since = gap["fresh_scan_since"] if gap else evidence["until"]
 
     def check_sync():
         host.recovered_log_review = None
@@ -305,9 +345,9 @@ def verify(host, value, bundle, review, evidence):
 
     host.recheck_recovered_sync = check_sync
 
-    # Keep the original inventory and scan every subsequent byte. Only the
-    # reviewed categories with current evidence use the incident-only adapter.
-    host.log_since = evidence["until"]
+    # Ordinarily scan from the original reviewed boundary. An explicit gap
+    # review moves only the fresh scan start, never the original evidence bound.
+    host.log_since = gap["fresh_scan_since"] if gap else evidence["until"]
     checks = audit.run_checks(
         [
             *recovery.restored_file_checks(host),
@@ -315,13 +355,30 @@ def verify(host, value, bundle, review, evidence):
             *host.restored_health_checks(bundle, set()),
         ]
     )
+    # A busy worker can rotate the start away while the full scan is running.
+    checks.extend(audit.run_checks([
+        ("worker-log-end-coverage", host._verify_worker_log_start_coverage)
+    ]))
+    coverage_checks = [
+        check for check in checks
+        if check["check"] in {"worker-log-start-coverage", "worker-log-end-coverage"}
+    ]
+    coverage_passed = len(coverage_checks) == 2 and all(
+        check["result"] == "passed" for check in coverage_checks
+    )
     result = {
         "schema_version": 1,
         "attempt_id": recovery.ATTEMPT,
-        "result": "restored-production-verified-with-reviewed-history",
+        "result": (
+            "restored-production-verified-with-reviewed-log-gap"
+            if gap else "restored-production-verified-with-reviewed-history"
+        ),
         "original_log_since": audit.LOG_SINCE,
         "reviewed_log_until": evidence["until"],
         "historical_interval_clean": False,
+        "retained_interval_continuity_verified": not gap and coverage_passed,
+        "retained_log_gap": gap,
+        "worker_log_start_coverage": host.worker_log_start_coverage,
         "historical_esi_root_cause": "not-recorded",
         "historical_log_evidence_sha256": review["historical_log_evidence_sha256"],
         "current_sync_status": sync,
@@ -340,7 +397,7 @@ def verify(host, value, bundle, review, evidence):
         "retained_plan_sha256": recovery.PLAN_SHA256,
         "original_journal_sha256": recovery.JOURNAL_SHA256,
     }
-    if not all(check["result"] == "passed" for check in checks):
+    if not coverage_passed or not all(check["result"] == "passed" for check in checks):
         result.update(result="failed", preserve_resources=True)
         raise ReviewedHealthError(result)
     return result
@@ -385,7 +442,9 @@ def main(argv=None):
             review["historical_log_evidence_sha256"],
         )
         validate_history(evidence)
-        validate_review(review, evidence, now=datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        validate_review(review, evidence, now=now)
+        validate_log_gap(review, evidence, now=now)
         config = ReceiverConfig.load(Path("/etc/buh-platform-v2/receiver.json"))
         lock = _open_lock(config)
 
@@ -458,6 +517,7 @@ def main(argv=None):
                 cleanup = "not-established"
                 result["recovery"] = host.rollback(bundle, value["phase"])
                 result["reviewed_log_findings"] = host.recovered_log_review.summary()
+                result["worker_log_start_coverage"] = host.worker_log_start_coverage
                 cleanup = result["cleanup"] = "passed"
             result.update(
                 review_sha256=args.review_sha256,

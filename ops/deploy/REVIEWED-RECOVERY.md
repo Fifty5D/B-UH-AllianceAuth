@@ -43,10 +43,13 @@ nickname failures and the reviewed transient Discord responses. Extra errors,
 unknown exception categories or changed worker identities block the operation.
 
 The original historical interval stays attached to the result as **not clean**.
-Every byte after its fixed `until` is still scanned; the boundary is not moved
-forward. Only the staged `ReviewedDockerHost` adapter uses the following policy,
+By default, every byte after its fixed `until` is still scanned. Only the staged
+`ReviewedDockerHost` adapter uses the following policy,
 only on the same six individually verified retained workers during rollback.
 Ordinary deployment, candidate, infrastructure, and new-worker checks stay strict.
+The verifier also checks that all six workers still have timestamped logs near
+the start of the scan. Rotation cannot silently remove the beginning of an
+interval and make that interval appear clean.
 
 - The four reviewed ESI task failures need a complete HTTP-only traceback and
   successful, fresh corresponding updates **after** the error for every reviewed
@@ -68,6 +71,43 @@ Ordinary deployment, candidate, infrastructure, and new-worker checks stay stric
 Each accepted category retains source, count, first/last timestamps and a digest
 of the complete records. Unknown failures and incomplete log reads still block.
 This is evidence of subsequent successful updates, not a claim of gap-free history.
+
+### One-time rotated-log gap review
+
+The six retained Docker workers have bounded `json-file` logs. If rotation has
+removed part of the interval after the original reviewed `until`, the default
+verification cannot prove continuous coverage. Do not infer that a missing log
+contains no failures. Work may prepare an **explicit, private, hash-pinned**
+`retained_log_gap` in `review.json` for this attempt only:
+
+```json
+{
+  "policy": "documented-worker-log-rotation-v1",
+  "unverified_since": "<exact historical-log-details.json until>",
+  "fresh_scan_since": "<offset timestamp within the past 24 hours and at least four hours old>",
+  "diagnostic_report_sha256": "<hash of the original failed diagnostic report>",
+  "retained_grouping_sha256": "<hash of the full retained-group export>"
+}
+```
+
+Work must review both referenced evidence files and state precisely which span
+cannot be verified. These hashes identify reviewed evidence; this recovery tool
+does not fetch those files or claim to validate their content. The original
+historical report remains required and is validated in full. Before scanning
+from `fresh_scan_since`, the tool must find timestamped logs in the first five
+minutes of that window for **all six unchanged workers**. Incomplete, oversized
+or unreadable Docker output, a changed identity, or any unreviewed error in the
+fresh scan blocks recovery. The same coverage check runs again during completion.
+
+The result and receipt use `restored-production-verified-with-reviewed-log-gap`,
+mark `retained_interval_continuity_verified: false`, and retain the original
+cutoff, gap declaration, worker log coverage timestamps, current sync status and log
+findings. This is an acknowledged evidence limitation, not a finding that the
+missing interval was clean. The owner must separately approve the exact
+`review.json` hash before `Complete`; neither a staged `Verify` nor a source
+merge grants that approval. If the fresh window ages past 24 hours, create and
+review a new assessment before retrying. Do not alter the original historical
+evidence to make the window pass.
 
 Each invocation queries current database status without queuing tasks or calling
 an external API. Required owner/refinery populations and success flags are checked.

@@ -75,6 +75,15 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
             "archive_sha256": "b" * 64,
             "review_sha256": "c" * 64,
             "historical_interval_clean": False,
+            "reviewed_log_until": "2026-09-14T18:06:30+00:00",
+            "retained_interval_continuity_verified": True,
+            "worker_log_start_coverage": [
+                {
+                    "container": f"{index:012x}",
+                    "first_at": "2026-09-14T18:07:00+00:00",
+                }
+                for index in range(1, 7)
+            ],
             "checks": [
                 {"check": name, "result": "passed"} for name in maintenance.RECOVERY_CHECKS
             ],
@@ -204,6 +213,34 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
         value["checks"] = value["checks"][:-1]
         self._write(completion, canonical_json_bytes(value))
         with self.assertRaisesRegex(DeploymentError, "completion receipt is incomplete"):
+            maintenance.build_plan(self.paths, verify_repairs=False)
+
+    def test_documented_log_gap_receipt_preserves_provenance_for_history_setup(self):
+        state = Path(json.loads(self.original)["state_dir"])
+        completion = state / maintenance.COMPLETION_NAME
+        value = json.loads(completion.read_bytes())
+        fresh = "2026-09-23T12:48:00+00:00"
+        value.update(
+            result="restored-production-verified-with-reviewed-log-gap",
+            reviewed_log_until="2026-09-14T18:06:30+00:00",
+            retained_interval_continuity_verified=False,
+            retained_log_gap={
+                "policy": "documented-worker-log-rotation-v1",
+                "unverified_since": "2026-09-14T18:06:30+00:00",
+                "fresh_scan_since": fresh,
+                "diagnostic_report_sha256": "d" * 64,
+                "retained_grouping_sha256": "e" * 64,
+            },
+            worker_log_start_coverage=[
+                {"container": f"{index:012x}", "first_at": fresh}
+                for index in range(1, 7)
+            ],
+        )
+        self._write(completion, canonical_json_bytes(value))
+        maintenance.build_plan(self.paths, verify_repairs=False)
+        value["retained_interval_continuity_verified"] = True
+        self._write(completion, canonical_json_bytes(value))
+        with self.assertRaisesRegex(DeploymentError, "gap receipt is incomplete"):
             maintenance.build_plan(self.paths, verify_repairs=False)
 
     def test_apply_requires_present_and_matching_plan_pins(self):
