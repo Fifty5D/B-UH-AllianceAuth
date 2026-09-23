@@ -158,8 +158,10 @@ def _validate_completion(value: dict, runtime_sha256: str) -> None:
         or len(coverage) != 6
         or any(
             not isinstance(row, dict)
+            or set(row) != {"container", "boundary_record_at", "boundary_record_sha256"}
             or re.fullmatch(r"[0-9a-f]{12}", str(row.get("container", ""))) is None
-            or not isinstance(row.get("first_at"), str)
+            or not isinstance(row.get("boundary_record_at"), str)
+            or HASH_RE.fullmatch(str(row.get("boundary_record_sha256", ""))) is None
             for row in coverage
         )
         or len({row["container"] for row in coverage}) != 6
@@ -195,20 +197,21 @@ def _validate_completion(value: dict, runtime_sha256: str) -> None:
             value["reviewed_log_until"].replace("Z", "+00:00")
         )
         fresh = datetime.fromisoformat(scan_since.replace("Z", "+00:00"))
-        first_logs = [
-            datetime.fromisoformat(row["first_at"].replace("Z", "+00:00"))
+        boundary_records = [
+            datetime.fromisoformat(row["boundary_record_at"].replace("Z", "+00:00"))
             for row in coverage
         ]
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise DeploymentError("Worker log start coverage times are invalid") from exc
     if (
         original.tzinfo is None or fresh.tzinfo is None
-        or any(first.tzinfo is None for first in first_logs)
+        or any(record.tzinfo is None for record in boundary_records)
     ):
         raise DeploymentError("Worker log start coverage times are invalid")
     chronology_valid = original < fresh if gap_mode else original == fresh
     if not chronology_valid or any(
-        not fresh <= first < fresh + timedelta(minutes=5) for first in first_logs
+        not fresh - timedelta(minutes=5) <= record < fresh
+        for record in boundary_records
     ):
         raise DeploymentError("Worker log start coverage times are invalid")
     checks = value.get("checks")

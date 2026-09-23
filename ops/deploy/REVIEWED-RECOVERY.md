@@ -94,10 +94,11 @@ Work must review both referenced evidence files and state precisely which span
 cannot be verified. These hashes identify reviewed evidence; this recovery tool
 does not fetch those files or claim to validate their content. The original
 historical report remains required and is validated in full. Before scanning
-from `fresh_scan_since`, the tool must find timestamped logs in the first five
-minutes of that window for **all six unchanged workers**. Incomplete, oversized
-or unreadable Docker output, a changed identity, or any unreviewed error in the
-fresh scan blocks recovery. The same coverage check runs again during completion.
+from `fresh_scan_since`, the tool pins a timestamped record in the preceding
+five minutes for **all six unchanged workers**. It verifies the exact same
+per-worker record hashes after the scan; Docker log rotation must not remove
+the boundary records. Incomplete, oversized or unreadable Docker output, a
+changed identity, or any unreviewed error in the fresh scan blocks recovery.
 
 The result and receipt use `restored-production-verified-with-reviewed-log-gap`,
 mark `retained_interval_continuity_verified: false`, and retain the original

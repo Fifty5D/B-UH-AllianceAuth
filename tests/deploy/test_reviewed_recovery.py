@@ -312,9 +312,17 @@ class ReviewedRecoveryTests(unittest.TestCase):
             def fresh_coverage():
                 events.append("coverage")
                 if fail == "coverage":
-                    raise DeploymentError("Fresh worker log window is not retained")
+                    raise DeploymentError("Fresh worker boundary record is not retained")
+                anchor = (
+                    reviewed.stamp(fresh_since if gap else CUTOFF)
+                    - timedelta(minutes=1)
+                ).isoformat()
                 host.worker_log_start_coverage = [
-                    {"container": identity, "first_at": fresh_since if gap else CUTOFF}
+                    {
+                        "container": identity,
+                        "boundary_record_at": anchor,
+                        "boundary_record_sha256": "a" * 64,
+                    }
                     for identity in ids
                 ]
 
@@ -531,22 +539,31 @@ class ReviewedRecoveryTests(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(DeploymentError):
                 reviewed.validate_log_gap(candidate, evidence, now=NOW)
 
-    def test_fresh_coverage_requires_each_original_worker_to_have_early_logs(self):
+    def test_fresh_coverage_pins_the_same_pre_boundary_record_for_each_worker(self):
         evidence, _, _ = fixture()
         with tempfile.TemporaryDirectory() as temporary:
             host = ReviewedDockerHost(make_config(Path(temporary)))
             ids = [entry["container"] for entry in evidence["containers"]]
             host.reviewed_worker_ids = frozenset(ids)
             host.log_start_coverage_since = (NOW - timedelta(hours=6)).isoformat()
-            first = (NOW - timedelta(hours=6) + timedelta(minutes=1)).isoformat()
+            before = (NOW - timedelta(hours=6, minutes=1)).isoformat()
+            after = (NOW - timedelta(hours=6) + timedelta(minutes=4, seconds=59)).isoformat()
             def containers(service, **kwargs):
                 return ids[-1:] if service.endswith("services") else ids[:-1]
             with mock.patch.object(host, "_running_service_containers", side_effect=containers), mock.patch.object(
-                host, "_run", return_value=f"{first} example\n"
+                host, "_run", return_value=f"{before} example\n"
             ) as read:
                 host._verify_worker_log_start_coverage()
                 self.assertEqual(len(host.worker_log_start_coverage), 6)
                 self.assertEqual(read.call_count, 6)
+                self.assertTrue(all(row["boundary_record_sha256"] for row in host.worker_log_start_coverage))
+                host._verify_worker_log_start_coverage()
+                read.return_value = f"{before} changed\n"
+                with self.assertRaisesRegex(DeploymentError, "changed during verification"):
+                    host._verify_worker_log_start_coverage()
+                read.return_value = f"{after} example\n"
+                with self.assertRaisesRegex(DeploymentError, "not retained"):
+                    host._verify_worker_log_start_coverage()
                 read.return_value = ""
                 with self.assertRaisesRegex(DeploymentError, "not retained"):
                     host._verify_worker_log_start_coverage()

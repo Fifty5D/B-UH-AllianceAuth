@@ -80,7 +80,8 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
             "worker_log_start_coverage": [
                 {
                     "container": f"{index:012x}",
-                    "first_at": "2026-09-14T18:07:00+00:00",
+                    "boundary_record_at": "2026-09-14T18:06:00+00:00",
+                    "boundary_record_sha256": "a" * 64,
                 }
                 for index in range(1, 7)
             ],
@@ -232,7 +233,11 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
                 "retained_grouping_sha256": "e" * 64,
             },
             worker_log_start_coverage=[
-                {"container": f"{index:012x}", "first_at": fresh}
+                {
+                    "container": f"{index:012x}",
+                    "boundary_record_at": "2026-09-23T12:47:00+00:00",
+                    "boundary_record_sha256": "a" * 64,
+                }
                 for index in range(1, 7)
             ],
         )

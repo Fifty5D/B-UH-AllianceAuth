@@ -322,12 +322,12 @@ class ReviewedDockerHost(DockerHost):
     worker_log_start_coverage = None
 
     def _verify_worker_log_start_coverage(self):
-        """Fail if rotation removed the beginning of the reviewed scan window."""
-        self.worker_log_start_coverage = None
+        """Pin a pre-boundary record that rotation must retain through the scan."""
         since = self.log_start_coverage_since
         if since is None:
             raise DeploymentError("Worker log start coverage was not configured")
-        until = (stamp(since) + timedelta(minutes=5)).isoformat()
+        boundary = stamp(since)
+        lookback = (boundary - timedelta(minutes=5)).isoformat()
         workers = (
             service
             for service in self.config.auth_services
@@ -344,26 +344,39 @@ class ReviewedDockerHost(DockerHost):
                 output = self._run(
                     [
                         "docker", "logs", "--timestamps",
-                        f"--since={since}", f"--until={until}", container,
+                        f"--since={lookback}", f"--until={since}", container,
                     ],
                     bounded_output=True,
                     context=f"Fresh log coverage for {service}",
                 )
                 lines = output.splitlines()
                 if not lines:
-                    raise DeploymentError("Fresh worker log window is not retained")
+                    raise DeploymentError("Fresh worker boundary record is not retained")
                 try:
-                    first = stamp(lines[0].split(" ", 1)[0])
+                    candidates = [
+                        (
+                            stamp(line.split(" ", 1)[0]),
+                            hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                        )
+                        for line in lines
+                    ]
                 except (ValueError, IndexError) as exc:
-                    raise DeploymentError("Fresh worker log timestamp is invalid") from exc
-                if not stamp(since) <= first < stamp(until):
-                    raise DeploymentError("Fresh worker log window is not retained")
-                observed.append({"container": container[:12], "first_at": first.isoformat()})
+                    raise DeploymentError("Fresh worker boundary timestamp is invalid") from exc
+                anchor, digest = max(candidates)
+                if not boundary - timedelta(minutes=5) <= anchor < boundary:
+                    raise DeploymentError("Fresh worker boundary record is not retained")
+                observed.append({
+                    "container": container[:12],
+                    "boundary_record_at": anchor.isoformat(),
+                    "boundary_record_sha256": digest,
+                })
         if (
             len(observed) != len(self.reviewed_worker_ids)
             or {item["container"] for item in observed} != self.reviewed_worker_ids
         ):
             raise DeploymentError("Worker log start coverage is incomplete")
+        if self.worker_log_start_coverage is not None and observed != self.worker_log_start_coverage:
+            raise DeploymentError("Worker log boundary records changed during verification")
         self.worker_log_start_coverage = observed
 
     def restored_health_checks(self, bundle, replaced_services):
