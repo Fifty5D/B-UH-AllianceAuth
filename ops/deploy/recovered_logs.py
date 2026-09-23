@@ -290,9 +290,9 @@ class RecoveredLogReview:
                 message,
             )
             body = None
-            # Docker may retain the application's blank separator after either
-            # mirrored log format. It carries no additional incident content.
-            if match and (len(lines) == 1 or (len(lines) == 2 and lines[1] == "")):
+            # Docker may retain the application's empty or punctuation-only
+            # separator after either mirrored log format. No other tail is safe.
+            if match and (len(lines) == 1 or (len(lines) == 2 and lines[1] in {"", "."})):
                 try:
                     body = json.loads(match[2])
                 except ValueError:

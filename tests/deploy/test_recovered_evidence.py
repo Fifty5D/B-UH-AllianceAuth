@@ -335,6 +335,7 @@ class RecoveredLogTests(unittest.TestCase):
         )
         self.assertTrue(self.classify(template))
         self.assertTrue(self.classify(template + "\n\n"))
+        self.assertTrue(self.classify(template + "\n.\n"))
         self.assertEqual(
             self.host.recovered_log_review.summary()[0]["category"],
             "historical-Discord-rate-limit",
