@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -44,6 +45,7 @@ RECOVERY_CHECKS = (
     "proxy-upstream",
     "nginx-configuration",
     "recovered-data-syncs",
+    "worker-log-start-coverage",
     "services-and-restarts",
     "installed-images",
     "django",
@@ -57,6 +59,7 @@ RECOVERY_CHECKS = (
     "application-buh_mining_check",
     "public-http",
     "retained-interval-logs",
+    "worker-log-end-coverage",
 )
 
 
@@ -128,10 +131,15 @@ def _validate_install(value: dict, current_config_sha256: str) -> None:
 
 
 def _validate_completion(value: dict, runtime_sha256: str) -> None:
+    gap_mode = value.get("result") == "restored-production-verified-with-reviewed-log-gap"
+    if value.get("result") not in {
+        "restored-production-verified-with-reviewed-history",
+        "restored-production-verified-with-reviewed-log-gap",
+    }:
+        raise DeploymentError("Reviewed recovery completion receipt is invalid")
     required = {
         "schema_version": 1,
         "attempt_id": recovery.ATTEMPT,
-        "result": "restored-production-verified-with-reviewed-history",
         "cleanup": "passed",
         "deployment_performed": False,
         "database_restored": False,
@@ -144,6 +152,68 @@ def _validate_completion(value: dict, runtime_sha256: str) -> None:
     }
     if any(value.get(key) != expected for key, expected in required.items()):
         raise DeploymentError("Reviewed recovery completion receipt is invalid")
+    coverage = value.get("worker_log_start_coverage")
+    if (
+        not isinstance(coverage, list)
+        or len(coverage) != 6
+        or any(
+            not isinstance(row, dict)
+            or set(row) != {"container", "boundary_record_at", "boundary_record_sha256"}
+            or re.fullmatch(r"[0-9a-f]{12}", str(row.get("container", ""))) is None
+            or not isinstance(row.get("boundary_record_at"), str)
+            or HASH_RE.fullmatch(str(row.get("boundary_record_sha256", ""))) is None
+            for row in coverage
+        )
+        or len({row["container"] for row in coverage}) != 6
+    ):
+        raise DeploymentError("Worker log start coverage receipt is incomplete")
+    if gap_mode:
+        gap = value.get("retained_log_gap")
+        if (
+            value.get("retained_interval_continuity_verified") is not False
+            or not isinstance(gap, dict)
+            or set(gap) != {
+                "policy", "unverified_since", "fresh_scan_since",
+                "diagnostic_report_sha256", "retained_grouping_sha256",
+            }
+            or gap["policy"] != "documented-worker-log-rotation-v1"
+            or gap["unverified_since"] != value.get("reviewed_log_until")
+            or any(
+                HASH_RE.fullmatch(str(gap[name])) is None
+                for name in ("diagnostic_report_sha256", "retained_grouping_sha256")
+            )
+        ):
+            raise DeploymentError("Documented retained-log gap receipt is incomplete")
+        scan_since = gap["fresh_scan_since"]
+    else:
+        if (
+            value.get("retained_log_gap") is not None
+            or value.get("retained_interval_continuity_verified") is not True
+        ):
+            raise DeploymentError("Unexpected retained-log gap in recovery receipt")
+        scan_since = value.get("reviewed_log_until")
+    try:
+        original = datetime.fromisoformat(
+            value["reviewed_log_until"].replace("Z", "+00:00")
+        )
+        fresh = datetime.fromisoformat(scan_since.replace("Z", "+00:00"))
+        boundary_records = [
+            datetime.fromisoformat(row["boundary_record_at"].replace("Z", "+00:00"))
+            for row in coverage
+        ]
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise DeploymentError("Worker log start coverage times are invalid") from exc
+    if (
+        original.tzinfo is None or fresh.tzinfo is None
+        or any(record.tzinfo is None for record in boundary_records)
+    ):
+        raise DeploymentError("Worker log start coverage times are invalid")
+    chronology_valid = original < fresh if gap_mode else original == fresh
+    if not chronology_valid or any(
+        not fresh - timedelta(minutes=5) <= record < fresh
+        for record in boundary_records
+    ):
+        raise DeploymentError("Worker log start coverage times are invalid")
     checks = value.get("checks")
     if (
         not isinstance(checks, list)

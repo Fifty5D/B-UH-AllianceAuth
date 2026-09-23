@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Allow an explicitly reviewed, time-bounded worker log gap during the pinned recovery while preserving its provenance and requiring fresh six-worker coverage."

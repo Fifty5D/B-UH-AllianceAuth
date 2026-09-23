@@ -260,8 +260,17 @@ class ReviewedRecoveryTests(unittest.TestCase):
             with self.assertRaises(DeploymentError):
                 reviewed.stamp(value)
 
-    def exercise_main(self, operation, *, fail=None, before_install=False):
+    def exercise_main(self, operation, *, fail=None, before_install=False, gap=False):
         evidence, review, status = fixture()
+        fresh_since = (NOW - timedelta(hours=6)).isoformat()
+        if gap:
+            review["retained_log_gap"] = {
+                "policy": "documented-worker-log-rotation-v1",
+                "unverified_since": CUTOFF,
+                "fresh_scan_since": fresh_since,
+                "diagnostic_report_sha256": "d" * 64,
+                "retained_grouping_sha256": "e" * 64,
+            }
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root = Path(temporary)
             historical = root / "historical-log-details.json"
@@ -290,7 +299,7 @@ class ReviewedRecoveryTests(unittest.TestCase):
                 return ids[-1:] if service.endswith("services") else ids[:-1]
 
             def log_check():
-                self.assertEqual(host.log_since, CUTOFF)
+                self.assertEqual(host.log_since, fresh_since if gap else CUTOFF)
                 events.append("logs")
                 if fail == "logs":
                     raise LogScanError(["synthetic new task failure"])
@@ -300,11 +309,30 @@ class ReviewedRecoveryTests(unittest.TestCase):
                     "rollback",
                 )
 
+            def fresh_coverage():
+                events.append("coverage")
+                if fail == "coverage":
+                    raise DeploymentError("Fresh worker boundary record is not retained")
+                anchor = (
+                    reviewed.stamp(fresh_since if gap else CUTOFF)
+                    - timedelta(minutes=1)
+                ).isoformat()
+                host.worker_log_start_coverage = [
+                    {
+                        "container": identity,
+                        "boundary_record_at": anchor,
+                        "boundary_record_sha256": "a" * 64,
+                    }
+                    for identity in ids
+                ]
+
             def health(*args):
-                return [
+                checks = [
                     ("retained-interval-logs", log_check),
                     ("public-http", lambda: events.append("http")),
                 ]
+                checks.insert(0, ("worker-log-start-coverage", host._verify_worker_log_start_coverage))
+                return checks
 
             def bytes_read(path, **kwargs):
                 raw = path.read_bytes()
@@ -333,6 +361,11 @@ class ReviewedRecoveryTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(host, "restored_health_checks", side_effect=health)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    host, "_verify_worker_log_start_coverage", side_effect=fresh_coverage
+                )
             )
             probe = stack.enter_context(
                 mock.patch.object(reviewed, "live_sync_probe", return_value=status)
@@ -436,6 +469,13 @@ class ReviewedRecoveryTests(unittest.TestCase):
             self.assertEqual(code, 0, result)
             self.assertFalse(result["historical_interval_clean"])
             self.assertFalse(result["deployment_performed"])
+            self.assertEqual(len(result["worker_log_start_coverage"]), 6)
+            if gap:
+                self.assertEqual(result["retained_log_gap"], review["retained_log_gap"])
+                self.assertFalse(result["retained_interval_continuity_verified"])
+            else:
+                self.assertIsNone(result["retained_log_gap"])
+                self.assertTrue(result["retained_interval_continuity_verified"])
             if before_install:
                 self.assertEqual(result["result"], "staged-recovery-verification-passed")
                 self.assertEqual(
@@ -472,3 +512,58 @@ class ReviewedRecoveryTests(unittest.TestCase):
         for failure in ("approval", "pins", "receipt", "sync", "resync", "logs"):
             with self.subTest(failure=failure):
                 self.exercise_main("complete", fail=failure)
+
+    def test_documented_gap_requires_fresh_coverage_and_separate_completion(self):
+        self.exercise_main("verify", gap=True, before_install=True)
+        self.exercise_main("verify", gap=True, fail="coverage")
+        self.exercise_main("complete", gap=True)
+
+    def test_gap_review_rejects_missing_provenance_and_stale_window(self):
+        evidence, review, _ = fixture()
+        gap = {
+            "policy": "documented-worker-log-rotation-v1",
+            "unverified_since": CUTOFF,
+            "fresh_scan_since": (NOW - timedelta(hours=6)).isoformat(),
+            "diagnostic_report_sha256": "d" * 64,
+            "retained_grouping_sha256": "e" * 64,
+        }
+        for field, value in (
+            ("policy", "silent-rotation"),
+            ("unverified_since", reviewed.audit.LOG_SINCE),
+            ("fresh_scan_since", (NOW - timedelta(hours=25)).isoformat()),
+            ("fresh_scan_since", (NOW - timedelta(hours=3)).isoformat()),
+            ("diagnostic_report_sha256", "missing"),
+        ):
+            candidate = deepcopy(review)
+            candidate["retained_log_gap"] = {**gap, field: value}
+            with self.subTest(field=field, value=value), self.assertRaises(DeploymentError):
+                reviewed.validate_log_gap(candidate, evidence, now=NOW)
+
+    def test_fresh_coverage_pins_the_same_pre_boundary_record_for_each_worker(self):
+        evidence, _, _ = fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            host = ReviewedDockerHost(make_config(Path(temporary)))
+            ids = [entry["container"] for entry in evidence["containers"]]
+            host.reviewed_worker_ids = frozenset(ids)
+            host.log_start_coverage_since = (NOW - timedelta(hours=6)).isoformat()
+            before = (NOW - timedelta(hours=6, minutes=1)).isoformat()
+            after = (NOW - timedelta(hours=6) + timedelta(minutes=4, seconds=59)).isoformat()
+            def containers(service, **kwargs):
+                return ids[-1:] if service.endswith("services") else ids[:-1]
+            with mock.patch.object(host, "_running_service_containers", side_effect=containers), mock.patch.object(
+                host, "_run", return_value=f"{before} example\n"
+            ) as read:
+                host._verify_worker_log_start_coverage()
+                self.assertEqual(len(host.worker_log_start_coverage), 6)
+                self.assertEqual(read.call_count, 6)
+                self.assertTrue(all(row["boundary_record_sha256"] for row in host.worker_log_start_coverage))
+                host._verify_worker_log_start_coverage()
+                read.return_value = f"{before} changed\n"
+                with self.assertRaisesRegex(DeploymentError, "changed during verification"):
+                    host._verify_worker_log_start_coverage()
+                read.return_value = f"{after} example\n"
+                with self.assertRaisesRegex(DeploymentError, "not retained"):
+                    host._verify_worker_log_start_coverage()
+                read.return_value = ""
+                with self.assertRaisesRegex(DeploymentError, "not retained"):
+                    host._verify_worker_log_start_coverage()
