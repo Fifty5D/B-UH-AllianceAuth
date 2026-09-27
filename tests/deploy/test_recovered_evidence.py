@@ -342,6 +342,15 @@ class RecoveredLogTests(unittest.TestCase):
             "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.\n"
         )
         self.assertTrue(self.classify(schema + callback, source=web))
+        named = callback.replace("AnonymousUser", "synthetic_user")
+        trace = named.split("\n", 1)[1]
+        mirrored = (
+            named
+            + "DEBUG:esi.decorators:No callback for synthetic_user session xcmnc\n"
+            + trace
+        )
+        self.assertTrue(self.classify(named, source=web))
+        self.assertTrue(self.classify(mirrored, source=web))
         self.assertEqual(
             {item["category"] for item in self.host.recovered_log_review.summary()},
             {"ESI-schema-model-name", "caught-ESI-callback-miss"},
@@ -357,6 +366,9 @@ class RecoveredLogTests(unittest.TestCase):
             callback.replace("CallbackRedirect.DoesNotExist", "Token.DoesNotExist"),
             callback + "PermissionError: denied\n",
             callback + "[01/Oct/2026 11:02:00] ERROR [esi.decorators:39] real failure\n",
+            mirrored.replace("synthetic_user session", "other_user session", 1),
+            mirrored.replace("esi.models.CallbackRedirect.DoesNotExist", "PermissionError", 1),
+            mirrored + "Traceback (most recent call last):\n",
         ):
             with self.subTest(changed=changed[:80]), self.assertRaises(LogScanError):
                 self.classify(changed, source=web)
