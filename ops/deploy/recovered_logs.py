@@ -60,8 +60,8 @@ HTTP_EXCEPTIONS = {
     "aiopenapi3.errors.HTTPClientError",
 }
 # Installed ESI middleware catches this missing callback lookup at DEBUG and
-# redirects the anonymous session to SSO. Match its observed traceback exactly;
-# a different exception, frame, or trailing line remains a fatal log finding.
+# continues its token/SSO flow. Match the observed traceback exactly; another
+# exception, frame, or trailing line remains a fatal log finding.
 CAUGHT_CALLBACK_MISS_TRACE = (
     "Traceback (most recent call last):",
     '  File "/usr/local/lib/python3.12/site-packages/esi/decorators.py", line 29, in _check_callback',
@@ -229,10 +229,18 @@ class RecoveredLogReview:
         if (
             logger == "esi.decorators"
             and source_line == "39"
-            and re.fullmatch(r"No callback for AnonymousUser session [a-z0-9]{5}", message)
-            and tuple(lines[1:]) == CAUGHT_CALLBACK_MISS_TRACE
+            and re.fullmatch(
+                r"No callback for [A-Za-z0-9_.-]{1,64} session [a-z0-9]{5}", message
+            )
         ):
-            return "caught-ESI-callback-miss"
+            tail = tuple(lines[1:])
+            mirrored = (
+                CAUGHT_CALLBACK_MISS_TRACE
+                + ("DEBUG:esi.decorators:" + message,)
+                + CAUGHT_CALLBACK_MISS_TRACE
+            )
+            if tail == CAUGHT_CALLBACK_MISS_TRACE or tail == mirrored:
+                return "caught-ESI-callback-miss"
         return None
 
     def classify(self, lines, *, services_worker, source):
