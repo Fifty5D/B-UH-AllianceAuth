@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Keep the historical recovery harness test runnable after release synchronization consumes its reviewed change fragment."

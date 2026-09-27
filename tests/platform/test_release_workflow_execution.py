@@ -20,6 +20,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 RECOVERY_ACTIVATION = "e0bd37fafcedee3135aa4c4d6bdfc7778d032d48"
 RECOVERY_CONTINUATION = "57e0e29042bab3a989c80e5473ad552ec5b4505b"
 PUBLISHED_V062 = "6074b965cbd2e6ab2630cd539ee455b8d419aef6"
+RECOVERY_FRAGMENT_SOURCE = "02a3e0ee84b667797e3521e9ade47e5cb3f3ec27"
 RECOVERY_HARNESS_PATHS = (
     "tests/deploy/test_request_archive.py",
     "tests/platform/test_coordinated_recovery_rehearsal.py",
@@ -607,7 +608,20 @@ class ReleaseWorkflowWorkspaceTests(TestCase):
                     )
                 destination = origin / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, destination)
+                if source.is_file():
+                    shutil.copyfile(source, destination)
+                else:
+                    self.assertEqual(
+                        relative, "changes/recovery-artifact-digest-handoff.toml"
+                    )
+                    destination.write_bytes(
+                        subprocess.run(
+                            ["git", "show", f"{RECOVERY_FRAGMENT_SOURCE}:{relative}"],
+                            cwd=ROOT,
+                            check=True,
+                            capture_output=True,
+                        ).stdout
+                    )
             _git(origin, "add", "--all")
             _git(origin, "commit", "--quiet", "-m", "reviewed recovery repair")
             feature = _git(origin, "rev-parse", "HEAD")
