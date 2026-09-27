@@ -19,6 +19,7 @@ from ops.release import validation_recovery as recovery
 
 
 ROOT = Path(__file__).resolve().parents[2]
+RECOVERY_FRAGMENT_SOURCE = "02a3e0ee84b667797e3521e9ade47e5cb3f3ec27"
 
 
 def run(root: Path, *arguments: str) -> str:
@@ -821,6 +822,12 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "user.email",
                 "recovery-ledger@example.invalid",
             )
+            contract = recovery.load_contract(
+                ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
+            )
+            historical_version = tuple(
+                int(part) for part in contract["platform_version"].split(".")
+            )
             release_refs = run(
                 ROOT,
                 "for-each-ref",
@@ -828,13 +835,17 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "refs/remotes/origin/release/platform-v*",
             ).splitlines()
             self.assertTrue(release_refs)
+            historical_refs = 0
             for record in release_refs:
                 branch, commit = record.split()
+                version = tuple(
+                    int(part) for part in branch.removeprefix("release/platform-v").split(".")
+                )
+                if version > historical_version:
+                    continue
                 run(mirror, "update-ref", f"refs/heads/{branch}", commit)
-
-            contract = recovery.load_contract(
-                ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
-            )
+                historical_refs += 1
+            self.assertGreater(historical_refs, 0)
             review = base / "review"
             run(base, "clone", "--quiet", str(mirror), str(review))
             run(review, "config", "user.name", "Recovery Repair Fixture")
@@ -858,7 +869,20 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 source = ROOT / relative
                 if relative == "ops/release/published-release-recovery-v0.6.2.json":
                     source = recovery.HISTORICAL_CONTRACT
-                shutil.copyfile(source, destination)
+                if source.is_file():
+                    shutil.copyfile(source, destination)
+                else:
+                    self.assertEqual(
+                        relative, "changes/historical-check-pr-association.toml"
+                    )
+                    destination.write_bytes(
+                        subprocess.run(
+                            ["git", "show", f"{RECOVERY_FRAGMENT_SOURCE}:{relative}"],
+                            cwd=ROOT,
+                            check=True,
+                            capture_output=True,
+                        ).stdout
+                    )
             run(review, "add", "--all")
             run(
                 review,

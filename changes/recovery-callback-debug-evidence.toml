@@ -1,4 +1,0 @@
-schema_version = 1
-app = "platform"
-kind = "fix"
-summary = "Recognize exact handled ESI callback lookup traces for signed-in users, including the observed DEBUG mirror, during reviewed recovery."

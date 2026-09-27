@@ -1,4 +1,0 @@
-schema_version = 1
-app = "platform"
-kind = "fix"
-summary = "Recognize the isolated Celery DEBUG copy of the ESI Error schema model during worker health scans."
