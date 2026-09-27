@@ -1858,6 +1858,17 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 current_contract = approval_fixture._current_recovery_contract(
                     ready_report["ready"]
                 )
+                # Current source retains this contract under history; the
+                # frozen v0.6.2 test harness stages it at the former active
+                # path inside its isolated support directory.
+                historical_path = (
+                    approval_fixture.approval.validation_recovery.DEFAULT_CONTRACT
+                )
+                if not historical_path.is_file():
+                    historical_path = (
+                        approval_fixture.approval.validation_recovery.HISTORICAL_CONTRACT
+                    )
+                self.assertTrue(historical_path.is_file())
                 with mock.patch.object(
                     approval_fixture.approval.validation_recovery,
                     "load_contract",
@@ -1865,7 +1876,7 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                 ), mock.patch.object(
                     approval_fixture.approval.validation_recovery,
                     "DEFAULT_CONTRACT",
-                    approval_fixture.approval.validation_recovery.HISTORICAL_CONTRACT,
+                    historical_path,
                 ):
                     current_ready = (
                         approval_fixture.approval.ready_recovery_update(
