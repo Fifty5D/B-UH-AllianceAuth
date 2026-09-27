@@ -4968,7 +4968,44 @@ class DockerHost:
             owner_indexes = owner_service_findings.get(source, set())
             invalid_indexes = owner_invalid_indexes.get(source, set())
             source_lines = text.splitlines()
+            # aiopenapi3 names its error response *schema* "Error" while it
+            # rebuilds ESI models. The DEBUG message is emitted twice on a
+            # Celery worker, once with the AllianceAuth logger and once through
+            # Celery's MainProcess logger. Match the exact model-name record;
+            # keep scanning every other line, including any traceback or real
+            # ERROR beside it. An unpaired Celery message remains a finding.
+            schema_indexes: set[int] = set()
+            for schema_index, schema_line in enumerate(source_lines):
+                schema = ALLIANCEAUTH_LOG_HEADER_RE.match(schema_line)
+                if (
+                    schema is None
+                    or schema.group("level") != "DEBUG"
+                    or schema.group("component") != "esi.aiopenapi3.plugins"
+                    or schema.group("source_line") != "121"
+                    or schema_line[schema.end():] != "- Error"
+                ):
+                    continue
+                schema_indexes.add(schema_index)
+                if schema_index + 1 >= len(source_lines):
+                    continue
+                mirrored_line = source_lines[schema_index + 1]
+                mirrored = CELERY_LOG_HEADER_RE.match(mirrored_line)
+                if (
+                    mirrored is not None
+                    and mirrored.group("level") == "DEBUG"
+                    and mirrored.group("process") == "MainProcess"
+                    and mirrored.group("timestamp")[:19]
+                    == (
+                        f"{schema.group('year')}-"
+                        f"{ALLIANCEAUTH_LOG_MONTHS[schema.group('month')]}-"
+                        f"{schema.group('day')} {schema.group('clock')}"
+                    )
+                    and mirrored_line[mirrored.end():] == "- Error"
+                ):
+                    schema_indexes.add(schema_index + 1)
             for index, raw_line in enumerate(source_lines):
+                if index in schema_indexes:
+                    continue
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
                     if not processes:
