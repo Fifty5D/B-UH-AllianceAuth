@@ -1,9 +1,22 @@
-# Delivery process and current recovery state
+# Delivery process and recovery history
 
-Feature requests can be implemented, tested and merged now. Making a feature
-available on the live Auth site still requires verified recovery and a separately
-approved deployment. A GitHub merge, published release, installed receiver fix,
-and healthy production installation are four different states.
+## September 27 recovery completion and release sequence
+
+Attempt `gh-34713182347-1` completed on the host with the reviewed receiver,
+25 passing final checks, verified cleanup and its root-owned completion receipt.
+The rotated September worker-log interval remains explicitly unverified. The
+root-owned `HISTORY-CONFIG-MAINTENANCE.json` receipt verifies the bounded archive
+setup argument; no application deployment or service restart resulted from that
+configuration maintenance.
+
+The active recovery holds were retired after those host receipts were checked.
+Their published-release contract remains unchanged under `ops/release/history/`.
+**Prepare Release is paused** while immutable v0.6.2 receives a fresh no-change
+preflight and one owner deployment from validated `main`. Verify that deployment
+on the host before resuming automatic preparation for the accumulated Auth and
+history changes. A GitHub merge or publication alone does not prove installation.
+
+The dated sections below document earlier states and findings.
 
 ## September 22 diagnostic follow-up
 

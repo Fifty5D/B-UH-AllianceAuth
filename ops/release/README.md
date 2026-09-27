@@ -4,7 +4,11 @@ This directory contains a standard-library release planner and bundle verifier.
 It is deliberately separate from production deployment: it never edits an
 existing release directory and it never connects to the VPS.
 
-## Current v0.6.2 approved-deployment continuation (September 12)
+## Historical v0.6.2 approved-deployment continuation (September 12)
+
+The recovery completed on September 27. The old continuation below remains
+consumed; use the fresh manual v0.6.2 preflight and deployment sequence in
+[the delivery process](../../docs/operations/delivery-process.md).
 
 **Superseded by the post-migration failure:** PR #60 merged and dispatch
 `34713182347/1` reached the server. Its rollback verification failed on Celery

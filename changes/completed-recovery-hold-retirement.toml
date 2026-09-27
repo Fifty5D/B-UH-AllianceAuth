@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "internal"
+summary = "Retire the completed recovery holds after verified host recovery and history receiver setup."
