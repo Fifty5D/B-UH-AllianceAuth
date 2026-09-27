@@ -128,7 +128,7 @@ class VersionContracts(ContractAssertions, SimpleTestCase):
 
 
 class AllianceAuthContracts(ContractAssertions, SimpleTestCase):
-    """Alliance Auth 5.2 APIs and model paths shared by all three B-UH apps."""
+    """Pinned Alliance Auth APIs and model paths shared by B-UH apps."""
 
     def test_hook_notification_and_queue_apis_are_importable(self):
         from buh_structure_ops.tasks import capture_and_evaluate, queue_source_refreshes

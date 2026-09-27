@@ -247,6 +247,7 @@ class PublicCatalogIndex(models.Model):
         PENDING = "PENDING", "Pending"
         CATALOGED = "CATALOGED", "Cataloged"
         FAILED = "FAILED", "Failed"
+        UNAVAILABLE = "UNAVAILABLE", "Provider index unavailable"
 
     dataset = models.ForeignKey(
         PublicDataset, on_delete=models.CASCADE, related_name="indexes"
@@ -301,6 +302,8 @@ class PublicArchiveFile(models.Model):
     payload_sha256 = models.CharField(max_length=64, blank=True, default="")
     etag = models.CharField(max_length=300, blank=True, default="")
     remote_modified = models.CharField(max_length=120, blank=True, default="")
+    stored_etag = models.CharField(max_length=300, blank=True, default="")
+    stored_modified = models.CharField(max_length=120, blank=True, default="")
     source_time = models.DateTimeField(null=True, blank=True, db_index=True)
     discovered_at = models.DateTimeField(auto_now_add=True)
     downloaded_at = models.DateTimeField(null=True, blank=True)

@@ -7,11 +7,11 @@ release_path = "releases/moon-tax/v0.3.3"
 deployment_generation = "legacy-v1"
 
 [production_runtime]
-base_image = "registry.gitlab.com/allianceauth/allianceauth/auth@sha256:cc7f6903582ecfb0aaa877edd23c70877136d03d5979543b09ffd815307ab5db"
+base_image = "registry.gitlab.com/allianceauth/allianceauth/auth@sha256:4f7a6ebf0ea593220fbf38ace1e93f7cb25f7bb72224335e8d05ce48a10f11e7"
 
 [runtime]
 python = "3.12.13"
-allianceauth = "5.2.0"
+allianceauth = "5.4.0"
 django = "5.2.17"
 django_esi = "9.6.0"
 memberaudit = "5.0.4"

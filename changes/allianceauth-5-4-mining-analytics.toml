@@ -1,0 +1,4 @@
+schema_version = 1
+app = "mining-analytics"
+kind = "internal"
+summary = "Validate Mining Analytics against the pinned Alliance Auth 5.4 runtime."
