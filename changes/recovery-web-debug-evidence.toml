@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Recognize two bounded ESI DEBUG log records during reviewed recovery while retaining their digests and rejecting other web errors."

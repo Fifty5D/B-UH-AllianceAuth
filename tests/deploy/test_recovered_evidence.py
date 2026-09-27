@@ -322,6 +322,54 @@ class RecoveredLogTests(unittest.TestCase):
         self.assertNotIn("private-claim", str(caught.exception))
         self.assertIn("unrelated failure", str(caught.exception))
 
+    def test_retained_web_debug_shapes_are_bounded_and_do_not_hide_other_failures(self):
+        web = self.host.config.gunicorn_service
+        schema = (
+            "[01/Oct/2026 11:00:00] DEBUG [esi.aiopenapi3.plugins:121]  - Error\n"
+        )
+        callback = (
+            "[01/Oct/2026 11:01:00] DEBUG [esi.decorators:39] "
+            "No callback for AnonymousUser session xcmnc\n"
+            "Traceback (most recent call last):\n"
+            '  File "/usr/local/lib/python3.12/site-packages/esi/decorators.py", line 29, in _check_callback\n'
+            "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)\n"
+            "            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            '  File "/usr/local/lib/python3.12/site-packages/django/db/models/manager.py", line 87, in manager_method\n'
+            "    return getattr(self.get_queryset(), name)(*args, **kwargs)\n"
+            "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            '  File "/usr/local/lib/python3.12/site-packages/django/db/models/query.py", line 635, in get\n'
+            "    raise self.model.DoesNotExist(\n"
+            "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.\n"
+        )
+        self.assertTrue(self.classify(schema + callback, source=web))
+        self.assertEqual(
+            {item["category"] for item in self.host.recovered_log_review.summary()},
+            {"ESI-schema-model-name", "caught-ESI-callback-miss"},
+        )
+        ordinary = DockerHost(self.host.config)
+        with self.assertRaises(LogScanError):
+            ordinary._classify_log_batch([(web, schema + callback)], {self.service}, "rollback")
+        for changed in (
+            schema.replace("DEBUG", "ERROR"),
+            schema.replace("- Error", "- Error: failed"),
+            callback.replace("DEBUG", "ERROR"),
+            callback.replace("esi.decorators:39", "esi.decorators:40"),
+            callback.replace("CallbackRedirect.DoesNotExist", "Token.DoesNotExist"),
+            callback + "PermissionError: denied\n",
+            callback + "[01/Oct/2026 11:02:00] ERROR [esi.decorators:39] real failure\n",
+        ):
+            with self.subTest(changed=changed[:80]), self.assertRaises(LogScanError):
+                self.classify(changed, source=web)
+        for source in (web + "/000000000001", self.service + "/000000000001"):
+            with self.subTest(source=source), self.assertRaises(LogScanError):
+                self.classify(callback, source=source)
+        for phase in (None, "candidate", "promoted"):
+            with self.subTest(phase=phase), self.assertRaises(LogScanError):
+                self.classify(callback, source=web, phase=phase)
+        self.host.recovery_baseline_verified = False
+        with self.assertRaises(LogScanError):
+            self.classify(callback, source=web)
+
     def test_discord_history_is_reported_as_warning_and_fresh_or_denied_requests_block(
         self,
     ):
