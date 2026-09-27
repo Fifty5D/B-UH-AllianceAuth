@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "fix"
+summary = "Record bounded private evidence when a deployment finds changed previous-release static files."

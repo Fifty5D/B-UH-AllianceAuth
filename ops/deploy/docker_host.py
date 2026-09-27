@@ -3258,17 +3258,98 @@ class DockerHost:
         ):
             raise DeploymentError("Previous static manifest evidence was not captured")
         evidence = self._static_manifest_evidence(container)
-        if evidence != {
+        expected = {
             "manifest_sha256": self.static_manifest_sha256,
             "entries": self.static_manifest_entries,
             "assets": self.static_assets_count,
             "asset_bytes": self.static_assets_bytes,
             "assets_sha256": self.static_assets_sha256,
             "missing": 0,
-        }:
+        }
+        if evidence != expected:
+            changed = sorted(key for key in expected if evidence.get(key) != expected[key])
+            diagnostic: dict[str, Any] = {
+                "schema_version": 1,
+                "expected": expected,
+                "actual": evidence,
+                "changed_fields": changed,
+            }
+            if self.backup_path is not None:
+                if self.static_assets_backup is not None and any(
+                    key in changed
+                    for key in ("assets", "asset_bytes", "assets_sha256", "missing")
+                ):
+                    try:
+                        diagnostic["actual_assets"] = self._static_mismatch_assets(container)
+                    except (DeploymentError, OSError, ValueError) as exc:
+                        diagnostic["asset_capture_error"] = type(exc).__name__
+                try:
+                    _atomic_text(
+                        self.backup_path / "STATIC-MISMATCH.json",
+                        canonical_json_bytes(diagnostic).decode("ascii"),
+                        0o600,
+                    )
+                except OSError:
+                    pass
             raise DeploymentError(
                 "Previous static manifest or referenced hashed asset bytes changed"
+                f" (fields: {','.join(changed)})"
             )
+
+    def _static_mismatch_assets(self, container: str) -> Mapping[str, Any]:
+        """Capture bounded public asset hashes privately before rollback restores them."""
+
+        if self.static_manifest_backup is None or self.static_root_path is None:
+            raise DeploymentError("Previous static snapshot is unavailable")
+        manifest = json.loads(self.static_manifest_backup.read_text(encoding="utf-8"))
+        names = sorted(set(manifest["paths"].values()))
+        if not 1 <= len(names) <= MAX_STATIC_MANIFEST_ENTRIES or any(
+            not self._safe_static_relative_path(name) for name in names
+        ):
+            raise DeploymentError("Previous static asset paths are unsafe")
+        program = "\n".join(
+            (
+                "import hashlib,json,os,stat,sys",
+                "root,names=sys.argv[1],json.loads(sys.argv[2])",
+                "values={}",
+                "for name in names:",
+                " path=os.path.join(root,*name.split('/'))",
+                " try:",
+                "  details=os.lstat(path)",
+                "  if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):",
+                "   values[name]=None;continue",
+                "  digest=hashlib.sha256();size=0",
+                "  with open(path,'rb') as stream:",
+                "   while True:",
+                "    chunk=stream.read(1048576)",
+                "    if not chunk:break",
+                "    size+=len(chunk);digest.update(chunk)",
+                "  values[name]={'sha256':digest.hexdigest(),'size':size}",
+                " except FileNotFoundError:values[name]=None",
+                "print(json.dumps(values,sort_keys=True,separators=(',',':')))",
+            )
+        )
+        output = self._run(
+            ["docker", "exec", container, "python3", "-c", program,
+             self.static_root_path, json.dumps(names, separators=(",", ":"))],
+            context="Private previous static mismatch capture",
+        )
+        if len(output) > 128 * 1024:
+            raise DeploymentError("Previous static mismatch capture is oversized")
+        actual = json.loads(output)
+        if not isinstance(actual, dict) or set(actual) != set(names):
+            raise DeploymentError("Previous static mismatch capture is malformed")
+        for value in actual.values():
+            if value is not None and (
+                not isinstance(value, dict)
+                or set(value) != {"sha256", "size"}
+                or not isinstance(value["sha256"], str)
+                or SHA256_RE.fullmatch(value["sha256"]) is None
+                or not isinstance(value["size"], int)
+                or not 0 <= value["size"] <= MAX_STATIC_FILE_BYTES
+            ):
+                raise DeploymentError("Previous static mismatch capture is malformed")
+        return actual
 
     def _verify_previous_static_fallback(self) -> None:
         if not self.previous_web_slots:
