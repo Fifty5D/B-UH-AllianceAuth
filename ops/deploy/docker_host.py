@@ -2464,6 +2464,7 @@ class DockerHost:
         self._validate_recovery_host_baseline(bundle)
         self._capture_infrastructure_restart_baselines()
         self._capture_static_manifest()
+        self._prepare_previous_static_snapshot()
         self.previous_image_pins = {
             service: f"buh-platform-v2-rollback:{bundle.request.attempt_id}-{index}"
             for index, service in enumerate(self.config.auth_services)
@@ -2471,8 +2472,8 @@ class DockerHost:
         self._save_recovery_plan(bundle.request.attempt_id, "prepared")
         self._pin_previous_images(bundle)
         # Start old-image slots while the Compose image reference and shared
-        # static manifest still describe the live release. Their read-only
-        # manifest bind remains immutable through candidate collectstatic.
+        # static manifest still describe the live release. Their private static
+        # directory remains immutable through candidate collectstatic.
         self._start_previous_web_slots(bundle)
         self.staged_release = self._stage_release(bundle)
         self._write_candidate_dockerfile(bundle)
@@ -2873,6 +2874,7 @@ class DockerHost:
             context="Static asset collection",
         )
         self._verify_previous_static_fallback()
+        self._verify_shared_previous_static_assets()
         for command in bundle.install_plan["setup_commands"]:
             self._manage_image(
                 command,
@@ -3173,6 +3175,94 @@ class DockerHost:
         self.static_assets_bytes = evidence["asset_bytes"]
         self._capture_static_assets(container, set(paths.values()))
 
+    def _previous_static_snapshot_paths(self) -> tuple[Path, Path]:
+        if self.backup_path is None:
+            raise DeploymentError("Previous static backup path is unavailable")
+        return (
+            self.backup_path / "previous-static-root",
+            self.backup_path / "previous-static-override.yml",
+        )
+
+    def _prepare_previous_static_snapshot(self) -> None:
+        """Give old web slots a stable directory mount across manifest replacement."""
+
+        if (
+            self.static_manifest_backup is None
+            or self.static_manifest_path is None
+            or self.static_root_path is None
+            or self.static_manifest_sha256 is None
+            or self.static_assets_backup is None
+            or self.static_assets_backup_sha256 is None
+            or self.static_assets_count is None
+            or self.static_assets_bytes is None
+            or self.static_assets_sha256 is None
+        ):
+            raise DeploymentError("Previous static snapshot evidence is incomplete")
+        manifest = json.loads(self.static_manifest_backup.read_text(encoding="utf-8"))
+        names = set(manifest["paths"].values())
+        if (
+            Path(self.static_manifest_path).name != "staticfiles.json"
+            or sha256_file(self.static_manifest_backup) != self.static_manifest_sha256
+            or sha256_file(self.static_assets_backup) != self.static_assets_backup_sha256
+            or self._static_asset_archive_evidence(self.static_assets_backup, names)
+            != {
+                "assets": self.static_assets_count,
+                "asset_bytes": self.static_assets_bytes,
+                "assets_sha256": self.static_assets_sha256,
+            }
+        ):
+            raise DeploymentError("Previous static snapshot source changed")
+        root, override = self._previous_static_snapshot_paths()
+        if root.exists() or override.exists():
+            raise DeploymentError("Previous static snapshot already exists")
+        root.mkdir(mode=0o700)
+        directories: set[Path] = set()
+        with tarfile.open(self.static_assets_backup, "r:") as archive:
+            for member in archive:
+                if not member.isfile() or member.name not in names:
+                    raise DeploymentError("Previous static snapshot archive is unsafe")
+                target = root.joinpath(*member.name.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                parent = target.parent
+                while parent != root:
+                    directories.add(parent)
+                    parent = parent.parent
+                source = archive.extractfile(member)
+                if source is None:
+                    raise DeploymentError("Previous static snapshot asset is unreadable")
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o400,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if target.stat().st_size != member.size:
+                    raise DeploymentError("Previous static snapshot asset size changed")
+                target.chmod(0o444)
+        snapshot_manifest = root / "staticfiles.json"
+        snapshot_manifest.write_bytes(self.static_manifest_backup.read_bytes())
+        snapshot_manifest.chmod(0o444)
+        if sha256_file(snapshot_manifest) != self.static_manifest_sha256:
+            raise DeploymentError("Previous static snapshot manifest changed")
+        for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
+            directory.chmod(0o555)
+        root.chmod(0o555)
+        if re.fullmatch(r"[A-Za-z0-9_-]+", self.config.gunicorn_service) is None:
+            raise DeploymentError("Gunicorn service name is unsafe")
+        content = (
+            "services:\n"
+            f"  {self.config.gunicorn_service}:\n"
+            "    volumes:\n"
+            "      - type: bind\n"
+            f"        source: {json.dumps(str(root))}\n"
+            f"        target: {json.dumps(self.static_root_path)}\n"
+            "        read_only: true\n"
+        )
+        _atomic_text(override, content, 0o600)
+
     def _static_manifest_evidence(self, container: str) -> Mapping[str, Any]:
         if self.static_manifest_path is None:
             raise DeploymentError("Previous static manifest path was not captured")
@@ -3297,7 +3387,7 @@ class DockerHost:
             )
 
     def _static_mismatch_assets(self, container: str) -> Mapping[str, Any]:
-        """Capture bounded public asset hashes privately before rollback restores them."""
+        """Read bounded hashes of old manifest assets from a container's static root."""
 
         if self.static_manifest_backup is None or self.static_root_path is None:
             raise DeploymentError("Previous static snapshot is unavailable")
@@ -3351,6 +3441,37 @@ class DockerHost:
                 raise DeploymentError("Previous static mismatch capture is malformed")
         return actual
 
+    def _verify_shared_previous_static_assets(self) -> None:
+        """Keep Nginx's shared old hashed files intact while old slots can serve."""
+
+        if (
+            self.static_assets_count is None
+            or self.static_assets_bytes is None
+            or self.static_assets_sha256 is None
+        ):
+            raise DeploymentError("Previous shared static evidence is incomplete")
+        container = self._container_names_for_service(
+            self.config.gunicorn_service
+        )[0]
+        assets = self._static_mismatch_assets(container)
+        aggregate = hashlib.sha256()
+        total = 0
+        for name, value in sorted(assets.items()):
+            if value is None:
+                raise DeploymentError("Previous static asset is missing from Nginx volume")
+            total += value["size"]
+            aggregate.update(
+                canonical_json_bytes(
+                    {"path": name, "sha256": value["sha256"], "size": value["size"]}
+                )
+            )
+        if (
+            len(assets) != self.static_assets_count
+            or total != self.static_assets_bytes
+            or aggregate.hexdigest() != self.static_assets_sha256
+        ):
+            raise DeploymentError("Previous static assets changed in Nginx volume")
+
     def _verify_previous_static_fallback(self) -> None:
         if not self.previous_web_slots:
             raise DeploymentError("Previous static-safe web slots are unavailable")
@@ -3361,8 +3482,41 @@ class DockerHost:
             context="Previous static-safe web slots",
         )
         for container in self.previous_web_slots:
+            self._verify_previous_static_mount(container)
             self._verify_previous_static_manifest(container)
             self._internal_http_checks(container)
+
+    def _verify_previous_static_mount(self, container: str) -> None:
+        if self.static_root_path is None:
+            raise DeploymentError("Previous static root path is unavailable")
+        root, override = self._previous_static_snapshot_paths()
+        if not root.is_dir() or not override.is_file():
+            raise DeploymentError("Previous static snapshot is unavailable")
+        output = self._run(
+            ["docker", "inspect", "--format", "{{json .Mounts}}", container],
+            context=f"Previous static snapshot mount for {container}",
+        )
+        try:
+            mounts = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise DeploymentError("Previous static snapshot mount is unreadable") from exc
+        matched = (
+            [
+                item for item in mounts
+                if isinstance(item, dict)
+                and item.get("Destination") == self.static_root_path
+            ]
+            if isinstance(mounts, list)
+            else []
+        )
+        if len(matched) != 1 or any(
+            not isinstance(item, dict)
+            or item.get("Type") != "bind"
+            or item.get("Source") != str(root)
+            or item.get("RW") is not False
+            for item in matched
+        ):
+            raise DeploymentError("Previous static snapshot is not mounted read-only")
 
     def _protect_static_collection_traffic(self) -> None:
         """Move users onto old slots whose manifest cannot change."""
@@ -3646,24 +3800,17 @@ class DockerHost:
                 name,
             ]
             if role == "previous":
-                if (
-                    self.static_manifest_backup is None
-                    or self.static_manifest_path is None
-                ):
-                    raise DeploymentError(
-                        "Previous web slot lacks an isolated static manifest"
-                    )
-                arguments.extend(
-                    (
-                        "--volume",
-                        f"{self.static_manifest_backup}:{self.static_manifest_path}:ro",
-                    )
-                )
+                root, override = self._previous_static_snapshot_paths()
+                if not root.is_dir() or not override.is_file():
+                    raise DeploymentError("Previous web slot lacks its static snapshot")
             arguments.append(self.config.gunicorn_service)
-            self._compose(
-                *arguments,
-                context=f"{role.title()} web slot startup",
-            )
+            if role == "previous":
+                self._run(
+                    [*self.compose_prefix, "-f", str(override), *arguments],
+                    context="Previous web slot startup",
+                )
+            else:
+                self._compose(*arguments, context="Candidate web slot startup")
         self._wait_for_slots(names, expected_image, context=f"{role.title()} web slots")
         return names
 
@@ -5281,8 +5428,10 @@ class DockerHost:
                 context="Previous web rollback slots",
             )
             for container in self.previous_web_slots:
+                self._verify_previous_static_mount(container)
                 self._verify_previous_static_manifest(container)
                 self._internal_http_checks(container)
+            self._verify_shared_previous_static_assets()
         self._redis_health()
         self._celery_health()
         self._public_smoke_checks()

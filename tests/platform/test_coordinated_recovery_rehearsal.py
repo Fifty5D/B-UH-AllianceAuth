@@ -625,6 +625,13 @@ class SyntheticDockerBoundary:
         raise AssertionError(f"unexpected Compose boundary call: {arguments!r}")
 
     def run(self, arguments: list[str], *, context: str, **_kwargs) -> str:
+        prefix = self.host.compose_prefix
+        if arguments[:len(prefix)] == prefix and arguments[len(prefix):len(prefix) + 1] == ["-f"]:
+            _, override, *compose_arguments = arguments[len(prefix):]
+            expected = self.host._previous_static_snapshot_paths()[1]
+            assert override == str(expected)
+            assert expected.is_file()
+            return self.compose(*compose_arguments, context=context)
         if arguments[:3] == ["docker", "image", "tag"]:
             source, target = arguments[-2:]
             self.tags[target] = self.tags.get(source, source)
@@ -760,6 +767,11 @@ class SyntheticDockerBoundary:
         host.static_assets_count = 1
         host.static_assets_bytes = 32
         host.static_assets_sha256 = "f" * 64
+
+    def prepare_static_snapshot(self) -> None:
+        root, override = self.host._previous_static_snapshot_paths()
+        root.mkdir()
+        override.write_text("services: {}\n", encoding="ascii")
 
     @contextmanager
     def database_lock(self, _container: str):
@@ -959,7 +971,21 @@ def exercised_docker_boundary(
         )
         stack.enter_context(
             mock.patch.object(
+                host, "_prepare_previous_static_snapshot",
+                side_effect=boundary.prepare_static_snapshot,
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
                 host, "_verify_previous_static_manifest", return_value=None
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(host, "_verify_previous_static_mount", return_value=None)
+        )
+        stack.enter_context(
+            mock.patch.object(
+                host, "_verify_shared_previous_static_assets", return_value=None
             )
         )
         stack.enter_context(

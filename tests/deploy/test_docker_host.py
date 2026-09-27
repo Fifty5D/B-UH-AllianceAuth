@@ -2325,16 +2325,22 @@ class DockerHostContracts(unittest.TestCase):
             ):
                 host._capture_static_manifest()
 
-    def test_previous_slot_read_only_binds_the_pre_collection_manifest(self):
+    def test_previous_slot_uses_a_read_only_static_directory_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             host = DockerHost(make_config(root))
             host.auth_replica_counts = {
                 service: 1 for service in host.config.auth_services
             }
-            host.static_manifest_backup = root / "staticfiles.previous.json"
-            host.static_manifest_path = "/var/www/static/staticfiles.json"
-            with mock.patch.object(host, "_compose", return_value="") as compose, mock.patch.object(
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            snapshot, override = host._previous_static_snapshot_paths()
+            snapshot.mkdir()
+            override.write_text("read_only: true\n", encoding="ascii")
+            with mock.patch.object(
+                DockerHost, "compose_prefix", new_callable=mock.PropertyMock,
+                return_value=["docker", "compose"]
+            ), mock.patch.object(host, "_run", return_value="") as run, mock.patch.object(
                 host, "_wait_for_slots"
             ):
                 host._start_web_slots(
@@ -2342,16 +2348,101 @@ class DockerHostContracts(unittest.TestCase):
                     role="previous",
                     expected_image="sha256:" + "a" * 64,
                 )
-            arguments = compose.call_args.args
-            self.assertIn("--volume", arguments)
-            self.assertIn(
-                f"{host.static_manifest_backup}:{host.static_manifest_path}:ro",
-                arguments,
+            arguments = run.call_args.args[0]
+            self.assertEqual(arguments[:2], ["docker", "compose"])
+            self.assertEqual(arguments[2:4], ["-f", str(override)])
+            self.assertNotIn("--volume", arguments)
+            self.assertEqual(arguments[-1], host.config.gunicorn_service)
+
+    @unittest.skipIf(os.name == "nt", "POSIX static snapshot permissions")
+    def test_previous_static_snapshot_preserves_manifest_and_exact_old_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = DockerHost(make_config(root))
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            host.static_root_path = "/var/www/static"
+            host.static_manifest_path = "/var/www/static/staticfiles.json"
+            host.static_manifest_backup = host.backup_path / "staticfiles.previous.json"
+            manifest = {
+                "paths": {"css/base.css": "css/base.123456789abc.css"},
+                "version": "1.1", "hash": "abcdef012345",
+            }
+            host.static_manifest_backup.write_text(json.dumps(manifest), encoding="utf-8")
+            host.static_manifest_sha256 = hashlib.sha256(
+                host.static_manifest_backup.read_bytes()
+            ).hexdigest()
+            host.static_assets_backup = host.backup_path / "static-assets.previous.tar"
+            asset_name = "css/base.123456789abc.css"
+            asset_bytes = b"old release css"
+            with tarfile.open(host.static_assets_backup, "w") as archive:
+                info = tarfile.TarInfo(asset_name)
+                info.size = len(asset_bytes)
+                info.mode = 0o644
+                archive.addfile(info, io.BytesIO(asset_bytes))
+            host.static_assets_backup_sha256 = hashlib.sha256(
+                host.static_assets_backup.read_bytes()
+            ).hexdigest()
+            host.static_assets_count = 1
+            host.static_assets_bytes = len(asset_bytes)
+            record = {"path": asset_name, "sha256": hashlib.sha256(asset_bytes).hexdigest(),
+                      "size": len(asset_bytes)}
+            host.static_assets_sha256 = hashlib.sha256(
+                (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ).hexdigest()
+
+            host._prepare_previous_static_snapshot()
+            snapshot, override = host._previous_static_snapshot_paths()
+            self.assertEqual((snapshot / asset_name).read_bytes(), asset_bytes)
+            self.assertEqual(
+                (snapshot / "staticfiles.json").read_bytes(),
+                host.static_manifest_backup.read_bytes(),
             )
-            self.assertLess(
-                arguments.index("--volume"),
-                arguments.index(host.config.gunicorn_service),
-            )
+            self.assertEqual(snapshot.stat().st_mode & 0o777, 0o555)
+            self.assertEqual((snapshot / asset_name).stat().st_mode & 0o777, 0o444)
+            self.assertIn("read_only: true", override.read_text(encoding="ascii"))
+            self.assertIn(str(snapshot), override.read_text(encoding="ascii"))
+
+    def test_previous_static_mount_must_be_the_private_read_only_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = DockerHost(make_config(root))
+            host.backup_path = root / "backup"
+            host.backup_path.mkdir()
+            host.static_root_path = "/var/www/static"
+            snapshot, override = host._previous_static_snapshot_paths()
+            snapshot.mkdir()
+            override.write_text("read_only: true\n", encoding="ascii")
+            mount = {"Type": "bind", "Source": str(snapshot),
+                     "Destination": host.static_root_path, "RW": False}
+            with mock.patch.object(host, "_run", return_value=json.dumps([mount])):
+                host._verify_previous_static_mount("previous-slot")
+            mount["RW"] = True
+            with mock.patch.object(host, "_run", return_value=json.dumps([mount])), self.assertRaisesRegex(
+                DeploymentError, "not mounted read-only"
+            ):
+                host._verify_previous_static_mount("previous-slot")
+
+    def test_shared_nginx_static_assets_must_keep_previous_hashes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            host = DockerHost(make_config(Path(temporary)))
+            asset = "css/base.123456789abc.css"
+            value = {"sha256": hashlib.sha256(b"old").hexdigest(), "size": 3}
+            record = {"path": asset, **value}
+            host.static_assets_count = 1
+            host.static_assets_bytes = 3
+            host.static_assets_sha256 = hashlib.sha256(
+                (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ).hexdigest()
+            with mock.patch.object(host, "_container_names_for_service", return_value=("live",)), mock.patch.object(
+                host, "_static_mismatch_assets", return_value={asset: value}
+            ):
+                host._verify_shared_previous_static_assets()
+            altered = {"sha256": hashlib.sha256(b"new").hexdigest(), "size": 3}
+            with mock.patch.object(host, "_container_names_for_service", return_value=("live",)), mock.patch.object(
+                host, "_static_mismatch_assets", return_value={asset: altered}
+            ), self.assertRaisesRegex(DeploymentError, "changed in Nginx volume"):
+                host._verify_shared_previous_static_assets()
 
     def test_previous_slots_start_before_candidate_build_or_collectstatic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2389,6 +2480,10 @@ class DockerHostContracts(unittest.TestCase):
                 side_effect=lambda: events.append("manifest"),
             ), mock.patch.object(
                 host,
+                "_prepare_previous_static_snapshot",
+                side_effect=lambda: events.append("snapshot"),
+            ), mock.patch.object(
+                host,
                 "_start_previous_web_slots",
                 side_effect=lambda _bundle: events.append("previous"),
             ), mock.patch.object(
@@ -2404,7 +2499,8 @@ class DockerHostContracts(unittest.TestCase):
             ), mock.patch.object(host, "_manage_image"):
                 host.prepare_candidate(make_bundle(root))
 
-            self.assertLess(events.index("manifest"), events.index("previous"))
+            self.assertLess(events.index("manifest"), events.index("snapshot"))
+            self.assertLess(events.index("snapshot"), events.index("previous"))
             self.assertLess(events.index("baseline-workers"), events.index("manifest"))
             self.assertLess(events.index("previous"), events.index("build"))
 
@@ -2509,6 +2605,10 @@ class DockerHostContracts(unittest.TestCase):
                 host,
                 "_verify_previous_static_fallback",
                 side_effect=lambda: events.append("verify-old-static"),
+            ), mock.patch.object(
+                host,
+                "_verify_shared_previous_static_assets",
+                side_effect=lambda: events.append("verify-nginx-static"),
             ):
                 host.migrate(make_bundle(root))
             self.assertLess(
@@ -2516,6 +2616,12 @@ class DockerHostContracts(unittest.TestCase):
             )
             self.assertLess(
                 events.index("collectstatic"), events.index("verify-old-static")
+            )
+            self.assertLess(
+                events.index("verify-old-static"), events.index("verify-nginx-static")
+            )
+            self.assertLess(
+                events.index("verify-nginx-static"), events.index("buh_moon_tax_setup")
             )
             self.assertLess(
                 events.index("verify-old-static"), events.index("buh_moon_tax_setup")
