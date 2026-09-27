@@ -59,6 +59,21 @@ HTTP_EXCEPTIONS = {
     "esi.exceptions.HTTPClientError",
     "aiopenapi3.errors.HTTPClientError",
 }
+# Installed ESI middleware catches this missing callback lookup at DEBUG and
+# redirects the anonymous session to SSO. Match its observed traceback exactly;
+# a different exception, frame, or trailing line remains a fatal log finding.
+CAUGHT_CALLBACK_MISS_TRACE = (
+    "Traceback (most recent call last):",
+    '  File "/usr/local/lib/python3.12/site-packages/esi/decorators.py", line 29, in _check_callback',
+    "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)",
+    "            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    '  File "/usr/local/lib/python3.12/site-packages/django/db/models/manager.py", line 87, in manager_method',
+    "    return getattr(self.get_queryset(), name)(*args, **kwargs)",
+    "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    '  File "/usr/local/lib/python3.12/site-packages/django/db/models/query.py", line 635, in get',
+    "    raise self.model.DoesNotExist(",
+    "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.",
+)
 JWT_KEYS = {
     "scp",
     "jti",
@@ -195,6 +210,30 @@ class RecoveredLogReview:
             }
             for (kind, source), group in sorted(self.groups.items())
         ]
+
+    def classify_web_debug(self, lines):
+        """Recognize two observed, bounded ESI DEBUG shapes on the retained web slot."""
+        if not lines or not ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]):
+            return None
+        event, level, logger, message = header(lines[0])
+        if level != "DEBUG" or event + timedelta(seconds=1) > self.started_at:
+            return None
+        source_line = ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0])["source_line"]
+        if (
+            logger == "esi.aiopenapi3.plugins"
+            and source_line == "121"
+            and message == "- Error"
+            and len(lines) == 1
+        ):
+            return "ESI-schema-model-name"
+        if (
+            logger == "esi.decorators"
+            and source_line == "39"
+            and re.fullmatch(r"No callback for AnonymousUser session [a-z0-9]{5}", message)
+            and tuple(lines[1:]) == CAUGHT_CALLBACK_MISS_TRACE
+        ):
+            return "caught-ESI-callback-miss"
+        return None
 
     def classify(self, lines, *, services_worker, source):
         details = header(lines[0]) if lines else None
@@ -406,17 +445,25 @@ class ReviewedDockerHost(DockerHost):
         accepted = set()
         for source, text in logs_by_source:
             service, _, identity = source.partition("/")
-            if (
-                service not in individually_scanned
-                or identity not in self.reviewed_worker_ids
-            ):
+            reviewed_worker = (
+                service in individually_scanned
+                and identity in self.reviewed_worker_ids
+            )
+            reviewed_web = source == self.config.gunicorn_service
+            if not (reviewed_worker or reviewed_web):
                 strict.append((source, text))
                 continue
             remaining = []
             for record in records(text):
                 try:
-                    kind = review.classify(
-                        record, services_worker=service.endswith("_services"), source=source
+                    kind = (
+                        review.classify_web_debug(record)
+                        if reviewed_web
+                        else review.classify(
+                            record,
+                            services_worker=service.endswith("_services"),
+                            source=source,
+                        )
                     )
                 except MetadataLogError:
                     remaining.append(
