@@ -32,7 +32,7 @@ PATTERNS = (
     (
         re.compile(
             r"(?i)([?&](?:access_token|refresh_token|token|key|api_key|secret|"
-            r"signature|sig|auth|sentry_key)=)[^&\s\"']+"
+            r"signature|sig|auth|sentry_key|code|session_state)=)[^&\s\"']+"
         ),
         r"\1<redacted>",
     ),
@@ -67,7 +67,7 @@ VALIDATION_PATTERNS = (
         "sensitive-query-parameter",
         re.compile(
             r"(?i)[?&](?:access_token|refresh_token|token|key|api_key|secret|"
-            r"signature|sig|auth|sentry_key)=(?!<redacted>)[^&\s\"']+"
+            r"signature|sig|auth|sentry_key|code|session_state)=(?!<redacted>)[^&\s\"']+"
         ),
     ),
     (

@@ -1,6 +1,7 @@
 allianceauth==5.4.0
 Django==5.2.17
 django-esi==9.6.0
+aiopenapi3==0.10.0
 aa-memberaudit==5.0.4
 django-eveuniverse==2.1.0
 celery==5.6.3
