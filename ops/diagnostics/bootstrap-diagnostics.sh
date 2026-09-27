@@ -69,7 +69,7 @@ Unit=buh-diagnostics-publish.service
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now buh-diagnostics.timer buh-diagnostics-publish.timer
 systemctl start buh-diagnostics.service
 systemctl start buh-diagnostics-publish.service
+systemctl enable --now buh-diagnostics.timer buh-diagnostics-publish.timer
 echo 'Diagnostics collector and private publisher installed; verify live connector retrieval.'
