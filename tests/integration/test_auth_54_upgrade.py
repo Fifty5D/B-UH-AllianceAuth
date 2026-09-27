@@ -28,6 +28,7 @@ class AllianceAuth54UpgradeContract(TransactionTestCase):
             announcement_number=1,
             announcement_text="Preserve this synthetic announcement",
             announcement_url="https://example.invalid/upgrade",
+            announcement_hash="buh-synthetic-upgrade-announcement",
         )
         try:
             MigrationExecutor(connection).migrate(latest)

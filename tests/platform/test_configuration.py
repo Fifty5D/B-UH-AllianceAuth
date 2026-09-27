@@ -210,6 +210,7 @@ class PlatformConfigurationContracts(TestCase):
             production,
             {
                 "allianceauth": runtime["allianceauth"],
+                "aiopenapi3": runtime["aiopenapi3"],
                 "django": runtime["django"],
                 "django-esi": runtime["django_esi"],
                 "aa-memberaudit": runtime["memberaudit"],

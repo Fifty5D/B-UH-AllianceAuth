@@ -21,7 +21,6 @@ import sys
 import tempfile
 import threading
 import zlib
-from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -80,7 +79,7 @@ for job in ArchiveJob.objects.order_by("-requested_at").values(
                  "finished_at": job["finished_at"].isoformat()
                  if job["finished_at"] else None,
                  "downloaded_files": result.get("downloaded_files"),
-                 "errors": len(result.get("errors", [])),
+                 "errors": len(result.get("errors") or []),
                  "provider_gaps": sum(x.get("unavailable_indexes", 0)
                                       for x in catalog.get("datasets", [])
                                       if isinstance(x, dict))})
@@ -454,21 +453,41 @@ def create_report(db, containers, generated):
     gap_count = db.execute(
         "SELECT COUNT(*) FROM gaps WHERE at>=?", (cutoff,)
     ).fetchone()[0]
-    groups = defaultdict(lambda: {"count": 0, "first_at": None, "last_at": None,
-                                  "sample": "", "service": ""})
-    for service, at, key, blob in db.execute(
-        "SELECT service,at,error_key,message FROM logs "
-        "WHERE error_key IS NOT NULL AND at>=? ORDER BY at DESC LIMIT 20000",
-        (stamp(generated - timedelta(hours=24)),),
+    first_log = db.execute(
+        "SELECT MIN(at) FROM logs WHERE at>=?", (cutoff,)
+    ).fetchone()[0]
+    errors = []
+    for service, key, count, first_at, last_at in db.execute(
+        "SELECT service,error_key,COUNT(*),MIN(at),MAX(at) FROM logs "
+        "WHERE error_key IS NOT NULL AND at>=? GROUP BY service,error_key "
+        "ORDER BY COUNT(*) DESC LIMIT 25", (cutoff,),
     ):
-        group = groups[(service, key)]
-        group["count"] += 1
-        group["last_at"] = group["last_at"] or at
-        group["first_at"] = at
-        group["service"] = service
-        if not group["sample"]:
-            group["sample"] = zlib.decompress(blob).decode("utf-8")[:1200]
-    errors = sorted(groups.values(), key=lambda item: item["count"], reverse=True)[:25]
+        sample = db.execute(
+            "SELECT message FROM logs WHERE service=? AND error_key=? "
+            "ORDER BY at DESC LIMIT 1", (service, key),
+        ).fetchone()
+        context = [
+            zlib.decompress(row[0]).decode("utf-8")[:300]
+            for row in db.execute(
+                "SELECT message FROM logs WHERE service=? AND at>=? AND at<=? "
+                "ORDER BY at,id LIMIT 8",
+                (service, last_at, stamp(parse_stamp(last_at) + timedelta(seconds=5))),
+            )
+        ]
+        errors.append({
+            "service": service, "count": count, "first_at": first_at,
+            "last_at": last_at,
+            "sample": zlib.decompress(sample[0]).decode("utf-8")[:1200]
+            if sample else "",
+            "context": context,
+            "evidence": {"from_utc": last_at,
+                         "to_utc": stamp(parse_stamp(last_at) + timedelta(seconds=5)),
+                         "service": service},
+        })
+    errors_24h_total = db.execute(
+        "SELECT COUNT(*) FROM logs WHERE error_key IS NOT NULL AND at>=?",
+        (stamp(generated - timedelta(hours=24)),),
+    ).fetchone()[0]
     latest_resource = db.execute(
         "SELECT at,free_bytes,available_memory_bytes,load_1m FROM resources "
         "ORDER BY at DESC LIMIT 1"
@@ -493,6 +512,8 @@ def create_report(db, containers, generated):
             "degraded" if unhealthy_container or gaps or recent_failed_job else "healthy"
         ),
         "history_retention_days": 30,
+        "collector_started_at": get_meta(db, "collector:started_at"),
+        "earliest_retained_log_at": first_log,
         "sources": sources,
         "coverage_gaps": gaps,
         "coverage_gap_count": gap_count,
@@ -505,7 +526,8 @@ def create_report(db, containers, generated):
             ("minimum_free_bytes", "minimum_available_memory_bytes", "maximum_load_1m"),
             resource_history,
         )) if resource_history else None,
-        "errors_24h": errors,
+        "errors_24h_total": errors_24h_total,
+        "errors_30d": errors,
         "evidence": {"format": "redacted JSONL", "query":
                      "Use the private 30-day daily evidence artifact index by UTC date."},
     }
@@ -529,6 +551,12 @@ def atomic_report(value):
         Path(filename).unlink(missing_ok=True)
 
 
+def prune_history(db, cutoff):
+    db.execute("DELETE FROM logs WHERE at<?", (cutoff,))
+    db.execute("DELETE FROM gaps WHERE at<?", (cutoff,))
+    db.execute("DELETE FROM resources WHERE at<?", (cutoff,))
+
+
 def collect():
     import fcntl
 
@@ -538,6 +566,9 @@ def collect():
         end = utcnow()
         try:
             redact = redactor()
+            if get_meta(db, "collector:started_at") is None:
+                set_meta(db, "collector:started_at", stamp(end))
+                gap(db, "historical-coverage", "Logs that rotated before collector installation cannot be recovered; verify each source's earliest retained record")
             if shutil.disk_usage(ROOT).free < MINIMUM_FREE_BYTES:
                 containers = []
                 gap(db, "storage", "Diagnostic log capture paused by free-space guard")
@@ -556,15 +587,22 @@ def collect():
             except (OSError, ValueError) as exc:
                 gap(db, "resources", "Resource sampling failed: " + type(exc).__name__)
             cutoff = stamp(end - RETENTION)
-            db.execute("DELETE FROM logs WHERE at<?", (cutoff,))
-            db.execute("DELETE FROM gaps WHERE at<?", (cutoff,))
-            db.execute("DELETE FROM resources WHERE at<?", (cutoff,))
+            prune_history(db, cutoff)
             db.commit()
             last_vacuum = get_meta(db, "database:last_vacuum")
-            if last_vacuum is None or end - parse_stamp(last_vacuum) >= timedelta(days=7):
+            database_size = (ROOT / "history.sqlite3").stat().st_size
+            safe_to_vacuum = shutil.disk_usage(ROOT).free > (
+                MINIMUM_FREE_BYTES + 2 * database_size
+            )
+            if safe_to_vacuum and (
+                last_vacuum is None
+                or end - parse_stamp(last_vacuum) >= timedelta(days=7)
+            ):
                 db.execute("VACUUM")
                 set_meta(db, "database:last_vacuum", stamp(end))
                 db.commit()
+            else:
+                db.execute("PRAGMA wal_checkpoint(PASSIVE)")
             atomic_report(create_report(db, containers, end))
         finally:
             db.close()
