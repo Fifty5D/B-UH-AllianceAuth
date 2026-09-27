@@ -822,6 +822,12 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "user.email",
                 "recovery-ledger@example.invalid",
             )
+            contract = recovery.load_contract(
+                ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
+            )
+            historical_version = tuple(
+                int(part) for part in contract["platform_version"].split(".")
+            )
             release_refs = run(
                 ROOT,
                 "for-each-ref",
@@ -829,13 +835,17 @@ class PublishedReleaseRecoveryTests(unittest.TestCase):
                 "refs/remotes/origin/release/platform-v*",
             ).splitlines()
             self.assertTrue(release_refs)
+            historical_refs = 0
             for record in release_refs:
                 branch, commit = record.split()
+                version = tuple(
+                    int(part) for part in branch.removeprefix("release/platform-v").split(".")
+                )
+                if version > historical_version:
+                    continue
                 run(mirror, "update-ref", f"refs/heads/{branch}", commit)
-
-            contract = recovery.load_contract(
-                ROOT / "ops/release/history/published-release-recovery-v0.6.2.json"
-            )
+                historical_refs += 1
+            self.assertGreater(historical_refs, 0)
             review = base / "review"
             run(base, "clone", "--quiet", str(mirror), str(review))
             run(review, "config", "user.name", "Recovery Repair Fixture")
