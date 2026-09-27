@@ -5006,6 +5006,20 @@ class DockerHost:
             for index, raw_line in enumerate(source_lines):
                 if index in schema_indexes:
                     continue
+                # Compose can split or reorder Celery's duplicate into a later
+                # bounded batch without its AllianceAuth partner. On the one
+                # configured worker service, this exact DEBUG model-name line
+                # is still benign; every other line remains subject to the
+                # fatal scan, including a following traceback.
+                celery_schema = CELERY_LOG_HEADER_RE.match(raw_line)
+                if (
+                    source == self.config.worker_service
+                    and celery_schema is not None
+                    and celery_schema.group("level") == "DEBUG"
+                    and celery_schema.group("process") == "MainProcess"
+                    and raw_line[celery_schema.end():] == "- Error"
+                ):
+                    continue
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
                     if not processes:

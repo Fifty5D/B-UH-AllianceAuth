@@ -52,6 +52,16 @@ pins without writing. Neither operation deploys an application. After the
 repair, use a fresh no-change v0.6.2 preflight and one new owner deployment;
 the failed attempt and its preflight are not reusable.
 
+Attempt `gh-36318906058-1` reached the stability window and then exposed the
+same exact Celery DEBUG line in a later bounded scan without its AllianceAuth
+partner. Rollback passed again. `schema_debug_followup.py` pins that second
+failed journal, the first repair receipt, the installed checker, recovery
+completion, configuration and v0.5.6 marker. It permits only the configured
+worker service's exact standalone `DEBUG/MainProcess  - Error` line; different
+services, severity, process, messages and any following traceback still fail.
+Its one-time `plan` and `install` use the same private backup and lock pattern.
+Another fresh preflight and separately bound deployment are required after it.
+
 ## What the receiver guarantees
 
 - Only the exact forced commands `preflight platform-v2` and
