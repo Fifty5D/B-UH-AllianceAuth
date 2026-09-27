@@ -2252,6 +2252,10 @@ class DockerHostContracts(unittest.TestCase):
                 host, "_manage_container", return_value=missing
             ), self.assertRaisesRegex(DeploymentError, "referenced hashed asset"):
                 host._verify_previous_static_manifest("previous-slot")
+            diagnostic_path = host.backup_path / "STATIC-MISMATCH.json"
+            diagnostic = json.loads(diagnostic_path.read_text(encoding="ascii"))
+            self.assertEqual(diagnostic["changed_fields"], ["missing"])
+            self.assertEqual(diagnostic["actual"]["missing"], 1)
 
             overwritten = json.dumps(
                 {
@@ -2263,12 +2267,25 @@ class DockerHostContracts(unittest.TestCase):
                     "missing": 0,
                 }
             )
+            host.static_assets_backup = host.backup_path / "static-assets.previous.tar"
+            actual_assets = {
+                "admin/css/base.0123456789ab.css": {"sha256": "a" * 64, "size": 123},
+                "admin/js/core.abcdef012345.js": {"sha256": "b" * 64, "size": 123},
+            }
             with mock.patch.object(
                 host, "_manage_container", return_value=overwritten
-            ), self.assertRaisesRegex(
-                DeploymentError, "hashed asset bytes changed"
+            ), mock.patch.object(
+                host, "_static_mismatch_assets", return_value=actual_assets
+            ) as capture, self.assertRaisesRegex(
+                DeploymentError, r"hashed asset bytes changed \(fields: assets_sha256\)"
             ):
                 host._verify_previous_static_manifest("previous-slot")
+            capture.assert_called_once_with("previous-slot")
+            diagnostic = json.loads(diagnostic_path.read_text(encoding="ascii"))
+            self.assertEqual(diagnostic["changed_fields"], ["assets_sha256"])
+            self.assertEqual(diagnostic["actual_assets"], actual_assets)
+            if os.name != "nt":
+                self.assertEqual(diagnostic_path.stat().st_mode & 0o777, 0o600)
 
     def test_public_static_manifest_copy_rejects_unexpected_sensitive_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
