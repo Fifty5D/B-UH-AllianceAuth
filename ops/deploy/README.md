@@ -36,9 +36,21 @@ and [UNLOCK TABLES](https://mariadb.com/docs/server/reference/sql-statements/tra
 
 The upgrade CI lane rehearses concurrent writes, independent restoration, a real
 restore mismatch, capture errors and watchdog expiry using synthetic records.
-Receiver fixes require the existing root-only `install-receiver.sh` operation;
+Full receiver upgrades require the existing root-only `install-receiver.sh` operation;
 merging application source or publishing a release does not update the host
 receiver. A failed production attempt is not automatically retried.
+
+The September 27 v0.6.2 attempt `gh-36317022181-1` rolled back after the
+receiver misclassified aiopenapi3's DEBUG listing of its `Error` response
+schema as a fatal log. The installed checker remains at SHA-256 `7d91f2fc...`;
+the failed attempt's rollback receipt and the v0.5.6 host marker are pinned by
+`schema_debug_repair.py`. That one-time helper replaces only the checker file,
+under the production lock, after a reviewed Git tree is staged as root and its
+exact replacement hash is supplied. It retains the old and new bytes in a
+private backup and writes an additive receipt. Its `plan` operation checks all
+pins without writing. Neither operation deploys an application. After the
+repair, use a fresh no-change v0.6.2 preflight and one new owner deployment;
+the failed attempt and its preflight are not reusable.
 
 ## What the receiver guarantees
 

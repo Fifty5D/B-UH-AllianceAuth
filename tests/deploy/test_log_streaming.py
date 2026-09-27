@@ -342,6 +342,30 @@ class LogStreamingTests(unittest.TestCase):
         self.assertEqual(len(failure.exception.findings), runtime.MAX_RETAINED_LOG_FINDINGS)
         self.assertTrue(failure.exception.findings_truncated)
 
+    def test_esi_schema_error_model_debug_is_not_a_fatal_worker_log(self):
+        schema = "[27/Sep/2026 11:53:47] DEBUG [esi.aiopenapi3.plugins:121]  - Error\n"
+        mirror = "[2026-09-27 11:53:47,966: DEBUG/MainProcess]  - Error\n"
+        self.assertEqual(
+            self.host._classify_log_batch([("worker", schema + mirror)], set(), None),
+            (),
+        )
+        self.assertEqual(
+            self.host._classify_log_batch([("worker", schema)], set(), None),
+            (),
+        )
+        for name, record in {
+            "orphan-mirror": mirror,
+            "different-time": schema + mirror.replace("11:53:47", "11:53:48"),
+            "different-component": schema.replace("esi.aiopenapi3.plugins", "other.plugins"),
+            "different-source-line": schema.replace("plugins:121", "plugins:122"),
+            "different-level": schema.replace("DEBUG", "ERROR"),
+            "changed-message": schema.replace("- Error", "- Error: request failed"),
+            "real-error-after-model": schema + mirror + "ERROR database failure\n",
+            "traceback-after-model": schema + mirror + "Traceback (most recent call last):\n",
+        }.items():
+            with self.subTest(name=name), self.assertRaises(runtime.LogScanError):
+                self.host._classify_log_batch([("worker", record)], set(), None)
+
     def test_repeated_tasks_are_grouped_and_http_status_is_retained_without_payload(self):
         records = []
         for i in range(50):
