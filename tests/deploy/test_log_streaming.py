@@ -345,26 +345,36 @@ class LogStreamingTests(unittest.TestCase):
     def test_esi_schema_error_model_debug_is_not_a_fatal_worker_log(self):
         schema = "[27/Sep/2026 11:53:47] DEBUG [esi.aiopenapi3.plugins:121]  - Error\n"
         mirror = "[2026-09-27 11:53:47,966: DEBUG/MainProcess]  - Error\n"
+        worker = self.host.config.worker_service
         self.assertEqual(
-            self.host._classify_log_batch([("worker", schema + mirror)], set(), None),
+            self.host._classify_log_batch([(worker, schema + mirror)], set(), None),
             (),
         )
         self.assertEqual(
-            self.host._classify_log_batch([("worker", schema)], set(), None),
+            self.host._classify_log_batch([(worker, schema)], set(), None),
+            (),
+        )
+        # The bounded log stream can deliver only Celery's copy in a later
+        # batch. This was the second failed production attempt's exact shape.
+        self.assertEqual(
+            self.host._classify_log_batch([(worker, mirror)], set(), None),
             (),
         )
         for name, record in {
-            "orphan-mirror": mirror,
-            "different-time": schema + mirror.replace("11:53:47", "11:53:48"),
+            "orphan-mirror-on-other-service": mirror,
             "different-component": schema.replace("esi.aiopenapi3.plugins", "other.plugins"),
             "different-source-line": schema.replace("plugins:121", "plugins:122"),
             "different-level": schema.replace("DEBUG", "ERROR"),
             "changed-message": schema.replace("- Error", "- Error: request failed"),
+            "mirror-level": mirror.replace("DEBUG", "ERROR"),
+            "mirror-process": mirror.replace("MainProcess", "Worker-1"),
+            "mirror-message": mirror.replace("- Error", "- Error: request failed"),
             "real-error-after-model": schema + mirror + "ERROR database failure\n",
             "traceback-after-model": schema + mirror + "Traceback (most recent call last):\n",
         }.items():
+            source = "other_worker" if name == "orphan-mirror-on-other-service" else worker
             with self.subTest(name=name), self.assertRaises(runtime.LogScanError):
-                self.host._classify_log_batch([("worker", record)], set(), None)
+                self.host._classify_log_batch([(source, record)], set(), None)
 
     def test_repeated_tasks_are_grouped_and_http_status_is_retained_without_payload(self):
         records = []

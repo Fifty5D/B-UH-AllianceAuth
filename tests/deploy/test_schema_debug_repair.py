@@ -96,5 +96,38 @@ class SchemaDebugRepairTests(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
 
+@unittest.skipUnless(os.name == "posix", "host receiver repair runs on Linux")
+class SchemaDebugFollowupTests(SchemaDebugRepairTests):
+    def setUp(self):
+        super().setUp()
+        from ops.deploy import schema_debug_followup as followup
+
+        root = Path(self.temporary)
+        self.receipt = root / "FOLLOWUP.json"
+        for name, value in (
+            ("__file__", str(self.replacement.with_name("schema_debug_followup.py"))),
+            ("TARGET", self.target),
+            ("CONFIG", root / "receiver.json"),
+            ("RECEIPT", self.receipt),
+            ("BACKUP_ROOT", self.backups),
+            ("PREVIOUS_SHA256", hashlib.sha256(self.target.read_bytes()).hexdigest()),
+        ):
+            self.enterContext(mock.patch.object(followup, name, value))
+        self.enterContext(mock.patch.object(followup, "_baseline", return_value=self.target.read_bytes()))
+        self.enterContext(mock.patch.object(followup, "_atomic_bytes", side_effect=self.repair._atomic_bytes))
+        self.enterContext(mock.patch.object(
+            followup, "_open_lock", side_effect=lambda _config: os.open(self.lock, os.O_CREAT | os.O_RDWR)
+        ))
+        self.repair = followup
+
+    def call(self, mode):
+        return self.repair.run(
+            mode=mode,
+            replacement_sha256=self.replacement_sha,
+            source_commit="b" * 40,
+            confirmation=f"INSTALL ESI SCHEMA MIRROR CHECKER {self.replacement_sha}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
