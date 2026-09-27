@@ -328,7 +328,7 @@ def _verify_applied(
     previous = record.get("previous_sha256")
     if HASH_RE.fullmatch(str(previous or "")) is None:
         raise DeploymentError("History configuration receipt is invalid")
-    _validate_install(install, previous)
+    _validate_install(install, record.get("base_install_config_sha256"))
     provenance = {
         "install_path": str(paths.install),
         "install_sha256": install_meta["sha256"],
@@ -358,7 +358,8 @@ def _verify_applied(
 
 
 def build_plan(
-    paths: MaintenancePaths = MaintenancePaths(), *, verify_repairs: bool = True
+    paths: MaintenancePaths = MaintenancePaths(), *, verify_repairs: bool = True,
+    expected_live_config_sha256: str | None = None,
 ) -> dict:
     config_meta, config_data = _read_private(paths.config, maximum=64 * 1024)
     current = _json_object(config_data, "Receiver configuration")
@@ -422,7 +423,15 @@ def build_plan(
 
     if paths.receipt.exists() or paths.receipt.is_symlink():
         raise DeploymentError("History configuration receipt exists before activation")
-    _validate_install(install, config_meta["sha256"])
+    _validate_install(install, install.get("config_sha256"))
+    if install["config_sha256"] != config_meta["sha256"]:
+        if expected_live_config_sha256 != config_meta["sha256"]:
+            raise DeploymentError(
+                "Receiver config changed after install; pin its exact live SHA-256"
+            )
+    elif (expected_live_config_sha256 is not None and
+          expected_live_config_sha256 != config_meta["sha256"]):
+        raise DeploymentError("Pinned live receiver config SHA-256 differs")
     provenance = {
         "install_path": str(paths.install),
         "install_sha256": install_meta["sha256"],
@@ -526,7 +535,11 @@ def apply(
     initial = ReceiverConfig.load(paths.config)
     lock = _open_lock(initial)
     try:
-        plan = build_plan(paths, verify_repairs=verify_repairs)
+        plan = build_plan(
+            paths,
+            verify_repairs=verify_repairs,
+            expected_live_config_sha256=old_config_sha256,
+        )
         if plan["result"] == "already-applied":
             if (
                 plan["old_config_sha256"] != old_config_sha256
@@ -597,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--old-config-sha256")
     parser.add_argument("--new-config-sha256")
     parser.add_argument("--provenance-sha256")
+    parser.add_argument("--expected-live-config-sha256")
     arguments = parser.parse_args(argv)
     try:
         if arguments.operation == "apply":
@@ -606,7 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                 provenance_sha256=arguments.provenance_sha256,
             )
         else:
-            result = build_plan()
+            result = build_plan(
+                expected_live_config_sha256=arguments.expected_live_config_sha256
+            )
         print(json.dumps(result, sort_keys=True))
         return 0
     except (DeploymentError, OSError, ValueError, TypeError, KeyError) as exc:

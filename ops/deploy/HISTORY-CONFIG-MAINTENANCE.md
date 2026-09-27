@@ -7,12 +7,21 @@ current receiver provenance, and adds only
 
 From the exact reviewed, root-owned source, first run the default read-only
 plan. Set `PYTHONPATH` to that source directory because `-P` excludes the
-working directory from Python's import path.
+working directory from Python's import path. If the live configuration was
+upgraded after the receiver's original `INSTALL.json`, compare it with the
+retained install configuration and review every changed field. Then pin the
+exact live file hash in the plan; a mismatch fails closed.
 
 ```bash
 sudo env PYTHONPATH=/path/to/exact-reviewed-source \
   /usr/bin/python3 -B -P -m ops.deploy.history_config_maintenance plan
 ```
+
+For a reviewed post-install configuration change, add
+`--expected-live-config-sha256 LIVE_CONFIG_SHA256` to the plan command. Read
+`LIVE_CONFIG_SHA256` from `sha256sum /etc/buh-platform-v2/receiver.json`.
+The plan records both the original install configuration hash and the exact
+live configuration hash in its provenance and receipt.
 
 Retain the three hashes returned by that exact plan and supply them unchanged
 to apply:
