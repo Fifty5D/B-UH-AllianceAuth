@@ -1862,6 +1862,10 @@ class CoordinatedRecoveryRehearsal(unittest.TestCase):
                     approval_fixture.approval.validation_recovery,
                     "load_contract",
                     return_value=current_contract,
+                ), mock.patch.object(
+                    approval_fixture.approval.validation_recovery,
+                    "DEFAULT_CONTRACT",
+                    approval_fixture.approval.validation_recovery.HISTORICAL_CONTRACT,
                 ):
                     current_ready = (
                         approval_fixture.approval.ready_recovery_update(
