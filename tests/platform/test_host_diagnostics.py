@@ -215,6 +215,10 @@ class HostDiagnosticsTests(unittest.TestCase):
             patch.object(publisher, "utcnow", return_value=current + timedelta(minutes=1)),
         ):
             publisher.publish()
+        old_commit = subprocess.run(
+            ["git", "rev-parse", "refs/heads/data"], cwd=stage / "repo",
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
         filename = "evidence/2026-09-27/12/part-000.jsonl"
         result = subprocess.run(
             ["git", "--git-dir", str(remote), "show", "refs/heads/data:" + filename],
@@ -245,6 +249,64 @@ class HostDiagnosticsTests(unittest.TestCase):
              "refs/heads/data:" + filename], capture_output=True,
         )
         self.assertNotEqual(missing.returncode, 0)
+        expired_local_object = subprocess.run(
+            ["git", "cat-file", "-e", old_commit + ":" + filename],
+            cwd=stage / "repo", capture_output=True,
+        )
+        self.assertNotEqual(expired_local_object.returncode, 0)
+
+    def test_late_recovered_log_republishes_its_original_hour(self):
+        if not __import__("shutil").which("git"):
+            self.skipTest("Git is required for private transport test")
+        current = datetime(2026, 9, 27, 12, tzinfo=UTC)
+        diagnostics.insert_log(
+            self.db, "docker", "allianceauth_worker", diagnostics.stamp(current),
+            "ordinary recent work", diagnostics.redactor(),
+        )
+        self.db.commit()
+        diagnostics.atomic_report(diagnostics.create_report(self.db, [], current))
+        remote = diagnostics.ROOT / "private-remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                       capture_output=True)
+        stage = diagnostics.ROOT / "private-stage"
+        with (
+            patch.object(publisher, "HISTORY", diagnostics.ROOT),
+            patch.object(publisher, "STAGING", stage),
+            patch.object(publisher, "REMOTE", str(remote)),
+            patch.object(publisher, "MINIMUM_FREE_BYTES", 0),
+            patch.object(publisher, "utcnow", return_value=current + timedelta(hours=1)),
+        ):
+            publisher.publish()
+
+        # The highest ID was removed after publication. AUTOINCREMENT must
+        # still give the recovered previous-day record a new insertion ID.
+        self.db.execute("DELETE FROM logs WHERE id=(SELECT MAX(id) FROM logs)")
+        diagnostics.insert_log(
+            self.db, "journal", "kernel",
+            diagnostics.stamp(current - timedelta(days=1)),
+            "ERROR recovered from collector outage", diagnostics.redactor(),
+        )
+        self.db.commit()
+        self.assertEqual(self.db.execute("SELECT MAX(id) FROM logs").fetchone()[0], 2)
+        with (
+            patch.object(publisher, "HISTORY", diagnostics.ROOT),
+            patch.object(publisher, "STAGING", stage),
+            patch.object(publisher, "REMOTE", str(remote)),
+            patch.object(publisher, "MINIMUM_FREE_BYTES", 0),
+            patch.object(publisher, "utcnow", return_value=current + timedelta(hours=1, minutes=5)),
+        ):
+            publisher.publish()
+        previous_day = "evidence/2026-09-26/12/part-000.jsonl"
+        recovered = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", "refs/heads/data:" + previous_day],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertIn("recovered from collector outage", recovered.stdout)
+        index = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", "refs/heads/data:evidence-index.json"],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertIn("2026-09-26", json.loads(index.stdout)["days"])
 
 
 if __name__ == "__main__":

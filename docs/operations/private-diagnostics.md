@@ -32,8 +32,12 @@ UTC-hour JSONL shards (at most 384 KiB each), hour/day indexes, and a top-level
 index to the private `data` branch. It uses a write key valid only for that
 repository and an officially pinned GitHub host key. The branch is replaced by
 a fresh root commit each time, so expired records are removed from reachable
-history. GitHub may retain unreachable objects temporarily; the host's SQLite
-store is the authoritative retention boundary.
+history. A SQLite insertion watermark republishes any retained hour receiving
+late recovered logs, even after a collection outage longer than one hour. The
+publisher prunes unreachable local Git objects whenever an hour expires and at
+least daily otherwise; the local object cache cannot grow without bound. GitHub
+may retain unreachable objects temporarily; the host's SQLite store is the
+authoritative retention boundary.
 
 The present host had about 90 MB of current Docker JSON logs and about 3.66 MB
 of journal entries in a 24-hour sample, with roughly 215 GiB free. This suggests

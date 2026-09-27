@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import zlib
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -213,7 +214,7 @@ def database():
     connection.execute("PRAGMA busy_timeout=15000")
     connection.executescript("""
         CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY, source TEXT NOT NULL, service TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, service TEXT NOT NULL,
             at TEXT NOT NULL, message BLOB NOT NULL, error_key TEXT,
             fingerprint TEXT NOT NULL UNIQUE
         );
@@ -229,6 +230,8 @@ def database():
         );
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """)
+    if get_meta(connection, "store_id") is None:
+        set_meta(connection, "store_id", uuid.uuid4().hex)
     connection.commit()
     return connection
 

@@ -118,8 +118,9 @@ def export_hour(db, repo, hour, cutoff=None):
 def prune_hours(repo, cutoff):
     evidence = repo / "evidence"
     if not evidence.exists():
-        return
+        return False
     threshold = hour_start(cutoff)
+    removed = False
     for day in evidence.iterdir():
         if not day.is_dir():
             continue
@@ -136,8 +137,10 @@ def prune_hours(repo, cutoff):
                 if not hour.resolve().is_relative_to(evidence.resolve()):
                     raise RuntimeError("Unsafe diagnostics evidence path")
                 shutil.rmtree(hour)
+                removed = True
         if not any(day.iterdir()):
             day.rmdir()
+    return removed
 
 
 def build_index(repo, generated):
@@ -161,15 +164,15 @@ def build_index(repo, generated):
                 "days": days})
 
 
-def git_command(repo, *args, env=None):
+def git_command(repo, *args, env=None, timeout=180):
     result = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True,
-                            text=True, timeout=180, check=False)
+                            text=True, timeout=timeout, check=False)
     if result.returncode:
         raise RuntimeError("Private diagnostics Git transport failed: " + " ".join(args[:2]))
     return result.stdout.strip()
 
 
-def push_snapshot(repo):
+def push_snapshot(repo, *, clean_objects):
     if not (repo / ".git").is_dir():
         git_command(repo, "init", "-q")
     git_command(repo, "add", "-A")
@@ -189,6 +192,23 @@ def push_snapshot(repo):
             f"-o BatchMode=yes"
         )
     git_command(repo, "push", "--force", REMOTE, f"{commit}:refs/heads/data", env=env)
+    # The pushed commit is an orphan snapshot. Retain only the current local
+    # snapshot; old commits and payloads must not build up in the host cache.
+    git_command(repo, "update-ref", "refs/heads/data", commit)
+    if clean_objects:
+        git_command(repo, "reflog", "expire", "--expire=now", "--all")
+        git_command(repo, "gc", "--prune=now", "--quiet", timeout=900)
+
+
+def insertion_hours(db, after_id, cutoff, generated):
+    return {
+        datetime.strptime(value, "%Y-%m-%dT%H").replace(tzinfo=UTC)
+        for (value,) in db.execute(
+            "SELECT DISTINCT substr(at,1,13) FROM logs "
+            "WHERE id>? AND at>=? AND at<=?",
+            (after_id, stamp(cutoff), stamp(generated)),
+        )
+    }
 
 
 def publish():
@@ -214,30 +234,56 @@ def publish():
     state = STAGING / "last-published.json"
     db = sqlite3.connect(f"file:{(HISTORY / 'history.sqlite3').as_posix()}?mode=ro", uri=True)
     try:
+        cutoff = generated - RETENTION
         oldest = db.execute("SELECT MIN(at) FROM logs WHERE at>=?",
-                            (stamp(generated - RETENTION),)).fetchone()[0]
-        if state.exists():
-            previous = parse_stamp(json.loads(state.read_text())["at"])
-            earliest = max(generated - RETENTION, previous - timedelta(hours=1))
+                            (stamp(cutoff),)).fetchone()[0]
+        sequence = db.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name='logs'"
+        ).fetchone()
+        last_log_id = sequence[0] if sequence else 0
+        store = db.execute("SELECT value FROM metadata WHERE key='store_id'").fetchone()
+        if not store:
+            raise RuntimeError("Diagnostics store identity is missing")
+        store_id = store[0]
+        previous_state = json.loads(state.read_text()) if state.exists() else {}
+        old_id = previous_state.get("last_log_id")
+        rebuild = (not isinstance(old_id, int) or old_id > last_log_id or
+                   previous_state.get("store_id") != store_id)
+        if rebuild:
+            evidence = repo / "evidence"
+            if evidence.is_symlink():
+                raise RuntimeError("Unsafe diagnostics evidence path")
+            if evidence.exists():
+                shutil.rmtree(evidence)
+            earliest = max(cutoff, parse_stamp(oldest)) if oldest else generated
         else:
-            earliest = max(generated - RETENTION, parse_stamp(oldest)) if oldest else generated
+            previous = parse_stamp(previous_state["at"])
+            earliest = max(cutoff, previous - timedelta(hours=1))
         # The boundary hour is rewritten each run so rolling retention cannot
         # leave old records visible in the private mirror.
         start = hour_start(earliest)
-        boundary = hour_start(generated - RETENTION)
-        if boundary < start:
-            export_hour(db, repo, boundary, generated - RETENTION)
+        boundary = hour_start(cutoff)
+        hours = {boundary}
         hour = start
         while hour <= generated:
-            export_hour(db, repo, hour, generated - RETENTION)
+            hours.add(hour)
             hour += timedelta(hours=1)
+        if not rebuild:
+            hours.update(insertion_hours(db, old_id, cutoff, generated))
+        for hour in sorted(hours):
+            export_hour(db, repo, hour, cutoff)
     finally:
         db.close()
-    prune_hours(repo, generated - RETENTION)
+    removed_hours = prune_hours(repo, generated - RETENTION)
     build_index(repo, generated)
     atomic_json(repo / "buh-diagnostics-latest.json", report)
-    push_snapshot(repo)
-    atomic_json(state, {"at": stamp(generated)})
+    last_gc = previous_state.get("last_gc_at")
+    clean_objects = (removed_hours or not last_gc or
+                     generated - parse_stamp(last_gc) >= timedelta(days=1))
+    push_snapshot(repo, clean_objects=clean_objects)
+    atomic_json(state, {"at": stamp(generated), "last_log_id": last_log_id,
+                        "store_id": store_id,
+                        "last_gc_at": stamp(generated) if clean_objects else last_gc})
 
 
 if __name__ == "__main__":
