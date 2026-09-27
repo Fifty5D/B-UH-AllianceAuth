@@ -76,11 +76,26 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["message"], "ordinary line 2")
 
+    def test_resource_history_remains_visible_beyond_one_day(self):
+        current = datetime(2026, 9, 27, 12, tzinfo=UTC)
+        for day, free in ((2, 55), (0, 40)):
+            self.db.execute(
+                "INSERT INTO resources(at,free_bytes,available_memory_bytes,load_1m) "
+                "VALUES (?,?,?,?)",
+                (diagnostics.stamp(current - timedelta(days=day)), free, 100, 1.0),
+            )
+        self.db.commit()
+        report = diagnostics.create_report(self.db, [], current)
+        self.assertEqual(len(report["resource_days_30d"]), 2)
+        self.assertEqual(report["resource_days_30d"][0]["minimum_free_bytes"], 55)
+        self.assertEqual(report["resource_days_30d"][1]["minimum_free_bytes"], 40)
+
     def test_atomic_report_and_readonly_database(self):
         current = datetime.now(UTC)
         report = diagnostics.create_report(self.db, [], current)
         diagnostics.atomic_report(report)
         self.assertTrue((diagnostics.ROOT / "buh-diagnostics-latest.json").is_file())
+        self.assertEqual(report["resource_days_30d"], [])
         with closing(diagnostics.readonly_database()) as reader:
             self.assertEqual(reader.execute("SELECT COUNT(*) FROM logs").fetchone()[0], 0)
 

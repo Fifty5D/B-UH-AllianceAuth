@@ -50,7 +50,12 @@ from datetime import timedelta
 from django.db.models import Count, Max
 from django.utils.timezone import now
 from django_celery_beat.models import PeriodicTask
-from buh_max_history.models import ArchiveJob, PublicCatalogIndex, PublicArchiveFile
+from buh_max_history.models import (
+    ArchiveCollectionTarget, ArchiveJob, PublicCatalogIndex, PublicArchiveFile,
+    PublicDataset,
+)
+from buh_moon_tax.models import AuditRun
+from buh_structure_ops.models import StructureSnapshot
 
 names = ("allianceauth", "Django", "django-esi", "aa-memberaudit", "aa-structures",
          "aa-moonmining", "aa-buh-max-history", "aa-buh-moon-tax",
@@ -62,13 +67,24 @@ for name in names:
     except importlib.metadata.PackageNotFoundError:
         versions[name] = None
 scheduled = []
+units = {"microseconds": 0.000001, "seconds": 1, "minutes": 60,
+         "hours": 3600, "days": 86400}
 for task in PeriodicTask.objects.filter(enabled=True).order_by("name").values(
-        "name", "task", "last_run_at", "total_run_count"):
+        "name", "task", "last_run_at", "total_run_count",
+        "interval__every", "interval__period"):
     if "buh" in task["name"].lower() or "buh" in task["task"].lower():
+        cadence = (task["interval__every"] * units[task["interval__period"]]
+                   if task["interval__period"] in units and task["interval__every"]
+                   else None)
+        lag = (now() - task["last_run_at"]).total_seconds() if task["last_run_at"] else None
         scheduled.append({"name": task["name"], "task": task["task"],
                           "last_run_at": task["last_run_at"].isoformat()
                           if task["last_run_at"] else None,
-                          "total_run_count": task["total_run_count"]})
+                          "total_run_count": task["total_run_count"],
+                          "cadence_seconds": cadence,
+                          "overdue": lag > max(2 * cadence, cadence + 600)
+                          if lag is not None and cadence else None,
+                          "never_run": task["last_run_at"] is None})
 jobs = []
 for job in ArchiveJob.objects.order_by("-requested_at").values(
         "kind", "status", "requested_at", "finished_at", "result")[:12]:
@@ -83,10 +99,58 @@ for job in ArchiveJob.objects.order_by("-requested_at").values(
                  "provider_gaps": sum(x.get("unavailable_indexes", 0)
                                       for x in catalog.get("datasets", [])
                                       if isinstance(x, dict))})
+last_archive_success = {}
+for kind in ("CATALOG", "SYNC", "VERIFY"):
+    value = ArchiveJob.objects.filter(kind=kind, status="SUCCEEDED").aggregate(
+        value=Max("finished_at"))["value"]
+    last_archive_success[kind] = value.isoformat() if value else None
 counts = dict(PublicArchiveFile.objects.values("status").annotate(n=Count("pk"))
               .values_list("status", "n"))
+capture_targets = {
+    "status_counts": dict(ArchiveCollectionTarget.objects.values("status")
+                          .annotate(n=Count("pk")).values_list("status", "n")),
+    "last_success_at": ArchiveCollectionTarget.objects.aggregate(
+        value=Max("last_success_at"))["value"],
+    "last_attempt_at": ArchiveCollectionTarget.objects.aggregate(
+        value=Max("last_attempt_at"))["value"],
+    "due_failed": ArchiveCollectionTarget.objects.filter(
+        status="failed", next_attempt_at__lt=now()).count(),
+}
+for key in ("last_success_at", "last_attempt_at"):
+    value = capture_targets[key]
+    capture_targets[key] = value.isoformat() if value else None
+recent_audits = [
+    {"status": row["status"], "queued_at": row["queued_at"].isoformat(),
+     "finished_at": row["finished_at"].isoformat()
+     if row["finished_at"] else None}
+    for row in AuditRun.objects.order_by("-queued_at").values(
+        "status", "queued_at", "finished_at")[:8]
+]
+moon_tax_last_complete = AuditRun.objects.filter(status="COMPLETE").aggregate(
+    value=Max("finished_at"))["value"]
+moon_tax_last_failed = AuditRun.objects.filter(status="FAILED").aggregate(
+    value=Max("finished_at"))["value"]
+last_structure = StructureSnapshot.objects.aggregate(value=Max("captured_at"))["value"]
+datasets = [
+    {"slug": row["slug"],
+     "last_sync_at": row["last_sync_at"].isoformat() if row["last_sync_at"] else None,
+     "last_catalog_at": row["last_catalog_at"].isoformat()
+     if row["last_catalog_at"] else None}
+    for row in PublicDataset.objects.filter(enabled=True).order_by("slug").values(
+        "slug", "last_sync_at", "last_catalog_at")[:50]
+]
 payload = {"at": now().isoformat(), "versions": versions, "scheduled": scheduled,
            "archive_jobs": jobs, "archive_files": counts,
+           "archive_last_success_at": last_archive_success,
+           "archive_capture_targets": capture_targets,
+           "public_datasets": datasets,
+           "moon_tax_recent_audits": recent_audits,
+           "moon_tax_last_complete_at": moon_tax_last_complete.isoformat()
+           if moon_tax_last_complete else None,
+           "moon_tax_last_failed_at": moon_tax_last_failed.isoformat()
+           if moon_tax_last_failed else None,
+           "structure_last_snapshot_at": last_structure.isoformat()
+           if last_structure else None,
            "unavailable_indexes": PublicCatalogIndex.objects.filter(
                status="UNAVAILABLE").count(),
            "stalled_jobs": ArchiveJob.objects.filter(
@@ -100,8 +164,13 @@ try:
         .values("task_name", "status").annotate(n=Count("pk"), last_at=Max("date_done"))
         .order_by("task_name", "status")[:100]
     ]
+    payload["task_results_note"] = (
+        "No task-result rows in the last 24 hours; use application records and worker logs."
+        if not payload["task_results"] else None
+    )
 except (ImportError, LookupError):
     payload["task_results"] = None
+    payload["task_results_note"] = "Task-result model unavailable."
 print("BUH_DIAGNOSTICS_JSON:" + json.dumps(payload, sort_keys=True))
 '''
 
@@ -497,6 +566,17 @@ def create_report(db, containers, generated):
         "FROM resources WHERE at>=?",
         (stamp(generated - timedelta(hours=24)),),
     ).fetchone()
+    resource_days = [
+        {"date_utc": day, "samples": samples,
+         "minimum_free_bytes": free, "minimum_available_memory_bytes": memory,
+         "maximum_load_1m": load}
+        for day, samples, free, memory, load in db.execute(
+            "SELECT substr(at,1,10),COUNT(*),MIN(free_bytes),"
+            "MIN(available_memory_bytes),MAX(load_1m) FROM resources "
+            "WHERE at>=? GROUP BY substr(at,1,10) ORDER BY substr(at,1,10)",
+            (cutoff,),
+        )
+    ]
     app = json.loads(get_meta(db, "app:probe", "null"))
     stale = any(item["stale"] for item in sources.values())
     unhealthy_container = any(
@@ -526,6 +606,7 @@ def create_report(db, containers, generated):
             ("minimum_free_bytes", "minimum_available_memory_bytes", "maximum_load_1m"),
             resource_history,
         )) if resource_history else None,
+        "resource_days_30d": resource_days,
         "errors_24h_total": errors_24h_total,
         "errors_30d": errors,
         "evidence": {"format": "redacted JSONL", "query":

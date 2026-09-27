@@ -12,7 +12,8 @@ installation are separate states. Do not infer production health from a green PR
   checked directly. These values must be read again during preflight.
 - The hourly public archive schedule is enabled. Recent sync jobs downloaded
   some files and then failed, so neither an empty queue nor partial bytes prove
-  archive health. The September 4 stalled row was marked failed by the
+  archive health. The latest recorded successful sync was September 4 at
+  13:03:57 local host time. The September 4 stalled row was marked failed by the
   scheduler on September 27; it is no longer running.
 - Provider-advertised EVE Ref child indexes return HTTP 404, while the parent
   still advertises them. Some file responses are complete but their size and

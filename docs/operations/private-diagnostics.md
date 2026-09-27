@@ -3,8 +3,9 @@
 The private [B-UH-Diagnostics repository](https://github.com/Fifty5D/B-UH-Diagnostics)
 is the ChatGPT-facing read route. Its default `data` branch exposes one stable
 `buh-diagnostics-latest.json` file and `evidence-index.json`. The GitHub
-connector has fetched both **synthetic** files from that private branch. A
-repo-scoped deploy key has also refreshed the branch. Live retrieval remains
+connector has fetched both **synthetic** files, a date/hour index, and a
+redacted JSONL error shard from that private branch. A repo-scoped deploy key
+has also refreshed the branch. Live retrieval remains
 unverified until the separately approved host installation.
 
 ## Host behavior after installation
