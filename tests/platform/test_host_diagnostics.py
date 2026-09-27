@@ -25,6 +25,17 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.redactor_patch = patch.object(diagnostics, "REDACTOR", redactor)
         self.redactor_patch.start()
         self.addCleanup(self.redactor_patch.stop)
+        self.expected_patch = patch.object(
+            diagnostics, "EXPECTED_SERVICES_FILE", root / "expected-services.json"
+        )
+        self.expected_patch.start()
+        self.addCleanup(self.expected_patch.stop)
+        (root / "expected-services.json").write_text(json.dumps({
+            "schema_version": 1, "compose_project": "aa-docker",
+            "services": {"allianceauth_gunicorn": 1, "allianceauth_worker": 5,
+                         "allianceauth_worker_services": 1, "allianceauth_beat": 1,
+                         "auth_mysql": 1, "redis": 1, "nginx": 1},
+        }), encoding="utf-8")
         self.db = diagnostics.database()
         self.addCleanup(self.db.close)
 
@@ -121,7 +132,8 @@ class HostDiagnosticsTests(unittest.TestCase):
 
     def test_docker_capture_keeps_normal_context_and_reports_missing_source(self):
         current = datetime(2026, 9, 27, 12, tzinfo=UTC)
-        container = {"name": "allianceauth_worker_beat", "id": "synthetic123"}
+        container = {"name": "allianceauth_beat", "service": "allianceauth_beat",
+                     "id": "synthetic123"}
         lines = [
             "2026-09-27T12:00:00.000001Z task archive started",
             "2026-09-27T12:00:01.000001Z ERROR archive failed token=private-value",
@@ -131,7 +143,7 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.db.commit()
         rows = list(diagnostics.query(
             self.db, current, current + timedelta(minutes=1),
-            "allianceauth_worker_beat", None, 10,
+            "allianceauth_beat", None, 10,
         ))
         self.assertEqual(len(rows), 2)
         self.assertIn("task archive started", rows[0]["message"])
@@ -141,6 +153,45 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.assertFalse(report["sources"]["docker"]["stale"])
         self.assertTrue(report["sources"]["journal"]["stale"])
         self.assertEqual(report["status"], "unknown")
+
+    def test_compose_labels_discover_actual_beat_and_missing_replicas_degrade_report(self):
+        current = datetime(2026, 9, 27, 12, tzinfo=UTC)
+        rows = [json.dumps({"ID": f"id{n}", "Names": name, "State": "running",
+                            "Status": "Up"}) for n, name in enumerate((
+            "allianceauth_gunicorn", "aa-docker-allianceauth_worker-1",
+            "aa-docker-allianceauth_worker_services-1", "aa-docker-allianceauth_beat-1",
+            "aa-docker-auth_mysql-1", "aa-docker-redis-1", "aa-docker-nginx-1",
+        ))]
+        details = []
+        for name in ("allianceauth_gunicorn", "allianceauth_worker",
+                     "allianceauth_worker_services", "allianceauth_beat",
+                     "auth_mysql", "redis", "nginx"):
+            labels = ({"com.docker.compose.project": "aa-docker",
+                       "com.docker.compose.service": name}
+                      if name != "allianceauth_gunicorn" else {})
+            details.append(json.dumps(labels) + "|" + json.dumps({
+                "StartedAt": diagnostics.stamp(current), "Health": {"Status": "healthy"},
+                "OOMKilled": False, "ExitCode": 0,
+            }) + "|0")
+        with patch.object(diagnostics, "read_command",
+                          side_effect=["\n".join(rows), "\n".join(details)]):
+            containers = diagnostics.docker_containers()
+        self.assertIn("allianceauth_beat", {item["service"] for item in containers})
+        for source in ("docker", "journal", "docker-event", "app", "resources"):
+            diagnostics.set_meta(self.db, "source:" + source + ":last_success",
+                                 diagnostics.stamp(current))
+        self.db.commit()
+        report = diagnostics.create_report(self.db, containers, current)
+        self.assertEqual(report["service_inventory"]["mismatched"], {
+            "allianceauth_worker": {"expected": 5, "running": 1}
+        })
+        self.assertEqual(report["status"], "degraded")
+
+        without_beat = [item for item in containers if item["service"] != "allianceauth_beat"]
+        report = diagnostics.create_report(self.db, without_beat, current)
+        self.assertEqual(report["service_inventory"]["mismatched"]["allianceauth_beat"],
+                         {"expected": 1, "running": 0})
+        self.assertEqual(report["status"], "degraded")
 
     def test_private_snapshot_has_redacted_evidence_and_prunes_expired_hours(self):
         if not __import__("shutil").which("git"):

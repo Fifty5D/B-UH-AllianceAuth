@@ -8,6 +8,13 @@ redacted JSONL error shard from that private branch. A repo-scoped deploy key
 has also refreshed the branch. Live retrieval remains
 unverified until the separately approved host installation.
 
+The collector identifies the four Auth services and their supporting services
+using Docker Compose service labels (with an exact-name fallback for legacy
+containers). Its approved service inventory includes expected replica counts;
+missing beat or worker replicas make the report degraded even when other logs
+are fresh. The inventory is part of the installation manifest and must be
+rechecked during the fresh production preflight.
+
 ## Host behavior after installation
 
 `ops/diagnostics/buh_host_diagnostics.py` runs outside Auth and Celery every five
@@ -49,12 +56,26 @@ process is down, though it becomes stale if the host or GitHub transport stops.
 
 ## Separate production installation gate
 
-Review the exact source commit and approved host payload before running
-`ops/diagnostics/bootstrap-diagnostics.sh` as root with the collector,
-publisher, redactor, repo-scoped private key, and pinned GitHub known-hosts file.
-The script installs two root-owned systemd timers and starts the first
-collection/publication. It does not run through ordinary application release
-automation. Keep the private key out of Git, logs, PRs, and diagnostics.
+After the immutable release and fresh read-only host preflight exist, create a
+root-private canonical manifest using `ops/diagnostics/buh_diagnostics_install.py
+manifest`. It binds the exact merged source commit, a `git archive` of that
+commit, the installer/collector/publisher/redactor hashes, the repository-scoped
+deploy-key fingerprint and hash, the pinned GitHub known-hosts hash, and the
+current expected Compose project/services/replicas. Verify the archive digest
+**before executing its installer**, then run the installer's read-only `verify`
+mode. Present the complete manifest SHA-256 and release identity in the separate
+production approval request. Keep the private key and manifest out of Git, logs,
+PRs, and public artifacts.
+
+After approval, run `install` with the exact confirmation `INSTALL BUH
+DIAGNOSTICS <manifest SHA-256>`. It repeats payload verification, stages an
+immutable root-only version, writes a durable transaction marker, stops the
+diagnostics timers, atomically switches one `current` symlink, runs the first
+collection and private publication, then enables both five-minute timers. It
+records the approved identities in a root-only receipt. On ordinary failure it
+restores the previous version and timer state; after process or host interruption,
+run its `recover` command to reconcile the durable marker before retrying. It
+does not run through ordinary application release automation.
 
 The installation must verify the systemd services, host SQLite state, source
 freshness, release identity, and live report/evidence fetched through the actual

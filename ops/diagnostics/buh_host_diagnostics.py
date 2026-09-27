@@ -38,9 +38,12 @@ MINIMUM_FREE_BYTES = 25 * 1024**3
 STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s(.*)$", re.S)
 ERROR = re.compile(r"(?i)\b(error|exception|traceback|failed|fatal|oom|out of memory)\b")
 VARIABLE = re.compile(r"\b(?:[0-9a-f]{8}-[0-9a-f-]{27,}|\d{4,}|0x[0-9a-f]+)\b", re.I)
-COMPOSE_CONTAINER = re.compile(
-    r"aa-docker-(?:allianceauth_worker(?:_services)?|auth_mysql|redis|nginx|proxy|grafana)-\d+"
+EXPECTED_SERVICES_FILE = Path(
+    os.environ.get("BUH_DIAGNOSTICS_EXPECTED_SERVICES", "/etc/buh-diagnostics/expected-services.json")
 )
+AUTH_SERVICES = frozenset(("allianceauth_gunicorn", "allianceauth_worker",
+                           "allianceauth_worker_services", "allianceauth_beat"))
+INFRASTRUCTURE_SERVICES = frozenset(("auth_mysql", "redis", "nginx", "proxy", "grafana"))
 APP_MARKER = "BUH_DIAGNOSTICS_JSON:"
 
 APP_PROBE = r'''
@@ -344,28 +347,44 @@ def iter_command_lines(argv, *, timeout=300):
 
 
 def docker_containers():
+    expected = expected_services()
     lines = read_command(["docker", "ps", "-a", "--format", "{{json .}}"], timeout=25)
-    result = []
+    candidates = []
     for line in lines.splitlines():
         item = json.loads(line)
         name = item.get("Names", "")
-        if name in {"allianceauth_gunicorn", "allianceauth_worker_beat"} or COMPOSE_CONTAINER.fullmatch(name):
-            result.append({"id": item["ID"], "name": name,
-                           "state": item.get("State"), "status": item.get("Status")})
-    if result:
+        # Inspect Compose labels rather than guessing the name of the beat
+        # container. Include exact legacy names while they are still in use.
+        if name in expected["services"] or name.startswith(expected["compose_project"] + "-"):
+            candidates.append({"id": item["ID"], "name": name,
+                               "state": item.get("State"), "status": item.get("Status")})
+    result = []
+    if candidates:
         details = read_command(
-            ["docker", "inspect", "--format", "{{json .State}}|{{.RestartCount}}",
-             *(item["id"] for item in result)], timeout=25,
+            ["docker", "inspect", "--format",
+             "{{json .Config.Labels}}|{{json .State}}|{{.RestartCount}}",
+             *(item["id"] for item in candidates)], timeout=25,
         ).splitlines()
-        if len(details) != len(result):
+        if len(details) != len(candidates):
             raise RuntimeError("Docker inspection omitted a configured container")
-        for item, line in zip(result, details):
+        for item, line in zip(candidates, details):
             state_text, separator, restart_text = line.rpartition("|")
             if not separator:
                 raise RuntimeError("Docker inspection returned malformed state")
+            labels_text, separator, state_text = state_text.rpartition("|")
+            if not separator:
+                raise RuntimeError("Docker inspection returned malformed labels")
+            labels = json.loads(labels_text) or {}
+            service = labels.get("com.docker.compose.service")
+            project = labels.get("com.docker.compose.project")
+            if project != expected["compose_project"] or service not in expected["services"]:
+                if project is not None or item["name"] not in expected["services"]:
+                    continue
+                service = item["name"]
             state = json.loads(state_text)
             health = state.get("Health") or {}
             item.update({
+                "service": service,
                 "started_at": state.get("StartedAt"),
                 "finished_at": state.get("FinishedAt"),
                 "oom_killed": bool(state.get("OOMKilled")),
@@ -373,7 +392,24 @@ def docker_containers():
                 "health": health.get("Status"),
                 "restarts": int(restart_text),
             })
+            result.append(item)
     return result
+
+
+def expected_services():
+    value = json.loads(EXPECTED_SERVICES_FILE.read_text(encoding="utf-8"))
+    services = value.get("services")
+    project = value.get("compose_project")
+    if (value.get("schema_version") != 1 or not isinstance(project, str)
+            or re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", project) is None
+            or not isinstance(services, dict)
+            or not AUTH_SERVICES <= services.keys()
+            or not {"auth_mysql", "redis", "nginx"} <= services.keys()
+            or not services.keys() <= AUTH_SERVICES | INFRASTRUCTURE_SERVICES
+            or any(type(count) is not int or not 1 <= count <= 128
+                   for count in services.values())):
+        raise ValueError("Invalid diagnostics service inventory contract")
+    return value
 
 
 def collect_docker(db, containers, redact, end):
@@ -432,6 +468,7 @@ def collect_journal(db, redact, end):
 def collect_events(db, redact, end):
     since = get_meta(db, "events:cursor", stamp(end - RETENTION))
     try:
+        expected = expected_services()
         lines = iter_command_lines(
             ["docker", "events", "--since", since, "--until", stamp(end),
              "--filter", "type=container", "--format", "{{json .}}"], timeout=300,
@@ -442,7 +479,9 @@ def collect_events(db, redact, end):
             actor = event.get("Actor") or {}
             attributes = actor.get("Attributes") or {}
             name = str(attributes.get("name") or "container")[:100]
-            if name in {"allianceauth_gunicorn", "allianceauth_worker_beat"} or COMPOSE_CONTAINER.fullmatch(name):
+            if name in expected["services"] or (
+                    attributes.get("com.docker.compose.project") == expected["compose_project"]
+                    and attributes.get("com.docker.compose.service") in expected["services"]):
                 insert_log(db, "docker-event", name, stamp(when),
                            str(event.get("Action") or "unknown"), redact)
         set_meta(db, "events:cursor", stamp(end - timedelta(seconds=2)))
@@ -495,6 +534,19 @@ def release_state():
 
 
 def create_report(db, containers, generated):
+    try:
+        expected = expected_services()["services"]
+        inventory_error = None
+    except (OSError, ValueError):
+        expected = {}
+        inventory_error = "Required service inventory is unavailable or invalid"
+    observed = {service: 0 for service in expected}
+    for container in containers:
+        service = container.get("service")
+        if service in observed and container.get("state") == "running":
+            observed[service] += 1
+    mismatched = {service: {"expected": count, "running": observed[service]}
+                  for service, count in expected.items() if observed[service] != count}
     cutoff = stamp(generated - RETENTION)
     source_rows = db.execute(
         "SELECT source,MIN(at),MAX(at),COUNT(*) FROM logs WHERE at>=? GROUP BY source",
@@ -588,9 +640,11 @@ def create_report(db, containers, generated):
     report = {
         "schema_version": 1,
         "generated_at": stamp(generated),
-        "status": "unknown" if stale else (
-            "degraded" if unhealthy_container or gaps or recent_failed_job else "healthy"
+        "status": "unknown" if stale or inventory_error else (
+            "degraded" if unhealthy_container or mismatched or gaps or recent_failed_job else "healthy"
         ),
+        "service_inventory": {"expected": expected, "running": observed,
+                              "mismatched": mismatched, "error": inventory_error},
         "history_retention_days": 30,
         "collector_started_at": get_meta(db, "collector:started_at"),
         "earliest_retained_log_at": first_log,

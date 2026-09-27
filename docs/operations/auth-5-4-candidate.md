@@ -71,7 +71,8 @@ test is a clone of the production database.
    are bounded. The 404 child indexes may still exist upstream; they should be
    visible gaps, not silent success. Check ESI history capture separately.
 5. Install the independent diagnostic collector/publisher only after the same
-   explicit production approval covers it. Verify a live report and at least one
+   explicit production approval binds its separate hashed installation manifest.
+   Verify a live report and at least one
    redacted detailed shard through the ChatGPT GitHub connector. Confirm source
    freshness and actual earliest retained timestamps; thirty days cannot exist
    immediately after first installation if earlier logs rotated.
