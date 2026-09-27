@@ -1,4 +1,0 @@
-schema_version = 1
-app = "platform"
-kind = "fix"
-summary = "Separate the native-tested synchronization head from the immutable v0.6.2 deployment target during bounded recovery."

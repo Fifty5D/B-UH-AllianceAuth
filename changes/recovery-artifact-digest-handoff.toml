@@ -1,4 +1,0 @@
-schema_version = 1
-app = "platform"
-kind = "fix"
-summary = "Canonicalize the verified recovery artifact digest before approval publication and carry the bounded recovery through its reviewed follow-up."
