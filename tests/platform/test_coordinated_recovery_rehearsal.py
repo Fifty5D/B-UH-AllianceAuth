@@ -973,6 +973,7 @@ def exercised_docker_boundary(
             mock.patch.object(
                 host, "_prepare_previous_static_snapshot",
                 side_effect=boundary.prepare_static_snapshot,
+                create=True,
             )
         )
         stack.enter_context(
@@ -981,11 +982,14 @@ def exercised_docker_boundary(
             )
         )
         stack.enter_context(
-            mock.patch.object(host, "_verify_previous_static_mount", return_value=None)
+            mock.patch.object(
+                host, "_verify_previous_static_mount", return_value=None, create=True
+            )
         )
         stack.enter_context(
             mock.patch.object(
-                host, "_verify_shared_previous_static_assets", return_value=None
+                host, "_verify_shared_previous_static_assets", return_value=None,
+                create=True,
             )
         )
         stack.enter_context(
