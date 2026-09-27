@@ -189,6 +189,49 @@ class HistoryConfigMaintenanceTests(unittest.TestCase):
         )
         self.assertEqual(repeated["result"], "already-applied")
 
+    def test_post_install_config_upgrade_requires_exact_live_pin(self):
+        # The original install receipt can describe the earlier receiver
+        # configuration while the live, root-owned schema-2 config was updated
+        # afterward. The maintenance plan must make that difference explicit.
+        self.install_value["config_sha256"] = "d" * 64
+        self._write(
+            self.paths.install, canonical_json_bytes(self.install_value)
+        )
+        live_sha256 = _sha256(self.original)
+        with self.assertRaisesRegex(DeploymentError, "pin its exact live SHA-256"):
+            maintenance.build_plan(self.paths, verify_repairs=False)
+        with self.assertRaisesRegex(DeploymentError, "pin its exact live SHA-256"):
+            maintenance.build_plan(
+                self.paths,
+                verify_repairs=False,
+                expected_live_config_sha256="e" * 64,
+            )
+
+        plan = maintenance.build_plan(
+            self.paths,
+            verify_repairs=False,
+            expected_live_config_sha256=live_sha256,
+        )
+        result = maintenance.apply(
+            old_config_sha256=plan["old_config_sha256"],
+            new_config_sha256=plan["new_config_sha256"],
+            provenance_sha256=plan["provenance_sha256"],
+            paths=self.paths,
+            verify_repairs=False,
+        )
+        self.assertEqual(result["base_install_config_sha256"], "d" * 64)
+        self.assertEqual(result["previous_sha256"], live_sha256)
+        self.assertEqual(maintenance.build_plan(self.paths, verify_repairs=False)[
+            "result"
+        ], "already-applied")
+        self.assertEqual(maintenance.apply(
+            old_config_sha256=plan["old_config_sha256"],
+            new_config_sha256=plan["new_config_sha256"],
+            provenance_sha256=plan["provenance_sha256"],
+            paths=self.paths,
+            verify_repairs=False,
+        )["result"], "already-applied")
+
     def test_pre_recovery_state_is_blocked(self):
         state = Path(json.loads(self.original)["state_dir"])
         self._write(state / "active-recovery.json", b"{}\n")
