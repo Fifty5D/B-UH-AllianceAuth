@@ -111,6 +111,7 @@ class SchemaDebugFollowupTests(SchemaDebugRepairTests):
             ("RECEIPT", self.receipt),
             ("BACKUP_ROOT", self.backups),
             ("PREVIOUS_SHA256", hashlib.sha256(self.target.read_bytes()).hexdigest()),
+            ("PINS", {**followup.PINS, followup.prior.RECEIPT: "c" * 64}),
         ):
             self.enterContext(mock.patch.object(followup, name, value))
         self.enterContext(mock.patch.object(followup, "_baseline", return_value=self.target.read_bytes()))
