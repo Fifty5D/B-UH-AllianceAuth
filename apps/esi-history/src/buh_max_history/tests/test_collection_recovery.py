@@ -289,6 +289,33 @@ class CollectionTests(TestCase):
             PublicArchiveFile.objects.filter(source_url__endswith="/new").exists()
         )
 
+    @patch("buh_max_history.public_archive._request_json")
+    def test_advertised_missing_index_is_visible_and_rechecked_after_a_day(self, request):
+        child_url = "https://data.everef.net/wars/missing/index.json"
+
+        def provider(url):
+            if url == child_url:
+                raise HTTPError(url, 404, "Not Found", {}, None)
+            return {"directories": [{"name": "missing/"}]}, {}
+
+        request.side_effect = provider
+        catalog_dataset(self.dataset, max_indexes=2)
+        result = catalog_dataset(self.dataset, max_indexes=2)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["provider_gaps"], [child_url])
+        self.assertEqual(result["unavailable_indexes"], 1)
+        self.assertEqual(PublicCatalogIndex.objects.get(source_url=child_url).status, "UNAVAILABLE")
+        previous_calls = request.call_count
+        catalog_dataset(self.dataset, max_indexes=2)
+        self.assertEqual(request.call_count, previous_calls + 1)
+        PublicCatalogIndex.objects.filter(source_url=child_url).update(
+            last_checked_at=now() - timedelta(days=2)
+        )
+        request.side_effect = lambda url: ({"files": []}, {})
+        result = catalog_dataset(self.dataset, max_indexes=2)
+        self.assertEqual(result["unavailable_indexes"], 0)
+        self.assertEqual(PublicCatalogIndex.objects.get(source_url=child_url).status, "CATALOGED")
+
     def test_dataset_retry_rotation_persists_between_small_batches(self):
         self.config.public_max_files_per_run = 1
         self.config.save()
@@ -360,6 +387,50 @@ class CollectionTests(TestCase):
             (record.status, record.etag, record.remote_modified),
             ("STORED", "abc", "2026-09-13T00:00:00Z"),
         )
+
+    def test_changed_complete_response_keeps_both_revisions_without_repeat_download(self):
+        record = self.file("changing", status="STORED", etag="old", stored_bytes=3)
+        target = self.root / record.relative_path
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old")
+        with patch(
+            "buh_max_history.public_archive.urlopen",
+            return_value=Response(b"newer", {"Content-Length": "5", "ETag": '"new"'}),
+        ):
+            self.assertEqual(
+                _download_file(record, 0, budget_bytes=100, deadline=time.monotonic() + 5),
+                5,
+            )
+        record.refresh_from_db()
+        self.assertEqual(target.read_bytes(), b"newer")
+        self.assertEqual(record.revisions.count(), 2)
+        self.assertEqual(record.stored_bytes, 5)
+        self.assertEqual(record.stored_etag, '"new"')
+        self.assertEqual(record.etag, "old")
+        _created, changed = _catalog_file(
+            self.dataset, record.source_url, {"size": 3, "etag": "old"}
+        )
+        self.assertEqual(changed, 0)
+        _created, changed = _catalog_file(
+            self.dataset, record.source_url, {"size": 5, "etag": "new"}
+        )
+        self.assertEqual(changed, 0)
+        record.refresh_from_db()
+        self.assertEqual(record.status, "STORED")
+
+    def test_incomplete_changed_response_cannot_replace_stored_payload(self):
+        record = self.file("incomplete", status="STORED", etag="old")
+        target = self.root / record.relative_path
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old")
+        with patch(
+            "buh_max_history.public_archive.urlopen",
+            return_value=Response(b"newer", {"Content-Length": "6", "ETag": '"new"'}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "response length"):
+                _download_file(record, 0, budget_bytes=100, deadline=time.monotonic() + 5)
+        self.assertEqual(target.read_bytes(), b"old")
+        self.assertEqual(record.revisions.count(), 0)
 
     def test_verification_rotates_and_requeues_missing_files(self):
         first = self.file("one", status="STORED", stored_bytes=3)

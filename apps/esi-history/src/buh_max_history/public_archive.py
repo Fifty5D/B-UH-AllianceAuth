@@ -32,6 +32,7 @@ from .models import (
 USER_AGENT = "B-UH-ESI-History-Archive/2.0.0 (+https://auth.b-uh.com/)"
 MAX_CATALOG_ENTRIES_PER_RUN = 2000
 MAX_CATALOG_INDEXES_PER_RUN = 250
+UNAVAILABLE_INDEX_RECHECK = timedelta(hours=24)
 
 
 def validate_everef_url(url: str) -> str:
@@ -267,6 +268,21 @@ def _catalog_file(
             and _modified(modified) != _modified(record.remote_modified)
         )
     )
+    # The file GET can be newer than a lagging directory index. Once that
+    # complete response was stored, a later catalog catch-up is not a new
+    # revision and must not queue the same payload again.
+    if altered and record.status == PublicArchiveFile.Status.STORED:
+        altered = not (
+            (not size or size == record.stored_bytes)
+            and (not etag or (record.stored_etag and _etag(etag) == _etag(record.stored_etag)))
+            and (
+                not modified
+                or (
+                    record.stored_modified
+                    and _modified(modified) == _modified(record.stored_modified)
+                )
+            )
+        )
     updates = {
         "dataset": dataset,
         "relative_path": relative,
@@ -296,16 +312,20 @@ def _candidate_indexes(dataset, limit):
     for status, allowance in (
         (PublicCatalogIndex.Status.PENDING, max(1, remaining // 2)),
         (PublicCatalogIndex.Status.FAILED, max(1, remaining // 4)),
+        (PublicCatalogIndex.Status.UNAVAILABLE, max(1, remaining // 8)),
         (PublicCatalogIndex.Status.CATALOGED, remaining),
         (PublicCatalogIndex.Status.PENDING, remaining),
         (PublicCatalogIndex.Status.FAILED, remaining),
+        (PublicCatalogIndex.Status.UNAVAILABLE, remaining),
     ):
         available = limit - len(candidates)
         if available <= 0:
             break
+        queryset = dataset.indexes.filter(status=status)
+        if status == PublicCatalogIndex.Status.UNAVAILABLE:
+            queryset = queryset.filter(last_checked_at__lte=now() - UNAVAILABLE_INDEX_RECHECK)
         candidates.extend(
-            dataset.indexes.filter(status=status)
-            .exclude(pk__in=[item.pk for item in candidates])
+            queryset.exclude(pk__in=[item.pk for item in candidates])
             .order_by("last_checked_at", "pk")[: min(available, allowance)]
         )
     return candidates
@@ -383,6 +403,30 @@ def catalog_dataset(dataset, *, max_indexes=MAX_CATALOG_INDEXES_PER_RUN, deadlin
             PublicCatalogIndex.objects.filter(pk=index.pk).update(**updates)
         except ArchiveLockLost:
             raise
+        except HTTPError as exc:
+            if exc.code == 404 and index.depth > 0:
+                # EVE Ref sometimes advertises child indexes that do not
+                # exist. Keep the gap visible and recheck it daily without
+                # turning every otherwise productive hourly batch red.
+                PublicCatalogIndex.objects.filter(pk=index.pk).update(
+                    status=PublicCatalogIndex.Status.UNAVAILABLE,
+                    last_error="Provider advertised this index but returned HTTP 404.",
+                    last_checked_at=now(),
+                    cursor=position,
+                    catalog_sha256=digest,
+                )
+                continue
+            message = f"{type(exc).__name__}: {exc}"[:1000]
+            PublicCatalogIndex.objects.filter(pk=index.pk).update(
+                status=PublicCatalogIndex.Status.FAILED,
+                last_error=message,
+                last_checked_at=now(),
+                cursor=position,
+                catalog_sha256=digest,
+            )
+            errors.append({"url": index.source_url, "error": message})
+            if _pause_for_rate_limit(exc):
+                break
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"[:1000]
             PublicCatalogIndex.objects.filter(pk=index.pk).update(
@@ -408,6 +452,14 @@ def catalog_dataset(dataset, *, max_indexes=MAX_CATALOG_INDEXES_PER_RUN, deadlin
         "pending_indexes": dataset.indexes.exclude(
             status=PublicCatalogIndex.Status.CATALOGED
         ).count(),
+        "unavailable_indexes": dataset.indexes.filter(
+            status=PublicCatalogIndex.Status.UNAVAILABLE
+        ).count(),
+        "provider_gaps": list(
+            dataset.indexes.filter(status=PublicCatalogIndex.Status.UNAVAILABLE)
+            .order_by("source_url")
+            .values_list("source_url", flat=True)[:25]
+        ),
         "errors": errors[:25],
     }
 
@@ -486,7 +538,8 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
             if getattr(response, "status", 200) != 200:
                 raise RuntimeError("Public archive server did not return a complete file.")
             headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
-            length = int(headers.get("content-length", 0) or 0)
+            has_length = "content-length" in headers
+            length = int(headers["content-length"]) if has_length else 0
             if max(record.remote_size, length) > budget_bytes:
                 raise DownloadBudgetExceeded(
                     "File exceeds the remaining per-run byte budget."
@@ -510,19 +563,25 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
                 handle.write(chunk)
                 digest.update(chunk)
                 written += len(chunk)
-            if (record.remote_size and written != record.remote_size) or (
-                length and written != length
-            ):
-                raise RuntimeError(
-                    "Downloaded size differs from the catalog or response length."
-                )
-            if (
+            if has_length and written != length:
+                raise RuntimeError("Downloaded size differs from the response length.")
+            catalog_changed = bool(
+                (record.remote_size and written != record.remote_size)
+                or (
                 record.etag
                 and headers.get("etag")
                 and _etag(record.etag) != _etag(headers["etag"])
-            ):
+                )
+                or (
+                    record.remote_modified
+                    and headers.get("last-modified")
+                    and _modified(record.remote_modified)
+                    != _modified(headers["last-modified"])
+                )
+            )
+            if catalog_changed and not has_length:
                 raise RuntimeError(
-                    "File changed since cataloging; waiting for the next catalog refresh."
+                    "File changed since cataloging without a response length; retry safely."
                 )
             handle.flush()
             os.fsync(handle.fileno())
@@ -541,6 +600,8 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
             status=PublicArchiveFile.Status.STORED,
             stored_bytes=written,
             payload_sha256=digest.hexdigest(),
+            stored_etag=headers.get("etag", "")[:300],
+            stored_modified=headers.get("last-modified", "")[:120],
             downloaded_at=now(),
             last_checked_at=now(),
             failure_count=0,

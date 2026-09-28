@@ -1,0 +1,4 @@
+schema_version = 1
+app = "structure-ops"
+kind = "internal"
+summary = "Validate Structure Operations against the pinned Alliance Auth 5.4 runtime."

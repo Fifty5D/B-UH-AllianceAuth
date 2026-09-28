@@ -1,0 +1,4 @@
+schema_version = 1
+app = "esi-history"
+kind = "fix"
+summary = "Support Alliance Auth 5.4 and preserve complete public archive responses when EVE Ref catalogs lag."

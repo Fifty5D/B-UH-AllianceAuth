@@ -1,5 +1,16 @@
 # Delivery process and recovery history
 
+## September 27 Alliance Auth 5.4 candidate baseline
+
+The host was read directly before this candidate: Platform v0.7.0 is installed,
+Alliance Auth still runs 5.2.0, archive schedules are enabled, and no active
+recovery hold is present. The earlier pause described below has been resolved;
+it remains part of the recovery record. The public archive's latest hourly jobs
+still fail after partial downloads due to provider-advertised 404 indexes and
+catalog/file response drift. See [the 5.4 candidate runbook](auth-5-4-candidate.md)
+and [private diagnostics plan](private-diagnostics.md). Production installation
+requires the separate approval and the existing exact-release preflight process.
+
 ## September 27 recovery completion and release sequence
 
 Attempt `gh-34713182347-1` completed on the host with the reviewed receiver,

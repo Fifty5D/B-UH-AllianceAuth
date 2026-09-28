@@ -1,0 +1,4 @@
+schema_version = 1
+app = "platform"
+kind = "feature"
+summary = "Prepare the pinned Alliance Auth 5.4.0 runtime and independent private host diagnostics."
