@@ -1032,7 +1032,6 @@ def exercised_docker_boundary(
         )
         for method in (
             "_version_probe",
-            "_dependency_probe",
             "_container_version_probe",
             "_verify_static_asset",
             "_internal_http_checks",
@@ -1041,6 +1040,11 @@ def exercised_docker_boundary(
             "_public_smoke_checks",
         ):
             stack.enter_context(mock.patch.object(host, method, return_value=None))
+        # The frozen v0.6.2 recovery source predates this candidate-only check.
+        if hasattr(host, "_dependency_probe"):
+            stack.enter_context(
+                mock.patch.object(host, "_dependency_probe", return_value=None)
+            )
         yield
 
 
