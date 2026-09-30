@@ -190,7 +190,7 @@ jobs:
   deploy:
     name: Guarded Platform v2 operation
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 110
     environment: production
     permissions:
       actions: read
@@ -823,6 +823,36 @@ jobs:
           printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
           chmod 0600 "${HOME}/.ssh/buh_deployer" \
             "${HOME}/.ssh/buh_observer" "${HOME}/.ssh/known_hosts"
+
+      - name: Wait for the exact reviewed 0.8.1 receiver upgrade
+        if: ${{ inputs.platform_version == '0.8.1' }}
+        env:
+          EXPECTED_SOURCE: ${{ steps.release.outputs.source_commit }}
+          OBSERVER_USER: ${{ vars.BUH_OBSERVER_USER || secrets.BUH_OBSERVER_USER || 'buh-observer' }}
+          VPS_HOST: ${{ vars.BUH_VPS_HOST || secrets.BUH_VPS_HOST || '74.208.147.52' }}
+          VPS_PORT: ${{ vars.BUH_VPS_PORT || secrets.BUH_VPS_PORT || '22' }}
+        run: |
+          set -Eeuo pipefail
+          expected_hash="$(sha256sum ops/deploy/docker_host.py | awk '{print $1}')"
+          [[ "${EXPECTED_SOURCE}" =~ ^[0-9a-f]{40}$ && "${expected_hash}" =~ ^[0-9a-f]{64}$ ]]
+          evidence="${RUNNER_TEMP}/installed-receiver.json"
+          echo "Waiting for the root-owned receiver installation to match source ${EXPECTED_SOURCE}."
+          for ((probe=1; probe<=180; probe++)); do
+            if ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+                -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+                -i "${HOME}/.ssh/buh_observer" -p "${VPS_PORT}" \
+                "${OBSERVER_USER}@${VPS_HOST}" "receiver platform-v2" \
+                >"${evidence}" 2>/dev/null && \
+              jq -e --arg source "${EXPECTED_SOURCE}" --arg hash "${expected_hash}" \
+                '.schema_version == 1 and .source_commit == $source and .docker_host_sha256 == $hash' \
+                "${evidence}" >/dev/null; then
+              echo "The exact reviewed receiver is installed and verified."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "The exact reviewed receiver was not installed within the bounded wait." >&2
+          exit 1
 
       - name: Send the verified archive through the forced command
         id: receiver

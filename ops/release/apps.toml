@@ -103,3 +103,23 @@ django_app = "buh_max_history"
 version_file = "src/buh_max_history/__init__.py"
 dependencies = []
 setup_commands = ["buh_archive_setup"]
+
+[[apps]]
+id = "memberaudit-autoreg"
+path = "apps/memberaudit-autoreg"
+distribution = "aa-buh-memberaudit-autoreg"
+import_name = "buh_memberaudit_autoreg"
+django_app = "buh_memberaudit_autoreg"
+version_file = "src/buh_memberaudit_autoreg/__init__.py"
+dependencies = []
+setup_commands = []
+
+[[apps]]
+id = "vps-health"
+path = "apps/vps-health"
+distribution = "aa-buh-vps-health"
+import_name = "buh_vps_health"
+django_app = "buh_vps_health"
+version_file = "src/buh_vps_health/__init__.py"
+dependencies = ["structure-ops"]
+setup_commands = []

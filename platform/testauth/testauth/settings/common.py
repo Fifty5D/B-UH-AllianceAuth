@@ -36,6 +36,10 @@ STATIC_ROOT = os.environ.get("BUH_TEST_STATIC_ROOT", "/tmp/buh-test-static")
 # Archive is absent only from the frozen legacy baseline image.
 if find_spec("buh_max_history") is not None:
     INSTALLED_APPS.append("buh_max_history")  # noqa: F405
+if find_spec("buh_memberaudit_autoreg") is not None:
+    INSTALLED_APPS.append("buh_memberaudit_autoreg")  # noqa: F405
+if find_spec("buh_vps_health") is not None:
+    INSTALLED_APPS.append("buh_vps_health")  # noqa: F405
 BUH_ESI_ARCHIVE_CAPTURE_ENABLED = False
 BUH_ESI_ARCHIVE_ROOT = "/tmp/buh-test-esi-archive"
 

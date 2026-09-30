@@ -15,6 +15,9 @@ case "${request}" in
     "fingerprint platform-v2")
         mode=fingerprint
         ;;
+    "receiver platform-v2")
+        mode=receiver
+        ;;
     *)
         if [[ "${request}" =~ ^attempt\ (gh-[0-9]{1,20}-[1-9][0-9]{0,5})$ ]]; then
             mode=attempt
@@ -202,6 +205,50 @@ print("B-UH Platform v2 guarded attempt report")
 print(json.dumps(selected, sort_keys=True, separators=(",", ":")))
 PY
     python3 /usr/local/libexec/buh-redact-diagnostics "${raw_attempt}"
+    exit 0
+fi
+
+if [[ "${mode}" == "receiver" ]]; then
+    python3 - <<'PY'
+import hashlib
+import json
+import re
+import stat
+from pathlib import Path
+
+record = Path("/etc/buh-platform-v2/INSTALL.json")
+module = Path("/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py")
+for path, mode in ((record, 0o600), (module, 0o644)):
+    details = path.lstat()
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or path.is_symlink()
+        or details.st_uid != 0
+        or stat.S_IMODE(details.st_mode) != mode
+    ):
+        raise SystemExit("Installed receiver provenance is unsafe")
+if record.stat().st_size > 64 * 1024 or module.stat().st_size > 1024 * 1024:
+    raise SystemExit("Installed receiver provenance is oversized")
+value = json.loads(record.read_text(encoding="ascii"))
+source = value.get("source_commit")
+files = value.get("files")
+expected = files.get("ops/deploy/docker_host.py") if isinstance(files, dict) else None
+actual = hashlib.sha256(module.read_bytes()).hexdigest()
+if (
+    value.get("schema_version") != 1
+    or not isinstance(source, str)
+    or not re.fullmatch(r"[0-9a-f]{40}", source)
+    or not isinstance(expected, str)
+    or not re.fullmatch(r"[0-9a-f]{64}", expected)
+    or actual != expected
+):
+    raise SystemExit("Installed receiver provenance does not verify")
+print(json.dumps({
+    "schema_version": 1,
+    "source_commit": source,
+    "docker_host_sha256": actual,
+}, sort_keys=True, separators=(",", ":")))
+PY
     exit 0
 fi
 
