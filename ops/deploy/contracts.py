@@ -772,8 +772,8 @@ class DeploymentRequest:
         if not isinstance(value, dict) or set(value) != fields:
             raise DeploymentError("Recovery transition has invalid fields")
         try:
-            policy = recovery_policy.load_policy()
-            digest = recovery_policy.policy_sha256()
+            policy = recovery_policy.load_transition_policy(value.get("policy_id"))
+            digest = recovery_policy.transition_policy_sha256(policy)
         except recovery_policy.RecoveryPolicyError as exc:
             raise DeploymentError(str(exc)) from exc
         if (
@@ -822,6 +822,10 @@ class DeploymentRequest:
             or normalized[:-1] != fixed
             or recovery_policy.version_tuple(target["platform_version"])
             <= recovery_policy.version_tuple(fixed[-1]["platform_version"])
+            or (
+                policy["policy_id"] == recovery_policy.V08_GAP_POLICY_ID
+                and target["platform_version"] != "0.8.2"
+            )
         ):
             raise DeploymentError("Production recovery request is not the reviewed chain")
         return {
@@ -994,7 +998,7 @@ def _load_recovery_lineage(
     if target_manifest.get("source_commit") != target["source_commit"]:
         raise DeploymentError("Recovery target source differs from its manifest")
     try:
-        policy = recovery_policy.load_policy()
+        policy = recovery_policy.load_transition_policy(transition["policy_id"])
         expected_recovery = recovery_policy.manifest_recovery(policy)
     except recovery_policy.RecoveryPolicyError as exc:
         raise DeploymentError(str(exc)) from exc
@@ -1067,8 +1071,11 @@ def _load_recovery_lineage(
             compatibility_sha256 = compatibility.get("sha256")
             runtime_image = runtime["base_image"]
         elif (
+            policy["policy_id"] != recovery_policy.V08_GAP_POLICY_ID
+            and (
             compatibility.get("sha256") != compatibility_sha256
             or runtime["base_image"] != runtime_image
+            )
         ):
             raise DeploymentError("Recovery lineage crosses an unreviewed compatibility boundary")
         previous = {
@@ -1092,6 +1099,13 @@ def _load_recovery_lineage(
         if isinstance(target_values, dict)
         else None
     )
+    if policy["policy_id"] == recovery_policy.V08_GAP_POLICY_ID:
+        try:
+            recovery_policy.validate_v08_gap_compatibility(
+                manifests, target_manifest
+            )
+        except recovery_policy.RecoveryPolicyError as exc:
+            raise DeploymentError(str(exc)) from exc
     if (
         target_manifest.get("previous_release") != previous
         or not isinstance(target_policy, dict)
@@ -1099,7 +1113,10 @@ def _load_recovery_lineage(
         is not True
         or not isinstance(target_runtime, dict)
         or target_runtime.get("base_image") != runtime_image
-        or target_compatibility.get("sha256") != compatibility_sha256
+        or (
+            policy["policy_id"] != recovery_policy.V08_GAP_POLICY_ID
+            and target_compatibility.get("sha256") != compatibility_sha256
+        )
     ):
         raise DeploymentError("Recovery target compatibility or predecessor changed")
     return tuple(manifests)

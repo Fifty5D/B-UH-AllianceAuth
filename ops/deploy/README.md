@@ -270,6 +270,23 @@ For the fully diagnosed incident whose affected data syncs later succeeded, use
 findings, requires an explicit assessment, and verifies fresh database status
 and every newer log before separately approved completion.
 
+## v0.8.0 to v0.8.2 successor gap
+
+The separate `production-v0.8.0-v0.8.1-gap-20260930` policy in trusted
+`ops/release/recovery_policy.py` permits only one v0.8.2 release after the
+published v0.8.1 release was not installed. It pins the immutable v0.8.0 and
+v0.8.1 release commits and manifest digests. The release planner, request
+archive, and receiver verify both lineage manifests and the exact compatibility
+change: v0.8.1 adds `memberaudit-autoreg` and `vps-health`, while its other
+compatibility settings and base image match v0.8.0. The v0.8.2 target must
+keep v0.8.1 compatibility unchanged.
+
+The host must still carry the exact v0.8.0 receipt, application marker, Compose
+order, local settings ownership, and Auth image provenance. The normal image
+pin, health, backup, preflight, and deployment checks remain mandatory. A
+successful v0.8.2 preflight is evidence for a later separate deployment
+approval; this policy does not trigger a retry or a traffic switch.
+
 ## Schema-v2 managed web-switch prerequisite
 
 Schema v2 is a deliberate host transition, not an application-release side

@@ -1,3 +1,4 @@
 app = "platform"
 kind = "fix"
 summary = "Install the hash-pinned Auth 5.4 runtime dependency closure after release wheels so candidate dependency verification can pass."
+deployment_predecessor = "0.8.0"

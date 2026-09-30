@@ -1711,6 +1711,9 @@ class DockerHost:
         transition = bundle.request.recovery_transition
         if transition is None:
             return
+        if transition["policy_id"] == recovery_policy.V08_GAP_POLICY_ID:
+            self._validate_v08_gap_host_baseline(bundle)
+            return
         try:
             policy = recovery_policy.load_policy()
         except recovery_policy.RecoveryPolicyError as exc:
@@ -1846,6 +1849,76 @@ class DockerHost:
             owner["auth_username"],
         )
         self.recovery_baseline_verified = True
+
+    def _validate_v08_gap_host_baseline(self, bundle: ValidatedBundle) -> None:
+        """Require the exact installed v0.8.0 receipt and live image provenance."""
+
+        transition = bundle.request.recovery_transition
+        assert transition is not None
+        baseline = transition["releases"][0]
+        current = self._load_current()
+        if current is None or any(
+            current.get(key) != baseline[key]
+            for key in (
+                "platform_version", "release_commit", "source_commit", "manifest_sha256"
+            )
+        ):
+            raise DeploymentError("v0.8 recovery live receipt changed")
+        if [path.as_posix() for path in self._compose_files()] != [
+            "docker-compose.yml",
+            "docker-compose.buh-vps-health.yml",
+            "docker-compose.buh-platform-v2.yml",
+        ]:
+            raise DeploymentError("v0.8 recovery Compose baseline changed")
+        local = self.config.app_dir / self.config.local_settings
+        details = local.stat()
+        if (
+            self.config.local_settings.as_posix() != "conf/local.py"
+            or (details.st_uid, details.st_gid, stat.S_IMODE(details.st_mode))
+            != (0, 61000, 0o640)
+        ):
+            raise DeploymentError("v0.8 recovery local settings baseline changed")
+        try:
+            marker = json.loads(self._platform_current_path().read_text(encoding="ascii"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DeploymentError("v0.8 recovery application marker is unreadable") from exc
+        if marker != {
+            "manifest_sha256": baseline["manifest_sha256"],
+            "platform_version": baseline["platform_version"],
+            "release_commit": baseline["release_commit"],
+            "schema_version": 1,
+        }:
+            raise DeploymentError("v0.8 recovery application marker changed")
+        for service in self.config.auth_services:
+            captured = self.previous_images.get(service)
+            expected_count = self.auth_replica_counts.get(service)
+            containers = self._running_service_containers(
+                service, context=f"v0.8 recovery provenance discovery for {service}"
+            )
+            if captured is None or not expected_count or len(containers) != expected_count:
+                raise DeploymentError(f"v0.8 recovery service topology changed for {service}")
+            for container in containers:
+                raw = self._run(
+                    ["docker", "inspect", "--format", "{{json .Config.Labels}}", container],
+                    context=f"v0.8 recovery provenance for {service}",
+                ).strip()
+                try:
+                    labels = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise DeploymentError("v0.8 recovery image labels are malformed") from exc
+                expected_labels = {
+                    IMAGE_PROVENANCE_LABELS[key]: baseline[key]
+                    for key in (
+                        "platform_version", "source_commit", "release_commit", "manifest_sha256"
+                    )
+                }
+                expected_labels[IMAGE_PROVENANCE_LABELS["base_digest"]] = (
+                    "sha256:4f7a6ebf0ea593220fbf38ace1e93f7cb25f7bb72224335e8d05ce48a10f11e7"
+                )
+                if not isinstance(labels, dict) or any(
+                    labels.get(key) != value for key, value in expected_labels.items()
+                ):
+                    raise DeploymentError(f"v0.8 recovery live provenance changed for {service}")
 
     def _validate_runtime_image(self, bundle: ValidatedBundle) -> None:
         values = bundle.manifest["compatibility"]["values"]
