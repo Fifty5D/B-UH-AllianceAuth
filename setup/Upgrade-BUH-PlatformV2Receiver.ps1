@@ -133,6 +133,7 @@ $RequiredSources = @(
     "setup/Upgrade-BUH-PlatformV2Receiver.ps1",
     "tests/__init__.py",
     "tests/deploy/__init__.py",
+    "tests/deploy/fixtures/aa-docker-custom-pre-v2.dockerfile",
     "tests/deploy/fixtures/discord-owner-50013-mainprocess.log",
     "tests/deploy/rehearse_snapshot_backup.py",
     "tests/deploy/test_contracts.py",
