@@ -1,0 +1,3 @@
+app = "esi-history"
+kind = "internal"
+summary = "Keep archive parser regressions isolated from the already-active Member Audit auto-registration signal."

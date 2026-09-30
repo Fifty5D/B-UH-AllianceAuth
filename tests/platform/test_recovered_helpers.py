@@ -13,6 +13,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RecoveredHelperSourceTests(unittest.TestCase):
+    def test_existing_vps_host_agent_source_is_pinned(self):
+        agent = ROOT / "apps/vps-health/src/host-agent/buh-vps-health-agent.py"
+        self.assertEqual(
+            hashlib.sha256(agent.read_bytes()).hexdigest(),
+            "a4b37e4e38dd5b683afec767a9bb1c7973e137b87ceeaad7f6e0ed7378ad4f40",
+        )
+
     def test_recovered_source_matches_installed_wheels(self):
         cases = (
             (

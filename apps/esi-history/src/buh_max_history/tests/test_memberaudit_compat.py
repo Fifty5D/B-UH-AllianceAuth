@@ -3,6 +3,7 @@
 from contextlib import ExitStack
 from unittest.mock import patch
 
+from django.apps import apps
 from django.test import override_settings
 
 from app_utils.testing import NoSocketsTestCase
@@ -12,6 +13,18 @@ from memberaudit.models import Character
 from memberaudit.tests.testdata.factories_2 import CharacterFactory
 
 from buh_max_history.memberaudit_compat import install_memberaudit_esi_status_guard
+
+
+def character_for_parser_test():
+    """Keep a factory-created Character independent of auto-registration signals."""
+
+    if not apps.is_installed("buh_memberaudit_autoreg"):
+        return CharacterFactory()
+    from buh_memberaudit_autoreg.services import RegistrationResult, RegistrationStatus
+
+    ignored = RegistrationResult(RegistrationStatus.MISSING_SCOPES, 0, None)
+    with patch("buh_memberaudit_autoreg.signals.register_token", return_value=ignored):
+        return CharacterFactory()
 
 
 class MemberAuditStatusParserTests(NoSocketsTestCase):
@@ -83,7 +96,7 @@ class MemberAuditUpdateDispatchTests(NoSocketsTestCase):
         super().tearDown()
 
     def test_unrelated_down_delete_does_not_abort_all_section_updates(self):
-        character = CharacterFactory()
+        character = character_for_parser_test()
         status = {
             "routes": [
                 {
@@ -117,7 +130,7 @@ class MemberAuditUpdateDispatchTests(NoSocketsTestCase):
             section_task.apply_async.assert_called_once()
 
     def test_malformed_status_aborts_before_section_updates_are_queued(self):
-        character = CharacterFactory()
+        character = character_for_parser_test()
         malformed_routes = [
             {
                 "method": [],
