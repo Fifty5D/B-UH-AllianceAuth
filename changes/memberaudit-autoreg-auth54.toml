@@ -1,3 +1,0 @@
-app = "memberaudit-autoreg"
-kind = "fix"
-summary = "Run the existing Member Audit auto-registration app with AllianceAuth 5.4.0."
