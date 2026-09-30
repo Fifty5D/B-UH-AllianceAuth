@@ -44,7 +44,9 @@ RUN python -m pip install \
       -e /workspace/apps/structure-ops \
       -e /workspace/apps/mining-analytics \
       -e /workspace/apps/moon-tax \
-      -e /workspace/apps/esi-history
+      -e /workspace/apps/esi-history \
+      -e /workspace/apps/memberaudit-autoreg \
+      -e /workspace/apps/vps-health
 
 COPY platform/testauth/ /workspace/platform/testauth/
 COPY platform/baselines/ /workspace/platform/baselines/

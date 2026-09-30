@@ -498,7 +498,9 @@ jobs:
             -e apps/structure-ops \
             -e apps/mining-analytics \
             -e apps/moon-tax \
-            -e apps/esi-history
+            -e apps/esi-history \
+            -e apps/memberaudit-autoreg \
+            -e apps/vps-health
           python -m pip check
 
       - name: Run unit, migration, and JavaScript checks
@@ -520,6 +522,25 @@ jobs:
           path: artifacts/fast.log
           if-no-files-found: error
           retention-days: 30
+
+  effective_build:
+    if: needs.configuration.outputs.docs_only != 'true'
+    name: Reproduce the effective production Auth build
+    needs: configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the old-core failure and corrected pinned build
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${{ inputs.source_sha }}" ]]
+          python3 tests/deploy/rehearse_effective_auth_build.py
 
   integration:
     if: needs.configuration.outputs.docs_only != 'true'
@@ -839,7 +860,7 @@ jobs:
   required:
     name: Required source checks
     if: always()
-    needs: [configuration, release_ledger, legacy_release, fast, integration, upgrade, browser]
+    needs: [configuration, release_ledger, legacy_release, fast, effective_build, integration, upgrade, browser]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -849,6 +870,7 @@ jobs:
           DOCS_ONLY: ${{ needs.configuration.outputs.docs_only }}
           CONFIGURATION_RESULT: ${{ needs.configuration.result }}
           FAST_RESULT: ${{ needs.fast.result }}
+          EFFECTIVE_BUILD_RESULT: ${{ needs.effective_build.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           LEGACY_RELEASE_RESULT: ${{ needs.legacy_release.result }}
           RELEASE_LEDGER_RESULT: ${{ needs.release_ledger.result }}
@@ -862,6 +884,7 @@ jobs:
             "release-ledger:${RELEASE_LEDGER_RESULT}" \
             "legacy-release:${LEGACY_RELEASE_RESULT}" \
             "fast:${FAST_RESULT}" \
+            "effective-build:${EFFECTIVE_BUILD_RESULT}" \
             "integration:${INTEGRATION_RESULT}" \
             "upgrade:${UPGRADE_RESULT}" \
             "browser:${BROWSER_RESULT}"; do
@@ -869,7 +892,7 @@ jobs:
             result="${entry#*:}"
             printf '%s: %s\n' "${lane}" "${result}"
             expected="success"
-            if [[ "${DOCS_ONLY}" == "true" && "${lane}" =~ ^(fast|integration|upgrade|browser)$ ]]; then
+            if [[ "${DOCS_ONLY}" == "true" && "${lane}" =~ ^(fast|effective-build|integration|upgrade|browser)$ ]]; then
               expected="skipped"
             fi
             if [[ "${result}" != "${expected}" ]]; then

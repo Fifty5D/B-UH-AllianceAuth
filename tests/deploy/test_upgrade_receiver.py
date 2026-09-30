@@ -130,9 +130,13 @@ def independent_fingerprint(root: Path):
 
 
 class ConfirmedReceiverBaselineTests(unittest.TestCase):
-    def _exercise(self, *, changed_path: str | None = None):
+    def _exercise(self, *, baseline: str = "historical", changed_path: str | None = None):
         policy = recovery_policy.load_policy()
-        expected = policy["host_baseline"]["installed_receiver"]
+        expected = (
+            policy["host_baseline"]["installed_receiver"]
+            if baseline == "historical"
+            else receiver_upgrade.V080_INSTALLED_RECEIVER
+        )
         identities = {
             expected["config"]["path"]: expected["config"],
             expected["install_record"]["path"]: expected["install_record"],
@@ -169,17 +173,20 @@ class ConfirmedReceiverBaselineTests(unittest.TestCase):
             return identities[logical]["sha256"]
 
         record = {
-            "config_sha256": expected["config"]["sha256"],
+            "config_sha256": expected["install_record"].get(
+                "config_sha256", expected["config"]["sha256"]
+            ),
             "files": record_files,
             "schema_version": 1,
             "source_commit": expected["install_record"]["source_commit"],
         }
+        record["files"].update(expected["install_record"].get("source_file_sha256", {}))
         with mock.patch.object(Path, "lstat", details_for), mock.patch.object(
             receiver_upgrade, "_checked_sha256", side_effect=digest_for
         ), mock.patch.object(
             receiver_upgrade.ReceiverConfig,
             "load",
-            return_value=SimpleNamespace(schema_version=1),
+            return_value=SimpleNamespace(schema_version=expected["config"]["schema_version"]),
         ), mock.patch.object(
             receiver_upgrade, "_load_json_object", return_value=record
         ):
@@ -188,12 +195,35 @@ class ConfirmedReceiverBaselineTests(unittest.TestCase):
     def test_accepts_the_exact_confirmed_installed_receiver(self):
         self._exercise()
 
+    def test_accepts_the_exact_v080_receiver_and_later_config(self):
+        self._exercise(baseline="v080")
+
     def test_rejects_any_changed_confirmed_receiver_file(self):
         with self.assertRaisesRegex(
             receiver_upgrade.UpgradeError,
             "Confirmed installed receiver baseline changed",
         ):
             self._exercise(changed_path="/usr/local/sbin/buh-platform-v2-receiver")
+
+    def test_rejects_changed_v080_receiver_file(self):
+        with self.assertRaisesRegex(
+            receiver_upgrade.UpgradeError,
+            "Confirmed installed receiver baseline changed",
+        ):
+            self._exercise(
+                baseline="v080",
+                changed_path="/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py",
+            )
+
+    def test_rejects_unknown_receiver_install_record(self):
+        with self.assertRaisesRegex(
+            receiver_upgrade.UpgradeError,
+            "Confirmed installed receiver baseline changed",
+        ):
+            self._exercise(
+                baseline="v080",
+                changed_path="/etc/buh-platform-v2/INSTALL.json",
+            )
 
 
 class ReceiverUpgradeBehaviorTests(unittest.TestCase):

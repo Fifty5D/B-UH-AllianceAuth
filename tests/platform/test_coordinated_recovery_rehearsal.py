@@ -558,6 +558,7 @@ class SyntheticDockerBoundary:
                             "build": {
                                 "context": str(self.host.config.app_dir),
                                 "dockerfile": str(self.host.config.custom_dockerfile),
+                                "args": {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"},
                             }
                         }
                         for service in self.host.config.auth_services
@@ -1039,6 +1040,11 @@ def exercised_docker_boundary(
             "_public_smoke_checks",
         ):
             stack.enter_context(mock.patch.object(host, method, return_value=None))
+        # The frozen v0.6.2 recovery source predates this candidate-only check.
+        if hasattr(host, "_dependency_probe"):
+            stack.enter_context(
+                mock.patch.object(host, "_dependency_probe", return_value=None)
+            )
         yield
 
 

@@ -76,6 +76,57 @@ CANONICAL_LEGACY_RECEIVER_PATH = (
     "/usr/local/sbin/buh-moon-tax-platform-remote"
 )
 
+# Read-only host inventory captured after the v0.8.0 receiver/config activation.
+# The original installation record predates the schema-2 configuration and a
+# later docker_host.py update, so its embedded hashes differ from the live files.
+# Keep the historical recovery policy intact for its original baseline.
+V080_INSTALLED_RECEIVER = {
+    "config": {
+        "path": "/etc/buh-platform-v2/receiver.json",
+        "uid": 0, "gid": 0, "mode": "0600", "schema_version": 2,
+        "sha256": "28d37ca1a149a81405c036c4668a235952182681f274847067ebb13d7f594d4e",
+    },
+    "install_record": {
+        "path": "/etc/buh-platform-v2/INSTALL.json",
+        "uid": 0, "gid": 0, "mode": "0600",
+        "sha256": "d7b5c208f223720bfaf33525aff3bb3f116054b654015cbc7298e648fc959379",
+        "source_commit": "fc0229b71c50c1bcb15d37f3625189fd9a7cb495",
+        "config_sha256": "b57e6db83bccbedcf944985469f4f621e0b34b4eb34274b68c2dff210444bb04",
+        "source_file_sha256": {
+            "ops/deploy/contracts.py": "5f88486635e83c960f0c133fb644e663d519f4ed742c3a1b146a6972cdae69f7",
+            "ops/deploy/docker_host.py": "0aa449968b98038fd68aca1b093640bea76d3889c185dce298775943881f20fe",
+            "ops/deploy/buh-deploy-dispatch": "cd23d3d3cba391bfee4aec7dcde568b86d338c8bea395ecd7fc59294f829fe99",
+            "ops/deploy/buh-platform-v2-receiver": "41efdd024619c2c4048e7964ef9220bddf52fd09284004837a8293f126b26d48",
+        },
+    },
+    "files": {
+        "/usr/local/lib/buh-platform-v2/ops/deploy/contracts.py": {
+            "uid": 0, "gid": 0, "mode": "0644",
+            "sha256": "5f88486635e83c960f0c133fb644e663d519f4ed742c3a1b146a6972cdae69f7",
+        },
+        "/usr/local/lib/buh-platform-v2/ops/deploy/docker_host.py": {
+            "uid": 0, "gid": 0, "mode": "0644",
+            "sha256": "2ff42210414b337c942912a9a30c397f908cb9b8d152bb9d5b5d8d2d38ed70ff",
+        },
+        "/usr/local/sbin/buh-deploy-dispatch": {
+            "uid": 0, "gid": 0, "mode": "0755",
+            "sha256": "cd23d3d3cba391bfee4aec7dcde568b86d338c8bea395ecd7fc59294f829fe99",
+        },
+        "/usr/local/sbin/buh-platform-v2-receiver": {
+            "uid": 0, "gid": 0, "mode": "0755",
+            "sha256": "41efdd024619c2c4048e7964ef9220bddf52fd09284004837a8293f126b26d48",
+        },
+        "/usr/local/bin/buh-github-observe-entry": {
+            "uid": 0, "gid": 0, "mode": "0755",
+            "sha256": "01b35bac4a619b494c2752568417634578d63882962cc1783f74440f90092f35",
+        },
+        "/usr/local/sbin/buh-github-observe-root": {
+            "uid": 0, "gid": 0, "mode": "0755",
+            "sha256": "9a4802ca670e694e51a9d947a7708585c7481d9e39d96d7e868bab6db12bd0c4",
+        },
+    },
+}
+
 
 class UpgradeError(RuntimeError):
     """A fail-closed receiver upgrade error safe to show to the operator."""
@@ -292,11 +343,38 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
     """Fail closed unless the one-time upgrade starts from reviewed host evidence."""
 
     try:
-        expected = recovery_policy.load_policy()["host_baseline"][
+        historical = recovery_policy.load_policy()["host_baseline"][
             "installed_receiver"
         ]
     except recovery_policy.RecoveryPolicyError as exc:
         raise UpgradeError(str(exc)) from exc
+
+    # Select solely by the root-owned record's exact digest. Unknown receiver
+    # revisions stop before backup, installation, or candidate preflight.
+    record_path = _actual(system_root, historical["install_record"]["path"])
+    try:
+        record_details = record_path.lstat()
+    except OSError as exc:
+        raise UpgradeError("Confirmed installed receiver baseline is unavailable.") from exc
+    if (
+        not stat.S_ISREG(record_details.st_mode)
+        or stat.S_ISLNK(record_details.st_mode)
+        or record_details.st_uid != 0
+        or record_details.st_gid != 0
+        or stat.S_IMODE(record_details.st_mode) != 0o600
+    ):
+        raise UpgradeError("Confirmed installed receiver baseline changed.")
+    record_digest = _checked_sha256(record_path, "Installed receiver baseline")
+    expected = next(
+        (
+            baseline
+            for baseline in (historical, V080_INSTALLED_RECEIVER)
+            if record_digest == baseline["install_record"]["sha256"]
+        ),
+        None,
+    )
+    if expected is None:
+        raise UpgradeError("Confirmed installed receiver baseline changed.")
 
     identities = {
         expected["config"]["path"]: expected["config"],
@@ -336,7 +414,9 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
     )
     if (
         set(record) != {"config_sha256", "files", "schema_version", "source_commit"}
-        or record.get("config_sha256") != expected["config"]["sha256"]
+        or record.get("config_sha256") != expected["install_record"].get(
+            "config_sha256", expected["config"]["sha256"]
+        )
         or record.get("schema_version") != 1
         or record.get("source_commit") != expected["install_record"]["source_commit"]
         or not isinstance(record.get("files"), dict)
@@ -355,7 +435,9 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
         ),
     }
     if any(
-        record["files"].get(source) != expected["files"][installed]["sha256"]
+        record["files"].get(source) != expected["install_record"].get(
+            "source_file_sha256", {}
+        ).get(source, expected["files"][installed]["sha256"])
         for installed, source in installed_to_source.items()
     ):
         raise UpgradeError("Confirmed installed receiver source identity changed.")

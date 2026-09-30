@@ -83,3 +83,15 @@ distribution = "aa-buh-max-history"
 module = "buh_max_history"
 path = "apps/esi-history"
 depends_on = []
+
+[applications.memberaudit-autoreg]
+distribution = "aa-buh-memberaudit-autoreg"
+module = "buh_memberaudit_autoreg"
+path = "apps/memberaudit-autoreg"
+depends_on = []
+
+[applications.vps-health]
+distribution = "aa-buh-vps-health"
+module = "buh_vps_health"
+path = "apps/vps-health"
+depends_on = ["structure-ops"]

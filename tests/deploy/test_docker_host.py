@@ -35,7 +35,7 @@ from ops.release import recovery_policy
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_IMAGE = (
-    "ghcr.io/allianceauth/allianceauth:v5.2.0@sha256:" + "1" * 64
+    "ghcr.io/allianceauth/allianceauth:v5.4.0@sha256:" + "1" * 64
 )
 RETAINED_DISCORD_OWNER_LOG = (
     ROOT / "tests/deploy/fixtures/discord-owner-50013-mainprocess.log"
@@ -264,6 +264,7 @@ def make_bundle(
                     "deployment_generation": "legacy-v1",
                 },
                 "production_runtime": {"base_image": image},
+                "runtime": {"allianceauth": "5.4.0", "packaging": "25.0"},
                 "policy": {
                     "database_migrations_must_be_rollback_compatible": True,
                     "legacy_bootstrap_may_skip_uninstalled_v2_releases": True,
@@ -343,7 +344,7 @@ def write_host_files(config: ReceiverConfig) -> None:
         f"AA_DOCKER_TAG={RUNTIME_IMAGE}\n", encoding="utf-8"
     )
     (app / config.custom_dockerfile).write_text(
-        "FROM example.invalid/base\n"
+        "ARG AA_DOCKER_TAG\nFROM $AA_DOCKER_TAG\n"
         f"{BEGIN_LEGACY}\nRUN echo legacy\n{END_LEGACY}\n",
         encoding="utf-8",
     )
@@ -769,12 +770,14 @@ class DockerHostContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = make_config(root)
+            write_host_files(config)
             host = DockerHost(config)
             services = {
                 service: {
                     "build": {
                         "context": str(config.app_dir),
                         "dockerfile": str(config.custom_dockerfile),
+                        "args": {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"},
                     }
                 }
                 for service in config.auth_services
@@ -796,12 +799,18 @@ class DockerHostContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = make_config(root)
+            write_host_files(config)
+            (config.app_dir / "Dockerfile").write_text(
+                "FROM python:3.12-slim\nARG AUTH_VERSION=v5.2.0\n",
+                encoding="utf-8",
+            )
             host = DockerHost(config)
             services = {
                 service: {
                     "build": {
                         "context": str(config.app_dir),
                         "dockerfile": str(config.custom_dockerfile),
+                        "args": {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"},
                     }
                 }
                 for service in config.auth_services
@@ -815,12 +824,23 @@ class DockerHostContracts(unittest.TestCase):
             services[config.beat_service] = {
                 "build": {
                     "context": str(config.app_dir),
-                    "dockerfile": "unreviewed.dockerfile",
+                    "dockerfile": "Dockerfile",
+                    "args": {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"},
                 }
             }
             with mock.patch.object(
                 host, "_compose", return_value=json.dumps({"services": services})
             ), self.assertRaisesRegex(DeploymentError, "reviewed custom Dockerfile"):
+                host._verify_compose_build_contract()
+
+            services[config.beat_service]["build"] = {
+                "context": str(config.app_dir),
+                "dockerfile": str(config.custom_dockerfile),
+                "args": {"AUTH_VERSION": "v5.2.0"},
+            }
+            with mock.patch.object(
+                host, "_compose", return_value=json.dumps({"services": services})
+            ), self.assertRaisesRegex(DeploymentError, "pinned AA_DOCKER_TAG"):
                 host._verify_compose_build_contract()
 
     def test_proxy_contract_binds_managed_upstream_to_production_auth_route(self):
@@ -1143,6 +1163,87 @@ class DockerHostContracts(unittest.TestCase):
             with self.assertRaisesRegex(DeploymentError, "does not match"):
                 host._validate_runtime_image(make_bundle(root))
 
+    def test_correct_image_pin_with_old_installed_core_fails_candidate_and_live(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            bundle = make_bundle(root)
+            host._validate_runtime_image(bundle)
+            expected = host._expected_versions(bundle)
+            self.assertEqual(expected["allianceauth"], "5.4.0")
+            self.assertEqual(expected["packaging"], "25.0")
+            old = {
+                "versions": {**expected, "allianceauth": "5.2.0"},
+                "imported_allianceauth": "5.2.0",
+                "module_from_distribution": True,
+            }
+            with mock.patch.object(
+                host, "_compose", return_value=json.dumps(old)
+            ), self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._version_probe(config.gunicorn_service, bundle, live=False)
+
+            replicas = (container_id(1), container_id(2))
+            good = {
+                "versions": expected,
+                "imported_allianceauth": "5.4.0",
+                "module_from_distribution": True,
+            }
+            with mock.patch.object(
+                host, "_running_service_containers", return_value=replicas
+            ), mock.patch.object(
+                host, "_run", side_effect=(json.dumps(good), json.dumps(old))
+            ) as run, self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._version_probe(config.worker_service, bundle, live=True)
+            self.assertEqual(run.call_count, 2)
+            self.assertIn(replicas[1], run.call_args.args[0])
+
+            shadowed = {**good, "module_from_distribution": False}
+            with self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._check_version_probe_output(
+                    json.dumps(shadowed), expected, config.gunicorn_service
+                )
+
+            wrong_packaging = {
+                **good,
+                "versions": {**expected, "packaging": "26.3"},
+            }
+            with self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._check_version_probe_output(
+                    json.dumps(wrong_packaging), expected, config.worker_service
+                )
+
+    def test_effective_host_dockerfile_reconciles_legacy_dependency_resolvers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = make_config(root)
+            write_host_files(config)
+            host = DockerHost(config)
+            original = (
+                ROOT / "tests/deploy/fixtures/aa-docker-custom-pre-v2.dockerfile"
+            ).read_text(encoding="utf-8")
+            path = config.app_dir / config.custom_dockerfile
+            path.write_text(original, encoding="utf-8")
+            self.assertIn("RUN pip install /tmp/aa_buh_memberaudit_autoreg", original)
+            self.assertIn("RUN python3 -m pip install --no-cache-dir \\\n    /tmp/aa_structures", original)
+            host._write_candidate_dockerfile(make_bundle(root))
+            candidate = path.read_text(encoding="utf-8")
+            self.assertIn(
+                "RUN pip install --no-deps /tmp/aa_buh_memberaudit_autoreg",
+                candidate,
+            )
+            self.assertIn(
+                "RUN python3 -m pip install --no-cache-dir --no-deps \\\n    /tmp/aa_structures",
+                candidate,
+            )
+            self.assertIn(BEGIN_V2, candidate)
+            self.assertIn("packaging==25.0 --hash=sha256:", candidate)
+            self.assertIn("--require-hashes -r /dev/stdin", candidate)
+            self.assertNotIn("ARG AUTH_VERSION", candidate)
+            host._write_candidate_dockerfile(make_bundle(root))
+            self.assertEqual(path.read_text(encoding="utf-8"), candidate)
+
     def test_dockerfile_uses_stable_per_wheel_layers_and_replaces_legacy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1156,9 +1257,11 @@ class DockerHostContracts(unittest.TestCase):
             block = host._dockerfile_block(bundle)
             self.assertLess(block.index("vendor.whl"), block.index("structure.whl"))
             self.assertLess(block.index("structure.whl"), block.index("moon.whl"))
-            self.assertEqual(block.count("python3 -m pip install"), 3)
+            self.assertEqual(block.count("python3 -m pip install"), 4)
             self.assertEqual(block.count("--force-reinstall"), 3)
             self.assertEqual(block.count("sha256sum --check --strict"), 3)
+            self.assertIn("packaging==25.0 --hash=sha256:", block)
+            self.assertIn("--require-hashes -r /dev/stdin", block)
             self.assertNotIn("rm -f /tmp/buh-platform-v2", block)
             for label, value in host._candidate_provenance_labels(bundle).items():
                 self.assertIn(f"{label}={json.dumps(value)}", block)
@@ -1170,7 +1273,7 @@ class DockerHostContracts(unittest.TestCase):
             self.assertNotIn(END_LEGACY, written)
             expected_printf = "RUN printf '%s  %s\\n' \\"
             self.assertEqual(
-                [line for line in written.splitlines() if line.startswith("RUN printf")],
+                [line for line in written.splitlines() if line.startswith(expected_printf)],
                 [expected_printf] * 3,
             )
 
@@ -1179,7 +1282,7 @@ class DockerHostContracts(unittest.TestCase):
             host._write_candidate_dockerfile(bundle)
             rewritten = (config.app_dir / config.custom_dockerfile).read_text()
             self.assertEqual(
-                [line for line in rewritten.splitlines() if line.startswith("RUN printf")],
+                [line for line in rewritten.splitlines() if line.startswith(expected_printf)],
                 [expected_printf] * 3,
             )
             rewritten_details = dockerfile.stat()
@@ -3917,6 +4020,8 @@ class DockerHostContracts(unittest.TestCase):
             ) as images, mock.patch.object(
                 host, "_version_probe"
             ) as versions, mock.patch.object(
+                host, "_dependency_probe"
+            ) as dependencies, mock.patch.object(
                 host, "_wait_for_slots"
             ), mock.patch.object(
                 host, "_candidate_runtime_checks"
@@ -3955,6 +4060,10 @@ class DockerHostContracts(unittest.TestCase):
             images.assert_called_once_with(expected_images)
             self.assertEqual(
                 {call.args[0] for call in versions.call_args_list},
+                set(config.auth_services) - {config.gunicorn_service},
+            )
+            self.assertEqual(
+                {call.args[0] for call in dependencies.call_args_list},
                 set(config.auth_services) - {config.gunicorn_service},
             )
             http.assert_called_once_with("allianceauth_gunicorn")

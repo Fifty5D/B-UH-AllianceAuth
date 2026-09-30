@@ -46,6 +46,15 @@ BEGIN_V2 = "# BEGIN B-UH PLATFORM V2"
 END_V2 = "# END B-UH PLATFORM V2"
 BEGIN_LEGACY = "# BEGIN B-UH MOON TAX PLATFORM"
 END_LEGACY = "# END B-UH MOON TAX PLATFORM"
+# Hashes of the packaging 25.0 artifacts in production.lock. The candidate
+# installs this after every legacy resolver and release wheel, so a resolver
+# cannot leave packaging 26.x behind for the owned analytics application.
+LOCKED_PACKAGING_HASHES = {
+    "25.0": (
+        "29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
+        "d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f",
+    ),
+}
 FATAL_LOG_RE = re.compile(
     # Severity words are standalone tokens, not pieces of HTTP metadata names
     # (X-Esi-Error-Limit-Remain, stale-if-error) or dotted logger identifiers.
@@ -1831,6 +1840,19 @@ class DockerHost:
         services = document["services"]
         app_dir = self.config.app_dir.resolve()
         expected_dockerfile = (app_dir / self.config.custom_dockerfile).resolve()
+        try:
+            dockerfile_text = expected_dockerfile.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DeploymentError("Reviewed custom Dockerfile is unreadable") from exc
+        instructions = [
+            line.strip()
+            for line in dockerfile_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if instructions[:2] != ["ARG AA_DOCKER_TAG", "FROM $AA_DOCKER_TAG"]:
+            raise DeploymentError(
+                "Reviewed custom Dockerfile does not start from AA_DOCKER_TAG"
+            )
         for service in self.config.auth_services:
             service_config = services.get(service)
             build = (
@@ -1867,6 +1889,10 @@ class DockerHost:
             if context_path != app_dir or dockerfile_path.resolve() != expected_dockerfile:
                 raise DeploymentError(
                     f"Auth service {service} does not build the reviewed custom Dockerfile"
+                )
+            if build.get("args") != {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"}:
+                raise DeploymentError(
+                    f"Auth service {service} does not pass the pinned AA_DOCKER_TAG"
                 )
 
     @staticmethod
@@ -2022,6 +2048,7 @@ class DockerHost:
                     f"      /tmp/buh-platform-v2/{filename}",
                 ]
             )
+        lines.append(self._packaging_install_line(self._packaging_version(bundle)))
         labels = self._candidate_provenance_labels(bundle)
         lines.append(
             "LABEL "
@@ -2032,9 +2059,54 @@ class DockerHost:
         lines.append(END_V2)
         return "\n".join(lines) + "\n"
 
+    @staticmethod
+    def _packaging_version(bundle: ValidatedBundle) -> str:
+        runtime = bundle.manifest["compatibility"]["values"].get("runtime")
+        version = runtime.get("packaging") if isinstance(runtime, dict) else None
+        if version not in LOCKED_PACKAGING_HASHES:
+            raise DeploymentError("Release compatibility lacks a hash-pinned packaging version")
+        return version
+
+    @staticmethod
+    def _packaging_install_line(version: str) -> str:
+        hashes = LOCKED_PACKAGING_HASHES.get(version)
+        if hashes is None:
+            raise DeploymentError("Packaging version lacks approved artifact hashes")
+        requirement = f"packaging=={version} " + " ".join(
+            f"--hash=sha256:{digest}" for digest in hashes
+        )
+        return (
+            "RUN printf '%s\\n' '" + requirement + "' "
+            "| python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /dev/stdin"
+        )
+
     def _write_candidate_dockerfile(self, bundle: ValidatedBundle) -> None:
         path = self.config.app_dir / self.config.custom_dockerfile
         text = path.read_text(encoding="utf-8")
+        # These exact pre-Platform-v2 installs used dependency resolution and
+        # selected Auth 5.2.0 even though FROM used the pinned Auth 5.4.0 image.
+        # Their dependencies are supplied by the base image, requirements.txt,
+        # and the verified release wheels.  The receiver's configuration backup
+        # restores the original bytes if preparation fails.
+        legacy_installs = (
+            (
+                "RUN pip install /tmp/aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl",
+                "RUN pip install --no-deps /tmp/aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl",
+            ),
+            (
+                "RUN pip install /tmp/aa_buh_mining_analytics-0.1.1-py3-none-any.whl",
+                "RUN pip install --no-deps /tmp/aa_buh_mining_analytics-0.1.1-py3-none-any.whl",
+            ),
+            (
+                "RUN python3 -m pip install --no-cache-dir \\\n    /tmp/aa_structures-4.0.3-py3-none-any.whl",
+                "RUN python3 -m pip install --no-cache-dir --no-deps \\\n    /tmp/aa_structures-4.0.3-py3-none-any.whl",
+            ),
+        )
+        for old, corrected in legacy_installs:
+            if text.count(old) > 1 or text.count(corrected) > 1:
+                raise DeploymentError("Legacy Dockerfile install is ambiguous")
+            if old in text:
+                text = text.replace(old, corrected, 1)
         for begin, end in ((BEGIN_V2, END_V2), (BEGIN_LEGACY, END_LEGACY)):
             if text.count(begin) != text.count(end) or text.count(begin) > 1:
                 raise DeploymentError("Custom Dockerfile release markers are malformed")
@@ -2065,29 +2137,63 @@ class DockerHost:
         )
 
     def _expected_versions(self, bundle: ValidatedBundle) -> dict[str, str]:
-        return {
+        expected = {
             wheel["distribution"]: wheel["version"]
             for wheel in bundle.install_plan["wheels"]
         }
+        runtime = bundle.manifest["compatibility"]["values"].get("runtime")
+        core = runtime.get("allianceauth") if isinstance(runtime, dict) else None
+        if not isinstance(core, str) or not re.fullmatch(r"\d+\.\d+\.\d+", core):
+            raise DeploymentError("Release compatibility lacks an exact AllianceAuth version")
+        expected["allianceauth"] = core
+        expected["packaging"] = self._packaging_version(bundle)
+        return expected
+
+    @staticmethod
+    def _version_probe_program(expected: Mapping[str, str]) -> str:
+        return (
+            "import allianceauth,importlib.metadata as m,json,pathlib;"
+            f"names={json.dumps(sorted(expected))};"
+            "installed=m.distribution('allianceauth');"
+            "module=pathlib.Path(allianceauth.__file__).resolve();"
+            "source=pathlib.Path(installed.locate_file('allianceauth/__init__.py')).resolve();"
+            "print(json.dumps({'versions':{name:m.version(name) for name in names},"
+            "'imported_allianceauth':getattr(allianceauth,'__version__',None),"
+            "'module_from_distribution':module==source},"
+            "sort_keys=True,separators=(',',':')))"
+        )
+
+    @staticmethod
+    def _check_version_probe_output(
+        output: str, expected: Mapping[str, str], context: str
+    ) -> None:
+        actual: Any = None
+        for line in reversed(output.splitlines()):
+            try:
+                actual = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(actual, dict):
+                break
+        if actual != {
+            "versions": expected,
+            "imported_allianceauth": expected["allianceauth"],
+            "module_from_distribution": True,
+        }:
+            raise DeploymentError(f"Package versions differ in {context}")
 
     def _version_probe(self, service: str, bundle: ValidatedBundle, *, live: bool) -> None:
         expected = self._expected_versions(bundle)
-        program = (
-            "import importlib.metadata,json;"
-            f"names={json.dumps(sorted(expected))};"
-            "print(json.dumps({name:importlib.metadata.version(name) for name in names},"
-            "sort_keys=True,separators=(',',':')))"
-        )
+        program = self._version_probe_program(expected)
         if live:
-            output = self._compose(
-                "exec",
-                "-T",
-                service,
-                "python3",
-                "-c",
-                program,
-                context=f"Live package verification in {service}",
-            )
+            for container in self._running_service_containers(
+                service, context=f"Live package container discovery in {service}"
+            ):
+                output = self._run(
+                    ["docker", "exec", container, "python3", "-c", program],
+                    context=f"Live package verification in {service} container {container}",
+                )
+                self._check_version_probe_output(output, expected, container)
         else:
             output = self._compose(
                 "run",
@@ -2100,16 +2206,23 @@ class DockerHost:
                 program,
                 context=f"Candidate package verification in {service}",
             )
-        actual: Any = None
-        for line in reversed(output.splitlines()):
-            try:
-                actual = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(actual, dict):
-                break
-        if actual != expected:
-            raise DeploymentError(f"Package versions differ in {service}")
+            self._check_version_probe_output(output, expected, service)
+
+    def _dependency_probe(self, service: str, *, live: bool) -> None:
+        if live:
+            for container in self._running_service_containers(
+                service, context=f"Live dependency container discovery in {service}"
+            ):
+                self._run(
+                    ["docker", "exec", container, "python3", "-m", "pip", "check"],
+                    context=f"Live dependency verification in {service} container {container}",
+                )
+        else:
+            self._compose(
+                "run", "--rm", "--no-deps", "--entrypoint", "python3",
+                service, "-m", "pip", "check",
+                context=f"Candidate dependency verification in {service}",
+            )
 
     def _require_live_images(self, expected_images: Mapping[str, str]) -> None:
         if not expected_images or not set(expected_images) <= set(self.config.auth_services):
@@ -2489,6 +2602,7 @@ class DockerHost:
         self._capture_candidate_images(bundle)
         for service in self.config.auth_services:
             self._version_probe(service, bundle, live=False)
+            self._dependency_probe(service, live=False)
         self._manage_image("check", "--no-color", context="Candidate Django checks")
         self._manage_image(
             "migrate", "--plan", "--no-color", context="Candidate migration plan"
@@ -3818,26 +3932,12 @@ class DockerHost:
         self, container: str, bundle: ValidatedBundle
     ) -> None:
         expected = self._expected_versions(bundle)
-        program = (
-            "import importlib.metadata,json;"
-            f"names={json.dumps(sorted(expected))};"
-            "print(json.dumps({name:importlib.metadata.version(name) for name in names},"
-            "sort_keys=True,separators=(',',':')))"
-        )
+        program = self._version_probe_program(expected)
         output = self._run(
             ["docker", "exec", container, "python3", "-c", program],
             context=f"Package verification in web slot {container}",
         )
-        actual: Any = None
-        for line in reversed(output.splitlines()):
-            try:
-                actual = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(actual, dict):
-                break
-        if actual != expected:
-            raise DeploymentError(f"Package versions differ in web slot {container}")
+        self._check_version_probe_output(output, expected, f"web slot {container}")
 
     def _manage_container(
         self, container: str, *arguments: str, context: str
@@ -5413,6 +5513,7 @@ class DockerHost:
         for service in self.config.auth_services:
             if service != gunicorn or promoted:
                 self._version_probe(service, bundle, live=True)
+                self._dependency_probe(service, live=True)
         self._wait_for_slots(
             self.candidate_web_slots,
             self.candidate_image_ids[gunicorn],

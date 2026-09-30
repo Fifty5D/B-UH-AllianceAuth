@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Keep the pinned AllianceAuth core in the effective production build and verify it in candidate and live containers."
