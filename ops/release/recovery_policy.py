@@ -5,11 +5,48 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 POLICY_PATH = Path(__file__).resolve().parents[1] / "deploy" / "coordinated-recovery.json"
+V08_GAP_POLICY_ID = "production-v0.8.0-v0.8.1-gap-20260930"
+# One reviewed gap, after the failed v0.8.1 preparation. These are immutable
+# release identities, not a general permission to skip the live predecessor.
+V08_GAP_POLICY = {
+    "baseline": {
+        "manifest_sha256": "025a59f242337bc47b9af313a319a57a992af93854bce9f5749381547dcfd450",
+        "platform_version": "0.8.0",
+        "release_commit": "4f23266088dfb4bdef42f503fecc21360e90c351",
+        "release_ref": "release/platform-v0.8.0",
+        "source_commit": "ffe6e1b1834f0c550cff001a2b7c14cd6839256e",
+    },
+    "published_releases": [
+        {
+            "manifest_sha256": "025a59f242337bc47b9af313a319a57a992af93854bce9f5749381547dcfd450",
+            "platform_version": "0.8.0",
+            "release_commit": "4f23266088dfb4bdef42f503fecc21360e90c351",
+            "release_ref": "release/platform-v0.8.0",
+            "source_commit": "ffe6e1b1834f0c550cff001a2b7c14cd6839256e",
+        },
+        {
+            "manifest_sha256": "ac7e338da9232e53bae216aa86f32967e918928009d34b59f6a7e5c5fdbcf675",
+            "platform_version": "0.8.1",
+            "release_commit": "93e166acaeff18e4ec1967c7c4443075aa2fab78",
+            "release_ref": "release/platform-v0.8.1",
+            "source_commit": "656f9d7bd677d14e92d20b2ca188a3cb5e316617",
+        },
+    ],
+    "policy_id": V08_GAP_POLICY_ID,
+    "repository": "Fifty5D/B-UH-AllianceAuth",
+    "schema_version": 1,
+}
+V08_COMPATIBILITY_SHA256 = {
+    "0.8.0": "79ed7d91eea4d620d1c25fa5e6e21f8f81b885fe3c7ef397ec560f22c444ade3",
+    "0.8.1": "9c2bf892171a9abfa3cc0aff9a8df1e78e4e9cbc771ff282365d44fc36c8bbc4",
+}
+V08_ADDED_APPS = frozenset({"memberaudit-autoreg", "vps-health"})
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -245,6 +282,58 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
 def policy_sha256(path: Path = POLICY_PATH) -> str:
     policy = load_policy(path)
     return hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
+
+
+def load_transition_policy(policy_id: str) -> dict[str, Any]:
+    """Select only the historical policy or this exact successor gap."""
+
+    if policy_id == V08_GAP_POLICY_ID:
+        return deepcopy(V08_GAP_POLICY)
+    historical = load_policy()
+    if policy_id != historical["policy_id"]:
+        raise RecoveryPolicyError("Unrecognized deployment recovery policy")
+    return historical
+
+
+def transition_policy_sha256(policy: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
+
+
+def validate_v08_gap_compatibility(
+    lineage: Sequence[Mapping[str, Any]], target: Mapping[str, Any]
+) -> None:
+    """Allow only the two already-published helper apps across this gap."""
+
+    if len(lineage) != 2 or [item.get("platform_version") for item in lineage] != [
+        "0.8.0", "0.8.1"
+    ] or target.get("platform_version") != "0.8.2":
+        raise RecoveryPolicyError("The v0.8 recovery release chain changed")
+    old = lineage[0].get("compatibility")
+    immediate = lineage[1].get("compatibility")
+    current = target.get("compatibility")
+    if not all(isinstance(item, dict) for item in (old, immediate, current)):
+        raise RecoveryPolicyError("The v0.8 compatibility records are invalid")
+    if (
+        old.get("sha256") != V08_COMPATIBILITY_SHA256["0.8.0"]
+        or immediate.get("sha256") != V08_COMPATIBILITY_SHA256["0.8.1"]
+        or current != immediate
+    ):
+        raise RecoveryPolicyError("The v0.8 compatibility identities changed")
+    old_values = old.get("values")
+    next_values = immediate.get("values")
+    if not isinstance(old_values, dict) or not isinstance(next_values, dict):
+        raise RecoveryPolicyError("The v0.8 compatibility values are invalid")
+    old_apps = old_values.get("applications")
+    next_apps = next_values.get("applications")
+    if not isinstance(old_apps, dict) or not isinstance(next_apps, dict):
+        raise RecoveryPolicyError("The v0.8 application rosters are invalid")
+    if set(next_apps) - set(old_apps) != V08_ADDED_APPS:
+        raise RecoveryPolicyError("The v0.8 helper-app additions changed")
+    without_additions = {key: value for key, value in next_apps.items() if key not in V08_ADDED_APPS}
+    if without_additions != old_apps or {
+        key: value for key, value in next_values.items() if key != "applications"
+    } != {key: value for key, value in old_values.items() if key != "applications"}:
+        raise RecoveryPolicyError("The v0.8 compatibility expansion changed")
 
 
 def manifest_recovery(policy: Mapping[str, Any]) -> dict[str, Any]:

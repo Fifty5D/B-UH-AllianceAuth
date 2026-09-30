@@ -33,16 +33,22 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 try:  # Support package imports and direct execution from this directory.
     from .recovery_policy import (
         RecoveryPolicyError,
+        V08_GAP_POLICY_ID,
         load_policy as load_recovery_policy,
+        load_transition_policy,
         manifest_recovery,
         validate_manifest_recovery,
+        validate_v08_gap_compatibility,
     )
 except ImportError:  # pragma: no cover - exercised by CLI integration tests.
     from recovery_policy import (  # type: ignore[no-redef]
         RecoveryPolicyError,
+        V08_GAP_POLICY_ID,
         load_policy as load_recovery_policy,
+        load_transition_policy,
         manifest_recovery,
         validate_manifest_recovery,
+        validate_v08_gap_compatibility,
     )
 
 
@@ -1438,7 +1444,12 @@ def create_plan_v1(
             }
         else:
             try:
-                policy = load_recovery_policy(policy_path)
+                policy = (
+                    load_transition_policy(V08_GAP_POLICY_ID)
+                    if str(requested_version) == "0.8.0"
+                    and str(immediate_version) == "0.8.1"
+                    else load_recovery_policy(policy_path)
+                )
                 recovery = manifest_recovery(policy)
             except RecoveryPolicyError as exc:
                 raise ReleaseError(str(exc)) from exc
@@ -1467,7 +1478,10 @@ def create_plan_v1(
                     raise ReleaseError(
                         f"Reviewed recovery release {index} changed during planning"
                     )
-                if verified["compatibility"]["sha256"] != compatibility_sha:
+                if (
+                    policy["policy_id"] != V08_GAP_POLICY_ID
+                    and verified["compatibility"]["sha256"] != compatibility_sha
+                ):
                     raise ReleaseError(
                         "Reviewed recovery chain crosses a compatibility boundary"
                     )
@@ -1483,6 +1497,25 @@ def create_plan_v1(
                     "platform_version": identity["platform_version"],
                     "source_commit": identity["source_commit"],
                 }
+            if policy["policy_id"] == V08_GAP_POLICY_ID:
+                try:
+                    validate_v08_gap_compatibility(
+                        [
+                            verify_release_dir(
+                                immediate_dir.parent / f"v{item['platform_version']}"
+                            )
+                            for item in releases
+                        ],
+                        {
+                            "platform_version": platform_version,
+                            "compatibility": {
+                                "sha256": compatibility_sha,
+                                "values": compatibility,
+                            },
+                        },
+                    )
+                except RecoveryPolicyError as exc:
+                    raise ReleaseError(str(exc)) from exc
             deployment_predecessor = {
                 "path": (
                     f"{registry.release_root}/v{requested_version}/RELEASE.json"
@@ -2323,8 +2356,12 @@ def _load_planned_deployment_predecessor(
     if not isinstance(value, Mapping):
         raise ReleaseError("Planned deployment_predecessor must be an object")
     try:
-        policy = load_recovery_policy(
-            repo_root / "ops" / "deploy" / "coordinated-recovery.json"
+        policy = (
+            load_transition_policy(V08_GAP_POLICY_ID)
+            if value.get("policy_id") == V08_GAP_POLICY_ID
+            else load_recovery_policy(
+                repo_root / "ops" / "deploy" / "coordinated-recovery.json"
+            )
         )
         recovery = manifest_recovery(policy)
     except RecoveryPolicyError as exc:
@@ -2362,6 +2399,27 @@ def _load_planned_deployment_predecessor(
             "platform_version": identity["platform_version"],
             "source_commit": identity["source_commit"],
         }
+    if policy["policy_id"] == V08_GAP_POLICY_ID:
+        try:
+            validate_v08_gap_compatibility(
+                [
+                    verify_release_dir(
+                        repo_root / PurePosixPath(
+                            f"{plan.get('release_root')}/v{item['platform_version']}"
+                        )
+                    )
+                    for item in [recovery["baseline"], *recovery["intervening_releases"]]
+                ],
+                {
+                    "platform_version": plan.get("platform_version"),
+                    "compatibility": {
+                        "sha256": plan["build"]["compatibility_sha256"],
+                        "values": plan["compatibility"],
+                    },
+                },
+            )
+        except RecoveryPolicyError as exc:
+            raise ReleaseError(str(exc)) from exc
     return recovery
 
 

@@ -1,3 +1,0 @@
-app = "vps-health"
-kind = "fix"
-summary = "Run the existing VPS health app with AllianceAuth 5.4.0."

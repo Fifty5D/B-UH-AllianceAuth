@@ -120,10 +120,14 @@ def _recovery_transition(
     target: Mapping[str, str],
     bootstrap_recovery: bool,
 ) -> dict[str, Any] | None:
-    policy = recovery_policy.load_policy()
+    declared = manifest.get("deployment_recovery")
+    policy = (
+        recovery_policy.load_transition_policy(declared.get("policy_id"))
+        if isinstance(declared, dict)
+        else recovery_policy.load_policy()
+    )
     fixed = policy["published_releases"]
     expected_manifest = recovery_policy.manifest_recovery(policy)
-    declared = manifest.get("deployment_recovery")
     if bootstrap_recovery:
         if declared is not None or dict(target) != fixed[-1]:
             raise RequestArchiveError(
@@ -140,7 +144,7 @@ def _recovery_transition(
         return None
     return {
         "policy_id": policy["policy_id"],
-        "policy_sha256": recovery_policy.policy_sha256(),
+        "policy_sha256": recovery_policy.transition_policy_sha256(policy),
         "purpose": purpose,
         "releases": releases,
     }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tomllib
 import unittest
 import zipfile
@@ -10,6 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+VERSION_LINE = re.compile(rb'(?m)^__version__ = "[0-9]+\.[0-9]+\.[0-9]+"$')
 
 
 class RecoveredHelperSourceTests(unittest.TestCase):
@@ -51,6 +53,15 @@ class RecoveredHelperSourceTests(unittest.TestCase):
                     for path in source.rglob("*")
                     if path.is_file() and "__pycache__" not in path.parts
                 }
+                # Release synchronization advances the builder-owned version in
+                # __init__.py. Keep the original recovered wheel as a byte pin
+                # for every other source line.
+                for files in (actual, members):
+                    self.assertEqual(len(VERSION_LINE.findall(files["__init__.py"])), 1)
+                    files["__init__.py"] = VERSION_LINE.sub(
+                        b'__version__ = "<release version>"',
+                        files["__init__.py"],
+                    )
                 self.assertEqual(actual, members)
 
                 with (ROOT / "apps" / app / "pyproject.toml").open("rb") as stream:

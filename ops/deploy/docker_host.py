@@ -55,6 +55,58 @@ LOCKED_PACKAGING_HASHES = {
         "d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f",
     ),
 }
+# The failed v0.8.1 candidate's pip check exposed these missing or mismatched
+# packages after every release wheel had been installed. Versions and artifact
+# hashes are copied from platform/requirements/production.lock and checked by
+# the deployment tests. The Auth base and release manifest remain unchanged.
+LOCKED_PRODUCTION_DEPENDENCIES = {
+    "dhooks-lite": (
+        "2.0.1",
+        (
+            "5b468d39e2d76f70263f14abb8799fba397d1df4dba5a455862360f52cc88865",
+            "6be86891d0c7c8f88c631a4206c921252110e858a1c294758072dcbf56a5f94e",
+        ),
+    ),
+    "django-bootstrap-form": (
+        "3.4",
+        ("de3f7893e515352834d446c441c0cb861637f92cebbe59d8229469c6cd3dc640",),
+    ),
+    "django-datatables-view": (
+        "1.20.0",
+        (
+            "988c941f0c0e8bad308fe21c0456defc7a1e2bec6ce189bdafb586af38eb965d",
+            "ec5c2918de4f474213f8b69a466353be81414bff51a2574aff0fdc2eaea172f3",
+        ),
+    ),
+    "django-esi": (
+        "9.6.0",
+        (
+            "2d8c085a61bbd3b1e2d2252974b142212ff84d7352c06d2a3c9bb558c4c3d31e",
+            "adf681834a9fdbb5ee9d7244192b49285f63102ae8ba644370bdaa2c7395eb7f",
+        ),
+    ),
+    "django-multiselectfield": (
+        "1.0.1",
+        (
+            "18dc14801f7eca844a48e21cba6d8ec35b9b581f2373bbb2cb75e6994518259a",
+            "3f8b4fff3e07d4a91c8bb4b809bc35caeb22b41769b606f4c9edc53b8d72a667",
+        ),
+    ),
+    "django-navhelper": (
+        "1.0.0",
+        (
+            "2062fda7799a5bb8d7aadb9750702ff6afa45f5f485a48b84c6ff4cca6a8678c",
+            "ea7bf447187e23566db11daccbf87693dff410c7d0b036c9397c8f1c0bf7d6f6",
+        ),
+    ),
+    "redis-simple-mq": (
+        "2.0.1",
+        (
+            "50f42ffc786b5a3c75c349c4895527d93acd6a564b8b537de8cc975f4b8fdac6",
+            "67b82e879c6f2cf6ecc3345ebf6715ad213dcfeb987b7b72cb1001ae491ada97",
+        ),
+    ),
+}
 FATAL_LOG_RE = re.compile(
     # Severity words are standalone tokens, not pieces of HTTP metadata names
     # (X-Esi-Error-Limit-Remain, stale-if-error) or dotted logger identifiers.
@@ -1659,6 +1711,9 @@ class DockerHost:
         transition = bundle.request.recovery_transition
         if transition is None:
             return
+        if transition["policy_id"] == recovery_policy.V08_GAP_POLICY_ID:
+            self._validate_v08_gap_host_baseline(bundle)
+            return
         try:
             policy = recovery_policy.load_policy()
         except recovery_policy.RecoveryPolicyError as exc:
@@ -1794,6 +1849,76 @@ class DockerHost:
             owner["auth_username"],
         )
         self.recovery_baseline_verified = True
+
+    def _validate_v08_gap_host_baseline(self, bundle: ValidatedBundle) -> None:
+        """Require the exact installed v0.8.0 receipt and live image provenance."""
+
+        transition = bundle.request.recovery_transition
+        assert transition is not None
+        baseline = transition["releases"][0]
+        current = self._load_current()
+        if current is None or any(
+            current.get(key) != baseline[key]
+            for key in (
+                "platform_version", "release_commit", "source_commit", "manifest_sha256"
+            )
+        ):
+            raise DeploymentError("v0.8 recovery live receipt changed")
+        if [path.as_posix() for path in self._compose_files()] != [
+            "docker-compose.yml",
+            "docker-compose.buh-vps-health.yml",
+            "docker-compose.buh-platform-v2.yml",
+        ]:
+            raise DeploymentError("v0.8 recovery Compose baseline changed")
+        local = self.config.app_dir / self.config.local_settings
+        details = local.stat()
+        if (
+            self.config.local_settings.as_posix() != "conf/local.py"
+            or (details.st_uid, details.st_gid, stat.S_IMODE(details.st_mode))
+            != (0, 61000, 0o640)
+        ):
+            raise DeploymentError("v0.8 recovery local settings baseline changed")
+        try:
+            marker = json.loads(self._platform_current_path().read_text(encoding="ascii"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DeploymentError("v0.8 recovery application marker is unreadable") from exc
+        if marker != {
+            "manifest_sha256": baseline["manifest_sha256"],
+            "platform_version": baseline["platform_version"],
+            "release_commit": baseline["release_commit"],
+            "schema_version": 1,
+        }:
+            raise DeploymentError("v0.8 recovery application marker changed")
+        for service in self.config.auth_services:
+            captured = self.previous_images.get(service)
+            expected_count = self.auth_replica_counts.get(service)
+            containers = self._running_service_containers(
+                service, context=f"v0.8 recovery provenance discovery for {service}"
+            )
+            if captured is None or not expected_count or len(containers) != expected_count:
+                raise DeploymentError(f"v0.8 recovery service topology changed for {service}")
+            for container in containers:
+                raw = self._run(
+                    ["docker", "inspect", "--format", "{{json .Config.Labels}}", container],
+                    context=f"v0.8 recovery provenance for {service}",
+                ).strip()
+                try:
+                    labels = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise DeploymentError("v0.8 recovery image labels are malformed") from exc
+                expected_labels = {
+                    IMAGE_PROVENANCE_LABELS[key]: baseline[key]
+                    for key in (
+                        "platform_version", "source_commit", "release_commit", "manifest_sha256"
+                    )
+                }
+                expected_labels[IMAGE_PROVENANCE_LABELS["base_digest"]] = (
+                    "sha256:4f7a6ebf0ea593220fbf38ace1e93f7cb25f7bb72224335e8d05ce48a10f11e7"
+                )
+                if not isinstance(labels, dict) or any(
+                    labels.get(key) != value for key, value in expected_labels.items()
+                ):
+                    raise DeploymentError(f"v0.8 recovery live provenance changed for {service}")
 
     def _validate_runtime_image(self, bundle: ValidatedBundle) -> None:
         values = bundle.manifest["compatibility"]["values"]
@@ -2049,6 +2174,7 @@ class DockerHost:
                 ]
             )
         lines.append(self._packaging_install_line(self._packaging_version(bundle)))
+        lines.extend(self._production_dependencies_install_lines(bundle))
         labels = self._candidate_provenance_labels(bundle)
         lines.append(
             "LABEL "
@@ -2080,14 +2206,30 @@ class DockerHost:
             "| python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /dev/stdin"
         )
 
+    @staticmethod
+    def _production_dependencies_install_lines(bundle: ValidatedBundle) -> list[str]:
+        runtime = bundle.manifest["compatibility"]["values"].get("runtime")
+        if not isinstance(runtime, dict) or runtime.get("django_esi") != "9.6.0":
+            raise DeploymentError("Release compatibility lacks the locked django-esi version")
+        lines = ["RUN printf '%s\\n' \\"]
+        for name, (version, hashes) in LOCKED_PRODUCTION_DEPENDENCIES.items():
+            requirement = f"{name}=={version} " + " ".join(
+                f"--hash=sha256:{digest}" for digest in hashes
+            )
+            lines.append(f"      '{requirement}' \\")
+        lines.append(
+            "    | python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /dev/stdin"
+        )
+        return lines
+
     def _write_candidate_dockerfile(self, bundle: ValidatedBundle) -> None:
         path = self.config.app_dir / self.config.custom_dockerfile
         text = path.read_text(encoding="utf-8")
         # These exact pre-Platform-v2 installs used dependency resolution and
         # selected Auth 5.2.0 even though FROM used the pinned Auth 5.4.0 image.
-        # Their dependencies are supplied by the base image, requirements.txt,
-        # and the verified release wheels.  The receiver's configuration backup
-        # restores the original bytes if preparation fails.
+        # The later release block installs the missing hash-pinned dependencies.
+        # The receiver's configuration backup restores the original bytes if
+        # preparation fails.
         legacy_installs = (
             (
                 "RUN pip install /tmp/aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl",
@@ -2147,6 +2289,9 @@ class DockerHost:
             raise DeploymentError("Release compatibility lacks an exact AllianceAuth version")
         expected["allianceauth"] = core
         expected["packaging"] = self._packaging_version(bundle)
+        expected.update(
+            {name: version for name, (version, _) in LOCKED_PRODUCTION_DEPENDENCIES.items()}
+        )
         return expected
 
     @staticmethod

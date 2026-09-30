@@ -10,12 +10,17 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from ops.deploy.docker_host import DockerHost  # noqa: E402
+from ops.deploy.docker_host import (  # noqa: E402
+    LOCKED_PRODUCTION_DEPENDENCIES,
+    DockerHost,
+)
+from ops.release.buh_release import verify_release_dir  # noqa: E402
 
 FIXTURES = ROOT / "tests/deploy/fixtures"
 EXPECTED_SHA256 = {
@@ -27,6 +32,8 @@ EXPECTED_SHA256 = {
         "e26b225324996c679dddae29d45abf1afce573494fa0f293e755f2072631f0ce",
 }
 PACKAGE = "aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl"
+PUBLISHED_RELEASE = ROOT / "releases/platform/v0.8.1"
+PUBLISHED_RELEASE_COMMIT = "93e166acaeff18e4ec1967c7c4443075aa2fab78"
 OLD_INSTALL = f"RUN pip install /tmp/{PACKAGE}"
 NEW_INSTALL = f"RUN pip install --no-deps /tmp/{PACKAGE}"
 PROBE = (
@@ -35,6 +42,11 @@ PROBE = (
     "'imported':allianceauth.__version__,"
     "'packaging':m.version('packaging')},sort_keys=True))"
 )
+LOCKED_PROBE = (
+    "import importlib.metadata as m,json;"
+    f"names={json.dumps(sorted(LOCKED_PRODUCTION_DEPENDENCIES))};"
+    "print(json.dumps({name:m.version(name) for name in names},sort_keys=True))"
+)
 
 
 def _run(*args: str, capture: bool = False) -> str:
@@ -42,10 +54,10 @@ def _run(*args: str, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
-def _probe(image: str) -> dict[str, str]:
+def _probe(image: str, program: str = PROBE) -> dict[str, str]:
     output = _run(
         "docker", "run", "--rm", "--entrypoint", "python3", image,
-        "-c", PROBE, capture=True,
+        "-c", program, capture=True,
     )
     return json.loads(output.strip().splitlines()[-1])
 
@@ -62,8 +74,11 @@ def main() -> None:
     base = compatibility["production_runtime"]["base_image"]
     expected_core = compatibility["runtime"]["allianceauth"]
     expected_packaging = compatibility["runtime"]["packaging"]
+    expected_django_esi = compatibility["runtime"]["django_esi"]
     if expected_core != "5.4.0":
         raise SystemExit("This exact regression rehearsal expects AllianceAuth 5.4.0")
+    if expected_django_esi != "9.6.0":
+        raise SystemExit("This exact regression rehearsal expects django-esi 9.6.0")
     base_probe = _probe(base)
     if (base_probe["installed"], base_probe["imported"]) != (
         expected_core, expected_core
@@ -80,6 +95,20 @@ def main() -> None:
     if not separator or prefix.count(OLD_INSTALL) != 1:
         raise SystemExit("Effective production Dockerfile prefix changed")
     prefix = prefix.rstrip() + "\n"
+    bundle = SimpleNamespace(manifest={"compatibility": {"values": compatibility}})
+    published_manifest = verify_release_dir(PUBLISHED_RELEASE)
+    if published_manifest["platform_version"] != "0.8.1":
+        raise SystemExit("Published release rehearsal selected the wrong version")
+    published_bundle = SimpleNamespace(
+        manifest=published_manifest,
+        request=SimpleNamespace(
+            platform_version="0.8.1",
+            release_commit=PUBLISHED_RELEASE_COMMIT,
+            manifest_sha256=hashlib.sha256(
+                (PUBLISHED_RELEASE / "RELEASE.json").read_bytes()
+            ).hexdigest(),
+        ),
+    )
 
     with tempfile.TemporaryDirectory(prefix="buh-effective-build-") as temporary:
         context = Path(temporary)
@@ -87,12 +116,26 @@ def main() -> None:
         conf.mkdir()
         shutil.copyfile(FIXTURES / "aa-docker-requirements.txt", conf / "requirements.txt")
         shutil.copyfile(FIXTURES / PACKAGE, conf / PACKAGE)
+        release_context = conf / "buh-platform-v2/releases/v0.8.1"
+        release_context.mkdir(parents=True)
+        for artifact in published_manifest["artifacts"]:
+            filename = artifact["filename"]
+            shutil.copyfile(PUBLISHED_RELEASE / filename, release_context / filename)
         for mode, dockerfile in (
             ("legacy", prefix),
             (
                 "corrected",
                 prefix.replace(OLD_INSTALL, NEW_INSTALL)
-                + DockerHost._packaging_install_line(expected_packaging) + "\n",
+                + DockerHost._packaging_install_line(expected_packaging)
+                + "\n"
+                + "\n".join(DockerHost._production_dependencies_install_lines(bundle))
+                + "\n",
+            ),
+            (
+                "published-candidate",
+                prefix.replace(OLD_INSTALL, NEW_INSTALL)
+                + DockerHost.__new__(DockerHost)._dockerfile_block(published_bundle)
+                + "RUN python3 -m pip check\n",
             ),
         ):
             (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
@@ -113,6 +156,15 @@ def main() -> None:
                     "packaging": expected_packaging,
                 }:
                     raise SystemExit("Corrected effective build has wrong core or packaging")
+                if mode != "legacy":
+                    locked = _probe(image, LOCKED_PROBE)
+                    expected = {
+                        name: version
+                        for name, (version, _) in LOCKED_PRODUCTION_DEPENDENCIES.items()
+                    }
+                    if locked != expected:
+                        raise SystemExit("Corrected effective build has wrong locked dependencies")
+                    print(f"corrected locked dependencies: {locked}")
                 print(f"{mode} effective build: {actual}")
             finally:
                 subprocess.run(
