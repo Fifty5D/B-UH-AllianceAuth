@@ -20,6 +20,7 @@ from ops.deploy.docker_host import (  # noqa: E402
     LOCKED_PRODUCTION_DEPENDENCIES,
     DockerHost,
 )
+from ops.release.buh_release import verify_release_dir  # noqa: E402
 
 FIXTURES = ROOT / "tests/deploy/fixtures"
 EXPECTED_SHA256 = {
@@ -31,6 +32,8 @@ EXPECTED_SHA256 = {
         "e26b225324996c679dddae29d45abf1afce573494fa0f293e755f2072631f0ce",
 }
 PACKAGE = "aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl"
+PUBLISHED_RELEASE = ROOT / "releases/platform/v0.8.1"
+PUBLISHED_RELEASE_COMMIT = "93e166acaeff18e4ec1967c7c4443075aa2fab78"
 OLD_INSTALL = f"RUN pip install /tmp/{PACKAGE}"
 NEW_INSTALL = f"RUN pip install --no-deps /tmp/{PACKAGE}"
 PROBE = (
@@ -93,6 +96,19 @@ def main() -> None:
         raise SystemExit("Effective production Dockerfile prefix changed")
     prefix = prefix.rstrip() + "\n"
     bundle = SimpleNamespace(manifest={"compatibility": {"values": compatibility}})
+    published_manifest = verify_release_dir(PUBLISHED_RELEASE)
+    if published_manifest["platform_version"] != "0.8.1":
+        raise SystemExit("Published release rehearsal selected the wrong version")
+    published_bundle = SimpleNamespace(
+        manifest=published_manifest,
+        request=SimpleNamespace(
+            platform_version="0.8.1",
+            release_commit=PUBLISHED_RELEASE_COMMIT,
+            manifest_sha256=hashlib.sha256(
+                (PUBLISHED_RELEASE / "RELEASE.json").read_bytes()
+            ).hexdigest(),
+        ),
+    )
 
     with tempfile.TemporaryDirectory(prefix="buh-effective-build-") as temporary:
         context = Path(temporary)
@@ -100,6 +116,11 @@ def main() -> None:
         conf.mkdir()
         shutil.copyfile(FIXTURES / "aa-docker-requirements.txt", conf / "requirements.txt")
         shutil.copyfile(FIXTURES / PACKAGE, conf / PACKAGE)
+        release_context = conf / "buh-platform-v2/releases/v0.8.1"
+        release_context.mkdir(parents=True)
+        for artifact in published_manifest["artifacts"]:
+            filename = artifact["filename"]
+            shutil.copyfile(PUBLISHED_RELEASE / filename, release_context / filename)
         for mode, dockerfile in (
             ("legacy", prefix),
             (
@@ -109,6 +130,12 @@ def main() -> None:
                 + "\n"
                 + "\n".join(DockerHost._production_dependencies_install_lines(bundle))
                 + "\n",
+            ),
+            (
+                "published-candidate",
+                prefix.replace(OLD_INSTALL, NEW_INSTALL)
+                + DockerHost.__new__(DockerHost)._dockerfile_block(published_bundle)
+                + "RUN python3 -m pip check\n",
             ),
         ):
             (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
@@ -129,7 +156,7 @@ def main() -> None:
                     "packaging": expected_packaging,
                 }:
                     raise SystemExit("Corrected effective build has wrong core or packaging")
-                if mode == "corrected":
+                if mode != "legacy":
                     locked = _probe(image, LOCKED_PROBE)
                     expected = {
                         name: version
