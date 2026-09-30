@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -28,6 +29,8 @@ from ops.deploy.docker_host import (
     END_LEGACY,
     END_V2,
     MAX_COMMAND_OUTPUT,
+    LOCKED_PACKAGING_HASHES,
+    LOCKED_PRODUCTION_DEPENDENCIES,
     DockerHost,
 )
 from ops.release import recovery_policy
@@ -264,7 +267,11 @@ def make_bundle(
                     "deployment_generation": "legacy-v1",
                 },
                 "production_runtime": {"base_image": image},
-                "runtime": {"allianceauth": "5.4.0", "packaging": "25.0"},
+                "runtime": {
+                    "allianceauth": "5.4.0",
+                    "django_esi": "9.6.0",
+                    "packaging": "25.0",
+                },
                 "policy": {
                     "database_migrations_must_be_rollback_compatible": True,
                     "legacy_bootstrap_may_skip_uninstalled_v2_releases": True,
@@ -1174,6 +1181,7 @@ class DockerHostContracts(unittest.TestCase):
             expected = host._expected_versions(bundle)
             self.assertEqual(expected["allianceauth"], "5.4.0")
             self.assertEqual(expected["packaging"], "25.0")
+            self.assertEqual(expected["django-esi"], "9.6.0")
             old = {
                 "versions": {**expected, "allianceauth": "5.2.0"},
                 "imported_allianceauth": "5.2.0",
@@ -1214,6 +1222,15 @@ class DockerHostContracts(unittest.TestCase):
                     json.dumps(wrong_packaging), expected, config.worker_service
                 )
 
+            wrong_django_esi = {
+                **good,
+                "versions": {**expected, "django-esi": "9.10.0"},
+            }
+            with self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._check_version_probe_output(
+                    json.dumps(wrong_django_esi), expected, config.gunicorn_service
+                )
+
     def test_effective_host_dockerfile_reconciles_legacy_dependency_resolvers(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1239,9 +1256,17 @@ class DockerHostContracts(unittest.TestCase):
             )
             self.assertIn(BEGIN_V2, candidate)
             self.assertIn("packaging==25.0 --hash=sha256:", candidate)
+            self.assertIn("django-esi==9.6.0 --hash=sha256:", candidate)
+            self.assertIn("redis-simple-mq==2.0.1 --hash=sha256:", candidate)
             self.assertIn("--require-hashes -r /dev/stdin", candidate)
             self.assertNotIn("ARG AUTH_VERSION", candidate)
             host._write_candidate_dockerfile(make_bundle(root))
+            self.assertEqual(path.read_text(encoding="utf-8"), candidate)
+
+            mismatched = make_bundle(root)
+            mismatched.manifest["compatibility"]["values"]["runtime"]["django_esi"] = "9.10.0"
+            with self.assertRaisesRegex(DeploymentError, "locked django-esi"):
+                host._write_candidate_dockerfile(mismatched)
             self.assertEqual(path.read_text(encoding="utf-8"), candidate)
 
     def test_dockerfile_uses_stable_per_wheel_layers_and_replaces_legacy(self):
@@ -1257,10 +1282,12 @@ class DockerHostContracts(unittest.TestCase):
             block = host._dockerfile_block(bundle)
             self.assertLess(block.index("vendor.whl"), block.index("structure.whl"))
             self.assertLess(block.index("structure.whl"), block.index("moon.whl"))
-            self.assertEqual(block.count("python3 -m pip install"), 4)
+            self.assertEqual(block.count("python3 -m pip install"), 5)
             self.assertEqual(block.count("--force-reinstall"), 3)
             self.assertEqual(block.count("sha256sum --check --strict"), 3)
             self.assertIn("packaging==25.0 --hash=sha256:", block)
+            self.assertIn("django-esi==9.6.0 --hash=sha256:", block)
+            self.assertLess(block.index("moon.whl"), block.index("dhooks-lite==2.0.1"))
             self.assertIn("--require-hashes -r /dev/stdin", block)
             self.assertNotIn("rm -f /tmp/buh-platform-v2", block)
             for label, value in host._candidate_provenance_labels(bundle).items():
@@ -1291,6 +1318,24 @@ class DockerHostContracts(unittest.TestCase):
             self.assertEqual(
                 (rewritten_details.st_uid, rewritten_details.st_gid), original_owner
             )
+
+    def test_candidate_dependency_closure_matches_committed_production_lock(self):
+        lines = (ROOT / "platform/requirements/production.lock").read_text().splitlines()
+        locked = {
+            **LOCKED_PRODUCTION_DEPENDENCIES,
+            "packaging": ("25.0", LOCKED_PACKAGING_HASHES["25.0"]),
+        }
+        for name, (version, hashes) in locked.items():
+            with self.subTest(name=name):
+                head = f"{name}=={version} \\"
+                index = lines.index(head)
+                found = []
+                for line in lines[index + 1 :]:
+                    match = re.search(r"--hash=sha256:([0-9a-f]{64})", line)
+                    if match is None:
+                        break
+                    found.append(match.group(1))
+                self.assertEqual(tuple(found), hashes)
 
     def test_live_image_capture_accepts_scaled_services_and_records_topology(self):
         with tempfile.TemporaryDirectory() as temporary:
