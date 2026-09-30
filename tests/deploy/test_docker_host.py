@@ -264,7 +264,7 @@ def make_bundle(
                     "deployment_generation": "legacy-v1",
                 },
                 "production_runtime": {"base_image": image},
-                "runtime": {"allianceauth": "5.4.0"},
+                "runtime": {"allianceauth": "5.4.0", "packaging": "25.0"},
                 "policy": {
                     "database_migrations_must_be_rollback_compatible": True,
                     "legacy_bootstrap_may_skip_uninstalled_v2_releases": True,
@@ -1173,6 +1173,7 @@ class DockerHostContracts(unittest.TestCase):
             host._validate_runtime_image(bundle)
             expected = host._expected_versions(bundle)
             self.assertEqual(expected["allianceauth"], "5.4.0")
+            self.assertEqual(expected["packaging"], "25.0")
             old = {
                 "versions": {**expected, "allianceauth": "5.2.0"},
                 "imported_allianceauth": "5.2.0",
@@ -1204,6 +1205,15 @@ class DockerHostContracts(unittest.TestCase):
                     json.dumps(shadowed), expected, config.gunicorn_service
                 )
 
+            wrong_packaging = {
+                **good,
+                "versions": {**expected, "packaging": "26.3"},
+            }
+            with self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._check_version_probe_output(
+                    json.dumps(wrong_packaging), expected, config.worker_service
+                )
+
     def test_effective_host_dockerfile_reconciles_legacy_dependency_resolvers(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1228,6 +1238,8 @@ class DockerHostContracts(unittest.TestCase):
                 candidate,
             )
             self.assertIn(BEGIN_V2, candidate)
+            self.assertIn("packaging==25.0 --hash=sha256:", candidate)
+            self.assertIn("--require-hashes -r /dev/stdin", candidate)
             self.assertNotIn("ARG AUTH_VERSION", candidate)
             host._write_candidate_dockerfile(make_bundle(root))
             self.assertEqual(path.read_text(encoding="utf-8"), candidate)
@@ -1245,9 +1257,11 @@ class DockerHostContracts(unittest.TestCase):
             block = host._dockerfile_block(bundle)
             self.assertLess(block.index("vendor.whl"), block.index("structure.whl"))
             self.assertLess(block.index("structure.whl"), block.index("moon.whl"))
-            self.assertEqual(block.count("python3 -m pip install"), 3)
+            self.assertEqual(block.count("python3 -m pip install"), 4)
             self.assertEqual(block.count("--force-reinstall"), 3)
             self.assertEqual(block.count("sha256sum --check --strict"), 3)
+            self.assertIn("packaging==25.0 --hash=sha256:", block)
+            self.assertIn("--require-hashes -r /dev/stdin", block)
             self.assertNotIn("rm -f /tmp/buh-platform-v2", block)
             for label, value in host._candidate_provenance_labels(bundle).items():
                 self.assertIn(f"{label}={json.dumps(value)}", block)
@@ -1259,7 +1273,7 @@ class DockerHostContracts(unittest.TestCase):
             self.assertNotIn(END_LEGACY, written)
             expected_printf = "RUN printf '%s  %s\\n' \\"
             self.assertEqual(
-                [line for line in written.splitlines() if line.startswith("RUN printf")],
+                [line for line in written.splitlines() if line.startswith(expected_printf)],
                 [expected_printf] * 3,
             )
 
@@ -1268,7 +1282,7 @@ class DockerHostContracts(unittest.TestCase):
             host._write_candidate_dockerfile(bundle)
             rewritten = (config.app_dir / config.custom_dockerfile).read_text()
             self.assertEqual(
-                [line for line in rewritten.splitlines() if line.startswith("RUN printf")],
+                [line for line in rewritten.splitlines() if line.startswith(expected_printf)],
                 [expected_printf] * 3,
             )
             rewritten_details = dockerfile.stat()

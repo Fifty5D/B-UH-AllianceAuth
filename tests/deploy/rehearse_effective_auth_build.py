@@ -6,12 +6,17 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from ops.deploy.docker_host import DockerHost  # noqa: E402
+
 FIXTURES = ROOT / "tests/deploy/fixtures"
 EXPECTED_SHA256 = {
     "aa-docker-custom-pre-v2.dockerfile":
@@ -27,7 +32,8 @@ NEW_INSTALL = f"RUN pip install --no-deps /tmp/{PACKAGE}"
 PROBE = (
     "import allianceauth,importlib.metadata as m,json;"
     "print(json.dumps({'installed':m.version('allianceauth'),"
-    "'imported':allianceauth.__version__},sort_keys=True))"
+    "'imported':allianceauth.__version__,"
+    "'packaging':m.version('packaging')},sort_keys=True))"
 )
 
 
@@ -55,9 +61,13 @@ def main() -> None:
     )
     base = compatibility["production_runtime"]["base_image"]
     expected_core = compatibility["runtime"]["allianceauth"]
+    expected_packaging = compatibility["runtime"]["packaging"]
     if expected_core != "5.4.0":
         raise SystemExit("This exact regression rehearsal expects AllianceAuth 5.4.0")
-    if _probe(base) != {"installed": expected_core, "imported": expected_core}:
+    base_probe = _probe(base)
+    if (base_probe["installed"], base_probe["imported"]) != (
+        expected_core, expected_core
+    ):
         raise SystemExit("The digest-pinned base image is not AllianceAuth 5.4.0")
 
     original = (FIXTURES / "aa-docker-custom-pre-v2.dockerfile").read_text(
@@ -79,7 +89,11 @@ def main() -> None:
         shutil.copyfile(FIXTURES / PACKAGE, conf / PACKAGE)
         for mode, dockerfile in (
             ("legacy", prefix),
-            ("corrected", prefix.replace(OLD_INSTALL, NEW_INSTALL)),
+            (
+                "corrected",
+                prefix.replace(OLD_INSTALL, NEW_INSTALL)
+                + DockerHost._packaging_install_line(expected_packaging) + "\n",
+            ),
         ):
             (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
             image = f"buh-auth54-effective-build:{mode}"
@@ -93,8 +107,12 @@ def main() -> None:
                 if mode == "legacy":
                     if actual["installed"] == expected_core:
                         raise SystemExit("Legacy helper did not reproduce the downgrade")
-                elif actual != {"installed": expected_core, "imported": expected_core}:
-                    raise SystemExit("Corrected effective build did not retain Auth 5.4.0")
+                elif actual != {
+                    "installed": expected_core,
+                    "imported": expected_core,
+                    "packaging": expected_packaging,
+                }:
+                    raise SystemExit("Corrected effective build has wrong core or packaging")
                 print(f"{mode} effective build: {actual}")
             finally:
                 subprocess.run(

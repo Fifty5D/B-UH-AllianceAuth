@@ -46,6 +46,15 @@ BEGIN_V2 = "# BEGIN B-UH PLATFORM V2"
 END_V2 = "# END B-UH PLATFORM V2"
 BEGIN_LEGACY = "# BEGIN B-UH MOON TAX PLATFORM"
 END_LEGACY = "# END B-UH MOON TAX PLATFORM"
+# Hashes of the packaging 25.0 artifacts in production.lock. The candidate
+# installs this after every legacy resolver and release wheel, so a resolver
+# cannot leave packaging 26.x behind for the owned analytics application.
+LOCKED_PACKAGING_HASHES = {
+    "25.0": (
+        "29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
+        "d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f",
+    ),
+}
 FATAL_LOG_RE = re.compile(
     # Severity words are standalone tokens, not pieces of HTTP metadata names
     # (X-Esi-Error-Limit-Remain, stale-if-error) or dotted logger identifiers.
@@ -2039,6 +2048,7 @@ class DockerHost:
                     f"      /tmp/buh-platform-v2/{filename}",
                 ]
             )
+        lines.append(self._packaging_install_line(self._packaging_version(bundle)))
         labels = self._candidate_provenance_labels(bundle)
         lines.append(
             "LABEL "
@@ -2048,6 +2058,27 @@ class DockerHost:
         )
         lines.append(END_V2)
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _packaging_version(bundle: ValidatedBundle) -> str:
+        runtime = bundle.manifest["compatibility"]["values"].get("runtime")
+        version = runtime.get("packaging") if isinstance(runtime, dict) else None
+        if version not in LOCKED_PACKAGING_HASHES:
+            raise DeploymentError("Release compatibility lacks a hash-pinned packaging version")
+        return version
+
+    @staticmethod
+    def _packaging_install_line(version: str) -> str:
+        hashes = LOCKED_PACKAGING_HASHES.get(version)
+        if hashes is None:
+            raise DeploymentError("Packaging version lacks approved artifact hashes")
+        requirement = f"packaging=={version} " + " ".join(
+            f"--hash=sha256:{digest}" for digest in hashes
+        )
+        return (
+            "RUN printf '%s\\n' '" + requirement + "' "
+            "| python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /dev/stdin"
+        )
 
     def _write_candidate_dockerfile(self, bundle: ValidatedBundle) -> None:
         path = self.config.app_dir / self.config.custom_dockerfile
@@ -2115,6 +2146,7 @@ class DockerHost:
         if not isinstance(core, str) or not re.fullmatch(r"\d+\.\d+\.\d+", core):
             raise DeploymentError("Release compatibility lacks an exact AllianceAuth version")
         expected["allianceauth"] = core
+        expected["packaging"] = self._packaging_version(bundle)
         return expected
 
     @staticmethod
