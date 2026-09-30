@@ -558,6 +558,7 @@ class SyntheticDockerBoundary:
                             "build": {
                                 "context": str(self.host.config.app_dir),
                                 "dockerfile": str(self.host.config.custom_dockerfile),
+                                "args": {"AA_DOCKER_TAG": "${AA_DOCKER_TAG?err}"},
                             }
                         }
                         for service in self.host.config.auth_services
@@ -1031,6 +1032,7 @@ def exercised_docker_boundary(
         )
         for method in (
             "_version_probe",
+            "_dependency_probe",
             "_container_version_probe",
             "_verify_static_asset",
             "_internal_http_checks",

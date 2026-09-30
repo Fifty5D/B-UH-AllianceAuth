@@ -38,6 +38,9 @@ if find_spec("buh_max_history") is not None:
     INSTALLED_APPS.append("buh_max_history")  # noqa: F405
 if find_spec("buh_memberaudit_autoreg") is not None:
     INSTALLED_APPS.append("buh_memberaudit_autoreg")  # noqa: F405
+    from buh_memberaudit_autoreg.scopes import MEMBERAUDIT_ESI_SCOPES
+else:
+    MEMBERAUDIT_ESI_SCOPES = ()
 if find_spec("buh_vps_health") is not None:
     INSTALLED_APPS.append("buh_vps_health")  # noqa: F405
 BUH_ESI_ARCHIVE_CAPTURE_ENABLED = False
@@ -67,6 +70,7 @@ BUH_MOON_TAX_ESI_BASE_URL = os.environ.get(
 
 LOGIN_TOKEN_SCOPES = sorted(  # noqa: F405
     set(LOGIN_TOKEN_SCOPES)  # noqa: F405
+    | set(MEMBERAUDIT_ESI_SCOPES)
     | {
         "esi-contracts.read_character_contracts.v1",
         "esi-wallet.read_character_wallet.v1",

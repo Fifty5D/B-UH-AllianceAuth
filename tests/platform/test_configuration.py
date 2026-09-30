@@ -973,6 +973,7 @@ class PlatformConfigurationContracts(TestCase):
             "release_ledger",
             "legacy_release",
             "fast",
+            "effective_build",
             "integration",
             "upgrade",
             "browser",
@@ -980,11 +981,12 @@ class PlatformConfigurationContracts(TestCase):
         ):
             self.assertRegex(text, rf"(?m)^  {re.escape(job)}:\s*$")
         self.assertIn(
-            "needs: [configuration, release_ledger, legacy_release, fast, integration, upgrade, browser]",
+            "needs: [configuration, release_ledger, legacy_release, fast, effective_build, integration, upgrade, browser]",
             text,
         )
         self.assertIn('"release-ledger:${RELEASE_LEDGER_RESULT}"', text)
         self.assertIn('"legacy-release:${LEGACY_RELEASE_RESULT}"', text)
+        self.assertIn('"effective-build:${EFFECTIVE_BUILD_RESULT}"', text)
         self.assertIn('"upgrade:${UPGRADE_RESULT}"', text)
         self.assertIn('if: always()', text)
         self.assertIn('"${result}" != "${expected}"', text)
@@ -994,11 +996,13 @@ class PlatformConfigurationContracts(TestCase):
         workflow = _load_workflow(WORKFLOWS / "reusable-source-tests.yml")
         script = workflow["jobs"]["required"]["steps"][0]["run"]
         base = {name + "_RESULT": "success" for name in (
-            "CONFIGURATION", "RELEASE_LEDGER", "LEGACY_RELEASE", "FAST",
+            "CONFIGURATION", "RELEASE_LEDGER", "LEGACY_RELEASE", "FAST", "EFFECTIVE_BUILD",
             "INTEGRATION", "UPGRADE", "BROWSER",
         )}
         docs = {**base, "DOCS_ONLY": "true", **{
-            name + "_RESULT": "skipped" for name in ("FAST", "INTEGRATION", "UPGRADE", "BROWSER")
+            name + "_RESULT": "skipped" for name in (
+                "FAST", "EFFECTIVE_BUILD", "INTEGRATION", "UPGRADE", "BROWSER"
+            )
         }}
         for values, succeeds in (
             ({**base, "DOCS_ONLY": "false"}, True), (docs, True),
@@ -1007,6 +1011,7 @@ class PlatformConfigurationContracts(TestCase):
             ({**docs, "RELEASE_LEDGER_RESULT": "skipped"}, False),
             ({**docs, "BROWSER_RESULT": "cancelled"}, False),
             ({**base, "FAST_RESULT": "skipped"}, False),
+            ({**base, "EFFECTIVE_BUILD_RESULT": "failure"}, False),
         ):
             with self.subTest(values=values):
                 result = subprocess.run(["bash", "-c", script], env={**os.environ, **values}, capture_output=True)
@@ -1371,6 +1376,10 @@ class PlatformConfigurationContracts(TestCase):
             self.assertIn(f'"{field}"', final_boundary_text)
         self.assertEqual(
             step_names.index("Configure guarded deploy and observer SSH identities") + 1,
+            step_names.index("Wait for the exact reviewed 0.8.1 receiver upgrade"),
+        )
+        self.assertEqual(
+            step_names.index("Wait for the exact reviewed 0.8.1 receiver upgrade") + 1,
             step_names.index("Send the verified archive through the forced command"),
         )
         for required in (
