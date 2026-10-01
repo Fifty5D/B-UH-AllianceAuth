@@ -130,6 +130,7 @@ $RequiredSources = @(
     "releases/platform/v0.6.0/RELEASE.json",
     "releases/platform/v0.6.1/INSTALL_PLAN.json",
     "releases/platform/v0.6.1/RELEASE.json",
+    "releases/platform/v0.8.2/RELEASE.json",
     "setup/Upgrade-BUH-PlatformV2Receiver.ps1",
     "tests/__init__.py",
     "tests/deploy/__init__.py",
@@ -139,6 +140,7 @@ $RequiredSources = @(
     "tests/deploy/test_contracts.py",
     "tests/deploy/test_docker_host.py",
     "tests/deploy/test_engine.py",
+    "tests/deploy/test_observer_attempt.py",
     "tests/deploy/test_receiver.py",
     "tests/deploy/test_schemas.py",
     "tests/deploy/test_upgrade_receiver.py"

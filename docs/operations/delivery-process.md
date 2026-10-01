@@ -1,5 +1,64 @@
 # Delivery process and recovery history
 
+## September 30 v0.8.2 completion and installed tooling reconciliation
+
+Platform v0.8.2 is installed from immutable release
+`ff36151aa2065b0914a6cc2858a2284523fb098f`; PR #87 merged at
+`8ada6602106412ebb0b61839c67f4c3589e0420e`. Deployment
+`gh-36797330529-1` completed with verified cleanup. Live web, five general
+workers, the services worker and scheduler import Alliance Auth 5.4.0 and pass
+dependency checks. The root-owned receiver receipt identifies reviewed source
+`714a3407b7e84b70110162e22bf61f289773b23b`. Its installed file hashes are
+unchanged by this diagnostics completion correction.
+
+PR #88 reconciles that installed receiver/observer tooling with main and adds
+the exact diagnostics alias `allianceauth_worker_beat` for Compose service
+`allianceauth_beat`. The alias only admits the container for inspection; the
+existing project and service label checks still determine collection. Install
+the collector separately through its hashed diagnostics manifest and existing
+transactional installer; this is not an application release or rollout.
+
+Use the documented GitHub workflow-control pause for **Prepare Release** before
+merging qualified PR #88. Wait for its exact main **Validate PR** run to finish
+and verify no release preparation is active before resuming **Prepare Release**.
+Retain the platform fragment for the next ordinary release. Do not remove it,
+alter v0.8.2, dispatch preparation, or deploy an application merely to reconcile
+installed tooling. A later source merge may consume the pending fragment through
+the ordinary release and approval process.
+
+The provider still advertises
+`characters-corporations-alliances/index.json`, but that index and its backfills
+JSON index return 404. Its HTML page lists historical backfills, without a
+working replacement JSON root. Disable only that unavailable dataset in active
+configuration, preserving all dataset, catalog, file and revision records and
+stored payloads. Keep the provider gap visible; other failures remain strict.
+
+## September 30 v0.8.2 evidence tooling correction
+
+Immutable v0.8.2 is published at `ff36151aa2065b0914a6cc2858a2284523fb098f`,
+from tested source `a8f60c83ddecf883cdefdd21f90dc426726bf5d3`. PR #87 remains
+open. Prepare Release attempt `gh-36789079453-1` passed its receiver candidate
+checks and restoration, but the guarded observer rejected the new exact recovery
+policy. The workflow failed and published no production readiness. Production
+still runs the prior application; its verified receipt is v0.8.0.
+
+The narrow correction pins the observer's v0.8.2 recovery summary to that exact
+release, source, manifest and transition hash. It also adds the root-owned PR86
+receiver inventory, installed from `08b258419d38fc6fd263b4b32dd48e92f9c1cee6`,
+as a confirmed transactional-upgrade baseline. Unknown policies, altered
+transitions and changed installed identities remain rejected. Historical policy
+and baseline behavior remain intact.
+
+Qualify the tooling correction on a branch containing the unchanged published
+v0.8.2 ledger. Keep it unmerged while preparing PR #87: advancing main beyond
+the tested release source would invalidate the existing automatic readiness
+path. The owner has approved the backed-up tooling installation, required
+installer validation, one fresh qualified preparation, and subsequent v0.8.2
+rollout and separately hashed diagnostics installation if every gate passes.
+Use the existing transactional installer and only Re-run failed jobs of Prepare
+Release run `36789079453`; do not republish the immutable release. A new
+production failure ends the sequence after that attempt's supported recovery.
+
 ## September 27 Alliance Auth 5.4 candidate baseline
 
 The host was read directly before this candidate: Platform v0.7.0 is installed,

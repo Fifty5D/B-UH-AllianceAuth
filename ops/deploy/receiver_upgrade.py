@@ -128,6 +128,54 @@ V080_INSTALLED_RECEIVER = {
 }
 
 
+# Exact root-owned inventory after PR86's successful transactional installation.
+# Unknown installation records remain blocked; this is not a schema-only trust
+# rule. The record digest and every installed source file are independently pinned.
+PR86_INSTALLED_SOURCE_FILES = {
+    "ops/__init__.py": "802ac64a906579f62587946075650f1b9b0cc142fef6c5926d7a5fd20ff894c8",
+    "ops/buh-github-observe-entry": "376c679941926addad1923bb951371b27ef827aad500becfd39cf9e1d8f684de",
+    "ops/buh-github-observe-root": "cd55a11f95a4fd44c39a4f2d692c79c02a00d1b16b8cebd0c346270f48ad346b",
+    "ops/buh-redact-diagnostics.py": "2231a244c0b5ec0b1aa252ff122ea559de2d75d35460fb298e266ea14328175c",
+    "ops/deploy/__init__.py": "c19efec124ae9e8a811fb6173ead5d958943d74d8cbb9aa48efbb3070663892c",
+    "ops/deploy/buh-deploy-dispatch": "cd23d3d3cba391bfee4aec7dcde568b86d338c8bea395ecd7fc59294f829fe99",
+    "ops/deploy/buh-platform-v2-receiver": "41efdd024619c2c4048e7964ef9220bddf52fd09284004837a8293f126b26d48",
+    "ops/deploy/contracts.py": "f0ea274a61ec270057b23f8d66dd2c47ab20eb3ed1eda802cd28ccd4e7eb3325",
+    "ops/deploy/coordinated-recovery.json": "ea3e45a9f2925276f272b8fb01fdb73ae925cc13ad1b2533a82a8f7216b6fc71",
+    "ops/deploy/docker_host.py": "e24a7a7d92fa49be03fdc46e626bd61ca342ca72b89a163f38ea15d6e89d70a8",
+    "ops/deploy/engine.py": "dfe39593848cbb50b81a71ddd6d9b3d0807496cacf6972b01f923173e38bf0d4",
+    "ops/deploy/receiver.py": "69ab17cfb54a5af4d081c377752bcea9ccdd2d727ce3985ec67c65edd6e448ab",
+    "ops/release/__init__.py": "2aa6b251f1bbba209cf3db2cb09032a8f53933d41363f5665b8a6acf3cfcd8ec",
+    "ops/release/buh_release.py": "2fa4a51ff915c6567f75f4383d7fe7e0a9a98a3159a7da986ddb27d5f730a38d",
+    "ops/release/recovery_policy.py": "bb9898419ac94a73c99e85331edd1259d07aabfa5935ece4eabb649919ece147",
+}
+_PR86_COMMAND_PATHS = {
+    "ops/buh-github-observe-entry": "/usr/local/bin/buh-github-observe-entry",
+    "ops/buh-github-observe-root": "/usr/local/sbin/buh-github-observe-root",
+    "ops/buh-redact-diagnostics.py": "/usr/local/libexec/buh-redact-diagnostics",
+    "ops/deploy/buh-deploy-dispatch": "/usr/local/sbin/buh-deploy-dispatch",
+    "ops/deploy/buh-platform-v2-receiver": "/usr/local/sbin/buh-platform-v2-receiver",
+}
+PR86_INSTALLED_RECEIVER = {
+    "config": dict(V080_INSTALLED_RECEIVER["config"]),
+    "install_record": {
+        "path": "/etc/buh-platform-v2/INSTALL.json",
+        "uid": 0, "gid": 0, "mode": "0600",
+        "sha256": "2ae7085cbfd5d272aee820cf470aa67f6996ec3392a0a1f1c7e311c0e327fcd5",
+        "source_commit": "08b258419d38fc6fd263b4b32dd48e92f9c1cee6",
+        "config_sha256": "28d37ca1a149a81405c036c4668a235952182681f274847067ebb13d7f594d4e",
+        "source_file_sha256": PR86_INSTALLED_SOURCE_FILES,
+    },
+    "files": {
+        _PR86_COMMAND_PATHS.get(source, "/usr/local/lib/buh-platform-v2/" + source): {
+            "uid": 0, "gid": 0,
+            "mode": "0755" if source in _PR86_COMMAND_PATHS else "0644",
+            "sha256": digest,
+        }
+        for source, digest in PR86_INSTALLED_SOURCE_FILES.items()
+    },
+}
+
+
 class UpgradeError(RuntimeError):
     """A fail-closed receiver upgrade error safe to show to the operator."""
 
@@ -368,7 +416,7 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
     expected = next(
         (
             baseline
-            for baseline in (historical, V080_INSTALLED_RECEIVER)
+            for baseline in (historical, V080_INSTALLED_RECEIVER, PR86_INSTALLED_RECEIVER)
             if record_digest == baseline["install_record"]["sha256"]
         ),
         None,
@@ -439,6 +487,10 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
             "source_file_sha256", {}
         ).get(source, expected["files"][installed]["sha256"])
         for installed, source in installed_to_source.items()
+    ):
+        raise UpgradeError("Confirmed installed receiver source identity changed.")
+    if expected is PR86_INSTALLED_RECEIVER and (
+        record["files"] != PR86_INSTALLED_SOURCE_FILES
     ):
         raise UpgradeError("Confirmed installed receiver source identity changed.")
 

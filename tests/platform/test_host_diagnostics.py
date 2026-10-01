@@ -193,6 +193,75 @@ class HostDiagnosticsTests(unittest.TestCase):
                          {"expected": 1, "running": 0})
         self.assertEqual(report["status"], "degraded")
 
+    def test_exact_legacy_scheduler_alias_collects_logs_and_reports_healthy_inventory(self):
+        current = datetime(2026, 9, 30, 12, tzinfo=UTC)
+        names = {
+            "allianceauth_gunicorn": "allianceauth_gunicorn",
+            "allianceauth_worker_beat": "allianceauth_beat",
+            "aa-docker-allianceauth_worker_services-1": "allianceauth_worker_services",
+            **{f"aa-docker-allianceauth_worker-{n}": "allianceauth_worker"
+               for n in range(1, 6)},
+            **{f"aa-docker-{name}-1": name for name in ("auth_mysql", "redis", "nginx")},
+            "aa-docker-unrelated-1": "unrelated",
+            "unrelated_worker_beat": "allianceauth_beat",
+        }
+        inspected = []
+
+        def read(argv, **_kwargs):
+            if argv[1] == "ps":
+                return "\n".join(json.dumps({"ID": name, "Names": name,
+                                            "State": "running", "Status": "Up"})
+                                 for name in names)
+            inspected.extend(argv[4:])
+            return "\n".join(json.dumps({"com.docker.compose.project": "aa-docker",
+                                         "com.docker.compose.service": names[name]})
+                             + "|" + json.dumps({"Health": {"Status": "healthy"},
+                                                  "ExitCode": 0, "OOMKilled": False})
+                             + "|0" for name in argv[4:])
+
+        with patch.object(diagnostics, "read_command", side_effect=read):
+            containers = diagnostics.docker_containers()
+        self.assertNotIn("unrelated_worker_beat", inspected)
+        self.assertNotIn("aa-docker-unrelated-1", {item["name"] for item in containers})
+        scheduler = next(item for item in containers
+                         if item["name"] == "allianceauth_worker_beat")
+        self.assertEqual(scheduler["service"], "allianceauth_beat")
+        captured = []
+
+        def logs(argv, **_kwargs):
+            captured.append(argv[-1])
+            return iter(["2026-09-30T12:00:00.000001Z Scheduler: Sending due archive task"]
+                        if argv[-1] == "allianceauth_worker_beat" else [])
+
+        with patch.object(diagnostics, "iter_command_lines", side_effect=logs):
+            diagnostics.collect_docker(self.db, containers, diagnostics.redactor(), current)
+        self.assertIn("allianceauth_worker_beat", captured)
+        self.assertNotIn("aa-docker-unrelated-1", captured)
+        self.assertNotIn("unrelated_worker_beat", captured)
+        rows = list(diagnostics.query(self.db, current, current + timedelta(minutes=1),
+                                      "allianceauth_worker_beat", None, 10))
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Sending due archive task", rows[0]["message"])
+        for source in ("docker", "journal", "docker-event", "app", "resources"):
+            diagnostics.set_meta(self.db, "source:" + source + ":last_success",
+                                 diagnostics.stamp(current))
+        self.db.commit()
+        report = diagnostics.create_report(self.db, containers, current)
+        self.assertEqual(report["service_inventory"]["mismatched"], {})
+        self.assertEqual(report["status"], "healthy")
+
+    def test_legacy_scheduler_alias_still_requires_exact_compose_identity(self):
+        for project, service in (("unexpected-project", "allianceauth_beat"),
+                                 ("aa-docker", "unrelated"), (None, None)):
+            with self.subTest(project=project, service=service):
+                row = json.dumps({"ID": "beat", "Names": "allianceauth_worker_beat",
+                                  "State": "running", "Status": "Up"})
+                labels = {"com.docker.compose.project": project,
+                          "com.docker.compose.service": service}
+                details = json.dumps(labels) + "|{}|0"
+                with patch.object(diagnostics, "read_command", side_effect=[row, details]):
+                    self.assertEqual(diagnostics.docker_containers(), [])
+
     def test_private_snapshot_has_redacted_evidence_and_prunes_expired_hours(self):
         if not __import__("shutil").which("git"):
             self.skipTest("Git is required for private transport test")

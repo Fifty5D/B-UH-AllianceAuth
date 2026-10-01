@@ -45,6 +45,7 @@ EXPECTED_SERVICES_FILE = Path(
 AUTH_SERVICES = frozenset(("allianceauth_gunicorn", "allianceauth_worker",
                            "allianceauth_worker_services", "allianceauth_beat"))
 INFRASTRUCTURE_SERVICES = frozenset(("auth_mysql", "redis", "nginx", "proxy", "grafana"))
+LEGACY_CONTAINER_SERVICE_ALIASES = {"allianceauth_worker_beat": "allianceauth_beat"}
 APP_MARKER = "BUH_DIAGNOSTICS_JSON:"
 
 APP_PROBE = r'''
@@ -358,7 +359,9 @@ def docker_containers():
         name = item.get("Names", "")
         # Inspect Compose labels rather than guessing the name of the beat
         # container. Include exact legacy names while they are still in use.
-        if name in expected["services"] or name.startswith(expected["compose_project"] + "-"):
+        if (name in expected["services"]
+                or LEGACY_CONTAINER_SERVICE_ALIASES.get(name) in expected["services"]
+                or name.startswith(expected["compose_project"] + "-")):
             candidates.append({"id": item["ID"], "name": name,
                                "state": item.get("State"), "status": item.get("Status")})
     result = []
