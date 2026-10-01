@@ -1,5 +1,31 @@
 # Delivery process and recovery history
 
+## September 30 v0.8.2 evidence tooling correction
+
+Immutable v0.8.2 is published at `ff36151aa2065b0914a6cc2858a2284523fb098f`,
+from tested source `a8f60c83ddecf883cdefdd21f90dc426726bf5d3`. PR #87 remains
+open. Prepare Release attempt `gh-36789079453-1` passed its receiver candidate
+checks and restoration, but the guarded observer rejected the new exact recovery
+policy. The workflow failed and published no production readiness. Production
+still runs the prior application; its verified receipt is v0.8.0.
+
+The narrow correction pins the observer's v0.8.2 recovery summary to that exact
+release, source, manifest and transition hash. It also adds the root-owned PR86
+receiver inventory, installed from `08b258419d38fc6fd263b4b32dd48e92f9c1cee6`,
+as a confirmed transactional-upgrade baseline. Unknown policies, altered
+transitions and changed installed identities remain rejected. Historical policy
+and baseline behavior remain intact.
+
+Qualify the tooling correction on a branch containing the unchanged published
+v0.8.2 ledger. Keep it unmerged while preparing PR #87: advancing main beyond
+the tested release source would invalidate the existing automatic readiness
+path. The owner has approved the backed-up tooling installation, required
+installer validation, one fresh qualified preparation, and subsequent v0.8.2
+rollout and separately hashed diagnostics installation if every gate passes.
+Use the existing transactional installer and only Re-run failed jobs of Prepare
+Release run `36789079453`; do not republish the immutable release. A new
+production failure ends the sequence after that attempt's supported recovery.
+
 ## September 27 Alliance Auth 5.4 candidate baseline
 
 The host was read directly before this candidate: Platform v0.7.0 is installed,
