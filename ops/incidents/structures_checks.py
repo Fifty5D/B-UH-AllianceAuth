@@ -185,6 +185,15 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.assertFalse(self.selector.is_enabled)
         self.assert_preserved()
 
+    def test_native_fresh_owner_rejection_is_reported_without_unlinking(self):
+        self.claims["owner"] = "synthetic-other-owner"
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "permanent_ownership_mismatch")
+        self.assertTrue(result["permanent_oauth_failure_proven"])
+        self.selector.refresh_from_db()
+        self.assertFalse(self.selector.is_enabled)
+        self.assert_preserved()
+
     def test_new_scope_loss_is_distinguished_from_stored_scope_metadata(self):
         self.claims["scp"] = []
         result, _ = self.invoke()
@@ -244,6 +253,7 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         result, calls = self.invoke()
         self.assertEqual(calls, 0)
         self.assertEqual(result["category"], "existing_token_record_missing")
+        self.assertFalse(result["record_presence"]["existing_token_exists"])
         self.assertEqual(Token.objects.filter(character_id=self.character.character_id).count(), 0)
 
     def test_rerun_uses_same_record_and_does_not_create_duplicates(self):

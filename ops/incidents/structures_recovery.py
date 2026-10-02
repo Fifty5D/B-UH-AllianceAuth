@@ -40,6 +40,7 @@ def stamp(value):
 def exception_category(error):
     """Use types/codes only. Never print exception messages or OAuth responses."""
     classes, oauth, statuses = [], [], []
+    ownership_rejected = False
     seen = set()
     current = error
     while current is not None and id(current) not in seen and len(seen) < 8:
@@ -47,6 +48,8 @@ def exception_category(error):
         name = type(current).__name__
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name):
             classes.append(name)
+        if name == "InvalidTokenError" and getattr(current, "description", None) == "Ownership Changed! Revoke me!":
+            ownership_rejected = True
         code = getattr(current, "error", None)
         if code in {"invalid_grant", "invalid_client", "invalid_scope", "invalid_token",
                     "unauthorized_client", "temporarily_unavailable", "server_error"}:
@@ -57,6 +60,8 @@ def exception_category(error):
         current = current.__cause__ or current.__context__
     if "invalid_grant" in oauth or "InvalidGrantError" in classes:
         category = "permanent_invalid_grant"
+    elif ownership_rejected:
+        category = "permanent_ownership_mismatch"
     elif "invalid_client" in oauth or "ImproperlyConfigured" in classes:
         category = "application_sso_configuration_failure"
     elif any(code in {420, 429} for code in statuses):
@@ -234,16 +239,18 @@ def verify_claims(token):
 
 
 def selected(target):
+    # Missing tokens can trigger upstream selector-removal signals. Report the
+    # actual missing credential first, while recording every presence bit below.
+    try:
+        token = Token.objects.get(pk=target["token_pk"])
+    except Token.DoesNotExist:
+        raise RecoveryStop("existing_token_record_missing") from None
     try:
         owner_character = OwnerCharacter.objects.select_related(
             "owner__corporation", "character_ownership__character", "character_ownership__user"
         ).get(pk=target["owner_character_pk"])
     except OwnerCharacter.DoesNotExist:
         raise RecoveryStop("configured_character_or_auth_link_missing") from None
-    try:
-        token = Token.objects.get(pk=target["token_pk"])
-    except Token.DoesNotExist:
-        raise RecoveryStop("existing_token_record_missing") from None
     return owner_character, token
 
 
@@ -261,6 +268,11 @@ def run(target, *, apply=False):
         executor = MigrationExecutor(connection)
         if executor.migration_plan(executor.loader.graph.leaf_nodes()):
             raise RecoveryStop("pending_migrations_for_current_runtime")
+        result["record_presence"] = {
+            "existing_token_exists": Token.objects.filter(pk=target["token_pk"]).exists(),
+            "auth_link_exists": CharacterOwnership.objects.filter(pk=target["auth_link_pk"]).exists(),
+            "configured_character_exists": OwnerCharacter.objects.filter(pk=target["owner_character_pk"]).exists(),
+        }
         owner_character, token = selected(target)
         eligible(owner_character, token, target)
         before = describe(owner_character, token)
@@ -376,6 +388,9 @@ def run(target, *, apply=False):
                 result["after_evidence_error_type"] = type(error).__name__
                 result["recovered"] = False
                 result["category"] = "preservation_evidence_incomplete"
+        result["permanent_oauth_failure_proven"] = result["category"] in {
+            "permanent_invalid_grant", "permanent_ownership_mismatch",
+        }
         result["finished_at"] = datetime.now(timezone.utc).isoformat()
     return result
 
