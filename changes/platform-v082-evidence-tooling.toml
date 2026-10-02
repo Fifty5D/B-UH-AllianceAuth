@@ -1,3 +1,0 @@
-app = "platform"
-kind = "fix"
-summary = "Bind guarded v0.8.2 recovery evidence to its exact published transition, recognize the verified PR86 receiver installation baseline, and collect the exact legacy scheduler container in private diagnostics."
