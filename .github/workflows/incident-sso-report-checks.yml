@@ -97,7 +97,7 @@ jobs:
         run: |
           export PYTHONPATH="$PWD/platform/testauth:$PWD"
           export BUH_TEST_SETTINGS=testauth.settings.unit
-          python platform/testauth/manage.py shell --no-imports -c 'import inspect; import esi.models, esi.managers, esi.sso; import allianceauth.authentication.models; print("PINNED_SOURCE esi.models"); print(inspect.getsource(esi.models)); print("PINNED_SOURCE esi.managers.TokenManager.validate_access_token"); print(inspect.getsource(esi.managers.TokenManager.validate_access_token)); print("PINNED_SOURCE esi.sso"); print(inspect.getsource(esi.sso)); print("PINNED_SOURCE Auth.models"); print(inspect.getsource(allianceauth.authentication.models))'
+          python platform/testauth/manage.py shell --no-imports -c 'import inspect; import esi.models, esi.managers; import allianceauth.authentication.models; print("PINNED_SOURCE esi.models"); print(inspect.getsource(esi.models)); print("PINNED_SOURCE esi.managers.TokenManager.validate_access_token"); print(inspect.getsource(esi.managers.TokenManager.validate_access_token)); print("PINNED_SOURCE Auth.models"); print(inspect.getsource(allianceauth.authentication.models))'
       - name: Exercise actual Auth, Token, OwnerCharacter and Member Audit rows
         run: |
           set -Eeuo pipefail
