@@ -12,8 +12,17 @@ The app serializes refresh and invalid-grant deletion for django-esi 9.6.0 using
 a database lock on each token row. A caller holding an older token instance
 reuses a sibling's successful refresh. A changed user/character ownership stops
 the operation; rejected grants remain failures, and incomplete SSO responses
-preserve the grant without returning an expired token. These guards do not
-recover previously disabled sync characters or change stored success flags.
+preserve the grant without returning an expired token. If all matching tokens
+are temporarily unusable, validation raises a retryable incomplete-response
+error instead of reporting that the token is missing. Member Audit can then
+retry the section automatically after SSO recovers. A usable matching token
+still takes precedence over an incomplete sibling refresh. Permanently rejected
+grants retain their existing fail-closed behavior.
+
+This prevention does not clear token-error flags already saved by an older
+release. Existing affected characters require a bounded recovery that first
+proves their stored tokens still work; do not blanket-clear flags, unlink
+characters, or ask every member to reauthorize.
 
 For Moon Mining 3.1.0.post1, the two time-based SQL transitions run atomically
 and retry MariaDB error 1213 at most twice. Other errors and errors inside a
