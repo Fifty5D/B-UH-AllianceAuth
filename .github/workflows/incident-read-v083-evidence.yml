@@ -32,13 +32,22 @@ jobs:
           import runpy
           from pathlib import Path
           sanitizer = runpy.run_path("ops/buh-redact-diagnostics.py")
-          for name in ("receiver.txt", "attempt.txt"):
+          for name in ("diagnostics.txt",):
               path = Path("retained") / name
               assert path.is_file() and not path.is_symlink()
               assert path.stat().st_size <= 1024 * 1024
               safe = sanitizer["redact"](path.read_text(encoding="utf-8", errors="replace"))
               assert not sanitizer["contains_credential_shape"](safe)
               print("RETAINED EVIDENCE:", name)
+              headings = [line for line in safe.splitlines() if line.startswith("=====")]
+              print("AVAILABLE REPORT SECTIONS:", headings)
+              for marker in ("===== PLATFORM V2", "===== PLATFORM", "===== RELEASE", "===== GUARDED"):
+                  offset = safe.find(marker)
+                  if offset >= 0:
+                      safe = safe[offset:]
+                      break
+              else:
+                  safe = safe[-65536:]
               if len(safe) > 65536:
                   print(safe[:32768])
                   print("[Bounded middle omitted]")
