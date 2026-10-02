@@ -9,14 +9,14 @@ It targets retained attempt `gh-36955595351-1`. It uses the receiver already
 installed on the server for Compose discovery, including existing overlays.
 It does not install the staged code into the application or receiver.
 
-Run the launcher from the reviewed commit with the owner's existing `b-uh`
-SSH profile. Noninteractive sudo is required:
+Run the checksum-pinned launcher with the owner's existing `b-uh` SSH profile.
+Noninteractive sudo is required; no local Git checkout is needed:
 
 ```powershell
-.\ops\incidents\run-sso-incident.ps1 -ReviewedCommit <qualified-40-character-head> -RepositoryPath (Get-Location).Path
+.\ops\incidents\run-sso-incident.ps1 -ReviewedCommit <qualified-40-character-head> -CollectorSha256 <qualified-collector-sha256> -DatabaseSha256 <qualified-database-sha256>
 ```
 
-The JSON file is saved locally, copied to the clipboard when available, and
+The JSON file is saved to the Windows Desktop and
 retained in a private root staging directory. An incomplete report still saves
 its safe error categories. No arbitrary exception messages, raw logs, token
 credentials, owner hashes, database connection settings or environment values

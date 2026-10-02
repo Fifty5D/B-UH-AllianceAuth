@@ -1,5 +1,4 @@
 """The staged report cannot expose arbitrary logs/config or perform recovery."""
-import hashlib
 import io
 import json
 import os
@@ -100,7 +99,7 @@ class EvidenceTests(unittest.TestCase):
         launcher = Path(__file__).with_name("run-sso-incident.ps1").read_text()
         embedded = launcher.split("$rootScript = @'\n", 1)[1].split("\n'@", 1)[0]
         compile(embedded, "staged-launcher", "exec")
-        self.assertIn("-- ops/incidents/collect_sso_incident.py ops/incidents/database_report.py", launcher)
+        self.assertIn('wanted = {"collect_sso_incident.py": collector_hash, "database_report.py": database_hash}', launcher)
         self.assertNotIn("recover_incomplete_plan", launcher)
 
     def test_private_plan_projection_never_exports_unrecognized_content(self):
