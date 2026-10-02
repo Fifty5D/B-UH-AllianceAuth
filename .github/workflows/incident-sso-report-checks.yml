@@ -26,25 +26,27 @@ jobs:
       - name: Compile and test the isolated evidence boundaries
         run: |
           python3 -m compileall -q ops/incidents
-          python3 -m unittest ops.incidents.test_evidence -v
+          python3 -m unittest ops.incidents.test_evidence ops.incidents.test_structures_boundaries -v
       - name: Parse the PowerShell launcher
         shell: pwsh
         run: |
           $parseTokens = $null
           $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path (Get-Location).Path 'ops/incidents/run-sso-incident.ps1'),
-            [ref]$parseTokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count) {
-            $parseErrors | ForEach-Object { Write-Host $_.Message }
-            throw 'PowerShell launcher failed syntax validation.'
+          foreach ($launcher in @('run-sso-incident.ps1', 'run-structures-pilot.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path (Get-Location).Path ('ops/incidents/' + $launcher)),
+              [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) {
+              $parseErrors | ForEach-Object { Write-Host $_.Message }
+              throw 'PowerShell launcher failed syntax validation.'
+            }
           }
       - name: Record tested file hashes
         run: |
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
-          for name in ("collect_sso_incident.py", "database_report.py", "run-sso-incident.ps1"):
+          for name in ("collect_sso_incident.py", "database_report.py", "run-sso-incident.ps1", "run_structures_pilot.py", "structures_recovery.py", "run-structures-pilot.ps1"):
               path = Path("ops/incidents") / name
               print("TESTED_FILE_SHA256", name, hashlib.sha256(path.read_bytes()).hexdigest())
           PY
@@ -93,18 +95,13 @@ jobs:
             -e apps/structure-ops -e apps/mining-analytics -e apps/moon-tax \
             -e apps/esi-history -e apps/memberaudit-autoreg -e apps/vps-health
           python -m pip check
-      - name: Inspect the exact installed token and Auth signal APIs
-        run: |
-          export PYTHONPATH="$PWD/platform/testauth:$PWD"
-          export BUH_TEST_SETTINGS=testauth.settings.unit
-          python platform/testauth/manage.py shell --no-imports -c 'import inspect; import esi.models, esi.managers; import allianceauth.authentication.models; print("PINNED_SOURCE esi.models"); print(inspect.getsource(esi.models)); print("PINNED_SOURCE esi.managers.TokenManager.validate_access_token"); print(inspect.getsource(esi.managers.TokenManager.validate_access_token)); print("PINNED_SOURCE Auth.models"); print(inspect.getsource(allianceauth.authentication.models))'
       - name: Exercise actual Auth, Token, OwnerCharacter and Member Audit rows
         run: |
           set -Eeuo pipefail
           ruff check ops/incidents
           export PYTHONPATH="$PWD/platform/testauth:$PWD"
           export BUH_TEST_SETTINGS=testauth.settings.unit
-          python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks
+          python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks ops.incidents.structures_checks
       - name: Exercise fresh MariaDB sessions and the production shell invocation
         env:
           BUH_TEST_SETTINGS: testauth.settings.integration
@@ -115,4 +112,4 @@ jobs:
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="$PWD/platform/testauth:$PWD"
-          python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks
+          python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks ops.incidents.structures_checks
