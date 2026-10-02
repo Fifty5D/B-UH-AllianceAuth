@@ -93,6 +93,11 @@ jobs:
             -e apps/structure-ops -e apps/mining-analytics -e apps/moon-tax \
             -e apps/esi-history -e apps/memberaudit-autoreg -e apps/vps-health
           python -m pip check
+      - name: Inspect the exact installed token and Auth signal APIs
+        run: |
+          export PYTHONPATH="$PWD/platform/testauth:$PWD"
+          export BUH_TEST_SETTINGS=testauth.settings.unit
+          python platform/testauth/manage.py shell --no-imports -c 'import inspect; import esi.models, esi.managers, esi.sso; import allianceauth.authentication.signals; print("PINNED_SOURCE esi.models"); print(inspect.getsource(esi.models)); print("PINNED_SOURCE esi.managers.TokenManager.validate_access_token"); print(inspect.getsource(esi.managers.TokenManager.validate_access_token)); print("PINNED_SOURCE esi.sso"); print(inspect.getsource(esi.sso)); print("PINNED_SOURCE Auth.signals"); print(inspect.getsource(allianceauth.authentication.signals))'
       - name: Exercise actual Auth, Token, OwnerCharacter and Member Audit rows
         run: |
           set -Eeuo pipefail
