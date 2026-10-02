@@ -66,3 +66,47 @@ reports are read only to establish their database failure category.
 The launcher also copies a compact summary for a normal chat message. It keeps
 the complete JSON on the Desktop and in private host staging. The clipboard
 summary does not prove token validity and does not contain credential strings.
+
+
+## Bounded Structures existing-token pilot
+
+The separate run-structures-pilot.ps1 launcher defaults to report mode.
+Apply mode is a production data mutation for exactly one selected configured
+Structures character. It refreshes the existing stored token record, verifies
+its signed EVE identity and current scopes, checks current corporation identity,
+and runs the existing Structures/asset/notification sync methods synchronously.
+Only after all three real sync timestamps advance in a committed transaction
+does it re-enable the exact stale "No valid token found for character" selector.
+
+Use an exact tested commit and all three reported file hashes. Character
+selection is an argument, not production account data committed to this repo.
+The helper reuses the complete private report from the qualified read-only
+collector and independently checks current eligibility before any mutation.
+
+Token cleanup APIs are forbidden. Permanent OAuth rejection remains fail-closed;
+temporary/unclassified failures preserve the disabled selector for later review.
+Refresh grant rotation is retained on the same token PK even if a later sync
+fails. Native sync writes roll back together on a failed section. All deletion of
+links, tokens, owners, Structures records and historical notifications is refused.
+Only the native replacement of current StructureItem inventory for the selected
+owner is allowed. A provider omission that would prune a historical Structure
+stops the pilot and needs explicit incident review.
+
+The operation takes the existing deployment lock without changing the recovery
+hold. It verifies current traffic and live Auth runtimes against the retained
+previous-image identity, checks public smoke routes and disk headroom, caps the
+network interval and incoming assets/notifications, and preserves all retained
+deployment resources. It never invokes deployment recovery or cleanup, sends
+notification webhooks, installs source, changes Member Audit, or starts v0.8.3.
+
+The report includes fresh refresh outcome, token/link IDs, before/after sync
+timestamps and retained counts, committed versus rolled-back steps, private
+baseline report digest, image/upstream identities, and safe error categories.
+A compact clipboard result accompanies the Desktop/root-private JSON. An
+unchanged false is_up may still reflect forwarding or a periodic status check;
+it must not be manufactured into a successful current health result.
+
+Apply mode should first be used for a single incident pilot. Subsequent operations
+must follow reviewed pilot results. Rerunning uses the same record and does not
+create a replacement credential. No output contains a grant, access token, owner
+hash, raw OAuth response, arbitrary exception message, or connection secret.

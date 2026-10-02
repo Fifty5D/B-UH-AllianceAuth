@@ -79,7 +79,7 @@ class PilotBoundaryTests(unittest.TestCase):
 
     def test_traffic_is_bound_to_old_images_before_any_database_operation(self):
         config = SimpleNamespace(state_dir=Path("/synthetic/state"), app_dir=Path("/synthetic/app"),
-                                 backup_dir=Path("/synthetic/backup"), local_settings=Path("local.py"),
+                                 backup_dir=Path("/synthetic/backup"), auth_services=("web",), local_settings=Path("local.py"),
                                  custom_dockerfile=Path("Dockerfile"), gunicorn_service="web",
                                  gunicorn_port=8000, nginx_upstream_file=Path("upstream.conf"),
                                  nginx_upstream_container_file="/upstream.conf")
@@ -96,7 +96,8 @@ class PilotBoundaryTests(unittest.TestCase):
             else json.dumps([old, candidate])
         )
         hold = {"attempt_id": attempt, "status": "active", "phase": "candidate-slot-start-1",
-                "previous_images": {"web": [old["Image"], "synthetic:previous"]}}
+                "previous_images": {"web": [old["Image"], "synthetic:previous"]},
+                "auth_replica_counts": {"web": 1}}
         journal = {"attempt_id": attempt, "state": "migrated", "result": "failed"}
         current = {"platform_version": "0.8.2", "release_commit": pilot.OLD_RELEASE}
         route = b"upstream auth { server previous-web:8000; }\n"

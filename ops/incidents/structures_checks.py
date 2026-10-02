@@ -18,7 +18,7 @@ from memberaudit.models import Character, CharacterUpdateStatus
 from oauthlib.oauth2 import InvalidGrantError
 from requests.exceptions import Timeout
 from requests_oauthlib import OAuth2Session
-from structures.models import Owner, OwnerCharacter
+from structures.models import Notification, Owner, OwnerCharacter
 from structures.models import owners as owners_module
 
 from ops.incidents import structures_recovery as recovery
@@ -53,6 +53,12 @@ class StructuresRecoveryTests(NoSocketsTestCase):
             character=member, section="location", has_token_error=True,
             is_success=False, error_message="TokenDoesNotExist",
         )
+        self.retained = Notification.objects.create(
+            owner=self.owner, notification_id=123456,
+            notif_type="synthetic-retained-history",
+            timestamp=now(), last_updated=now(), text="history: retained",
+        )
+        self.retained_values = list(Notification.objects.filter(pk=self.retained.pk).values())
         self.target = {
             "owner_pk": self.owner.pk, "owner_character_pk": self.selector.pk,
             "auth_link_pk": self.link.pk, "character_id": self.character.character_id,
@@ -94,6 +100,7 @@ class StructuresRecoveryTests(NoSocketsTestCase):
                               .values_list("pk", flat=True)), [self.token.pk])
         self.ma_status.refresh_from_db()
         self.assertTrue(self.ma_status.has_token_error)
+        self.assertEqual(list(Notification.objects.filter(pk=self.retained.pk).values()), self.retained_values)
 
     def test_native_sync_success_keeps_existing_token_and_link_then_reenables_only_selector(self):
         started = now()
@@ -214,6 +221,30 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.assertEqual(result["category"], "protected_record_deletion_blocked")
         self.assertFalse(result["recovered"])
         self.assert_preserved()
+
+    def test_raw_history_deletion_is_blocked_even_without_django_signals(self):
+        def destructive_sync(owner, *args, **kwargs):
+            Notification.objects.filter(owner=owner)._raw_delete("default")
+        result, _ = self.invoke(extra=patch.object(Owner, "update_structures_esi", destructive_sync))
+        self.assertEqual(result["category"], "protected_record_deletion_blocked")
+        self.assertFalse(result["recovered"])
+        self.assert_preserved()
+
+    def test_incoming_asset_bound_stops_before_bulk_persistence(self):
+        with patch.object(Owner, "_fetch_owner_assets_from_esi", return_value=dict.fromkeys(range(50001))):
+            result, _ = self.invoke()
+        self.assertEqual(result["category"], "assets_exceed_pilot_bound")
+        self.assertFalse(result["recovered"])
+        self.owner.refresh_from_db()
+        self.assertIsNone(self.owner.structures_last_update_at)
+        self.assert_preserved()
+
+    def test_missing_existing_token_is_reported_without_replacement(self):
+        Token.objects.filter(pk=self.token.pk).delete()
+        result, calls = self.invoke()
+        self.assertEqual(calls, 0)
+        self.assertEqual(result["category"], "existing_token_record_missing")
+        self.assertEqual(Token.objects.filter(character_id=self.character.character_id).count(), 0)
 
     def test_rerun_uses_same_record_and_does_not_create_duplicates(self):
         first, _ = self.invoke()

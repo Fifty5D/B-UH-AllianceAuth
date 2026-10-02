@@ -135,6 +135,9 @@ def bounded_requests(maximum_seconds=360):
         response = original(session, method, url, *args, **kwargs)
         if response.status_code in {420, 429}:
             raise RecoveryStop("provider_throttling")
+        remaining_errors = response.headers.get("X-Esi-Error-Limit-Remain")
+        if remaining_errors is not None and str(remaining_errors).isdigit() and int(remaining_errors) <= 5:
+            raise RecoveryStop("provider_error_budget_low")
         if response.status_code >= 500:
             raise RecoveryStop("provider_server_failure")
         return response
@@ -231,10 +234,16 @@ def verify_claims(token):
 
 
 def selected(target):
-    owner_character = OwnerCharacter.objects.select_related(
-        "owner__corporation", "character_ownership__character", "character_ownership__user"
-    ).get(pk=target["owner_character_pk"])
-    token = Token.objects.get(pk=target["token_pk"])
+    try:
+        owner_character = OwnerCharacter.objects.select_related(
+            "owner__corporation", "character_ownership__character", "character_ownership__user"
+        ).get(pk=target["owner_character_pk"])
+    except OwnerCharacter.DoesNotExist:
+        raise RecoveryStop("configured_character_or_auth_link_missing") from None
+    try:
+        token = Token.objects.get(pk=target["token_pk"])
+    except Token.DoesNotExist:
+        raise RecoveryStop("existing_token_record_missing") from None
     return owner_character, token
 
 
@@ -291,6 +300,23 @@ def run(target, *, apply=False):
                 eligible(owner_character, token, target)
                 original_fetch = owner.fetch_token
                 owner.fetch_token = lambda *args, **kwargs: token
+                original_assets = owner._fetch_owner_assets_from_esi
+                original_notifications = owner._fetch_notifications_from_esi
+
+                def limited_assets(*args, **kwargs):
+                    value = original_assets(*args, **kwargs)
+                    if len(value) > 50000:
+                        raise RecoveryStop("assets_exceed_pilot_bound")
+                    return value
+
+                def limited_notifications(*args, **kwargs):
+                    value = original_notifications(*args, **kwargs)
+                    if len(value) > 5000:
+                        raise RecoveryStop("notifications_exceed_pilot_bound")
+                    return value
+
+                owner._fetch_owner_assets_from_esi = limited_assets
+                owner._fetch_notifications_from_esi = limited_notifications
                 try:
                     for method, field in (
                         ("update_structures_esi", "structures_last_update_at"),
@@ -309,6 +335,8 @@ def run(target, *, apply=False):
                         })
                 finally:
                     owner.fetch_token = original_fetch
+                    owner._fetch_owner_assets_from_esi = original_assets
+                    owner._fetch_notifications_from_esi = original_notifications
                 if not owner_character.is_enabled:
                     changed = OwnerCharacter.objects.filter(
                         pk=owner_character.pk, is_enabled=False,

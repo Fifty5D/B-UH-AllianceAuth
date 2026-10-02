@@ -60,6 +60,7 @@ import tempfile
 import zipfile
 
 stage = None
+mode = "unknown"
 try:
     upload, expected, commit, host_hash, recovery_hash, attempt, name_encoded, mode = sys.argv[1:]
     if (not re.fullmatch(r"/tmp/buh-incident-upload\.[A-Za-z0-9]+", upload)
@@ -140,6 +141,28 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $desktop) { $desktop = (Get-Location).Path }
 $reportPath = Join-Path $desktop ('BUH-Structures-Pilot-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
 [System.IO.File]::WriteAllText($reportPath, $reportText + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+function Compact-HostEvidence($value) {
+    if (-not $value) { return $null }
+    [ordered]@{
+        attempt_id = $value.attempt_id
+        hold_phase = $value.hold_phase
+        hold_sha256 = $value.hold_sha256
+        journal_state = $value.journal_state
+        platform_version = $value.platform_version
+        runtime_container_id = $value.runtime_container_id
+        runtime_image_id = $value.runtime_image_id
+        traffic_only_verified_previous_image = $value.traffic_only_verified_previous_image
+        active_upstream_sha256 = $value.active_upstream_sha256
+        public_smoke_passed = $value.public_smoke_passed
+        live_auth_service_counts = @(
+            $value.live_auth_services.PSObject.Properties | ForEach-Object {
+                [ordered]@{ service = $_.Name; count = @($_.Value).Count }
+            }
+        )
+        disk = $value.disk
+        load_average = $value.host_load_average
+    }
+}
 $handoff = [ordered]@{
     scan_complete = $report.scan_complete
     read_only = $report.read_only
@@ -150,8 +173,9 @@ $handoff = [ordered]@{
     retained_recovery_changed = $report.retained_recovery_changed
     deployment_attempted = $report.deployment_attempted
     result = $report.result
-    before_host = $report.before_host
-    after_host = $report.after_host
+    before_host = (Compact-HostEvidence $report.before_host)
+    after_host = (Compact-HostEvidence $report.after_host)
+    observed_disk_growth_bytes = $report.observed_disk_growth_bytes
 }
 $handoffText = $handoff | ConvertTo-Json -Depth 20 -Compress
 if ($handoffText.Length -le 10000) {

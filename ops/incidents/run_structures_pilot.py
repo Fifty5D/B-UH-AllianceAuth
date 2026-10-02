@@ -162,6 +162,19 @@ def verify_host(host, config, attempt):
     if not selected:
         raise PilotStop("live container identity missing")
     assert_previous_image(selected, expected_image)
+    services = {}
+    for role in config.auth_services:
+        role_ids = list(host._running_service_containers(
+            role, context="Retained previous runtime identity"))
+        if len(role_ids) != hold["auth_replica_counts"][role]:
+            raise PilotStop("live service count differs from retained previous state")
+        services[role] = []
+        for short_id in role_ids:
+            item = next((value for key, value in by_id.items() if key.startswith(short_id)), None)
+            if item is None:
+                raise PilotStop("live service identity missing")
+            assert_previous_image(item, hold["previous_images"][role][0])
+            services[role].append({"container_id": item["Id"], "image_id": item["Image"]})
     route = private_bytes(config.app_dir / config.nginx_upstream_file, 64 * 1024)
     proxy_route = host._proxy_exec("cat", config.nginx_upstream_container_file,
                                   bounded_output=True, context="Current pilot traffic identity")
@@ -197,7 +210,8 @@ def verify_host(host, config, attempt):
     return {"hold_sha256": hashlib.sha256(hold_data).hexdigest(),
             "attempt_id": attempt, "hold_phase": hold["phase"], "journal_state": journal["state"],
             "runtime_container_id": selected["Id"], "runtime_image_id": selected["Image"],
-            "platform_version": "0.8.2", "active_upstream_container_ids": sorted(set(route_ids)),
+            "platform_version": "0.8.2", "live_auth_services": services,
+            "host_load_average": list(os.getloadavg()), "active_upstream_container_ids": sorted(set(route_ids)),
             "active_upstream_sha256": hashlib.sha256(route).hexdigest(),
             "traffic_only_verified_previous_image": True, "public_smoke_passed": True,
             "disk": {"free_bytes": free_bytes, "total_bytes": total_bytes}}
@@ -237,6 +251,8 @@ def collect(attempt, name, apply):
                 or output["before_host"]["active_upstream_sha256"] != output["after_host"]["active_upstream_sha256"]
                 or output["before_host"]["runtime_container_id"] != output["after_host"]["runtime_container_id"]):
             raise PilotStop("host changed during pilot")
+        output["observed_disk_growth_bytes"] = (
+            output["before_host"]["disk"]["free_bytes"] - output["after_host"]["disk"]["free_bytes"])
         output["scan_complete"] = True
     except Exception as error:
         output["error_type"] = type(error).__name__
