@@ -50,7 +50,9 @@ republish or change the immutable v0.8.3 release.
 
 Fresh MariaDB sessions initialize through the installed Django driver before
 the SELECT-only report guard is enabled. Session isolation setup is not an
-application-data write. The dedicated regression lane covers the actual
+application-data write. Multiline read-only metadata queries remain permitted;
+writes, locking reads and output-file statements remain rejected.
+The dedicated regression lane covers the actual
 Django shell invocation and a fresh connection against disposable MariaDB.
 
 The retained `previous-static-root` is listed as a directory; it is preserved,

@@ -74,6 +74,21 @@ class EvidenceTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertEqual(database.reject_writes(execute, "SELECT 1", [], False, {}), "selected")
 
+    def test_multiline_metadata_reads_are_permitted_and_writes_still_blocked(self):
+        execute = mock.Mock(return_value="selected")
+        for sql in ("  SELECT\n table_name FROM information_schema.tables",
+                    "SHOW\tTABLES", "EXPLAIN\nSELECT 1"):
+            self.assertEqual(database.reject_writes(
+                execute, sql, [], False, {}), "selected")
+        execute.reset_mock()
+        for sql in ("SELECTOR table", "SELECT\n1;\nDELETE FROM table",
+                    "SELECT * FROM table FOR\nUPDATE",
+                    "SELECT 1 INTO\nOUTFILE '/tmp/out'",
+                    "SELECT 1 INTO\tDUMPFILE '/tmp/out'"):
+            with self.assertRaises(RuntimeError):
+                database.reject_writes(execute, sql, [], False, {})
+        execute.assert_not_called()
+
     def test_report_bounds_fail_closed_without_partial_success(self):
         with self.assertRaises(database.EvidenceBoundExceeded):
             database.bounded(list(range(4)), 3)

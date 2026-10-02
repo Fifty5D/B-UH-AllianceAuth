@@ -51,9 +51,9 @@ def error_evidence(message):
 def reject_writes(execute, sql, params, many, context):
     """Fail closed if reporting accidentally invokes a mutating ORM path."""
     normalized = sql.lstrip().upper()
-    if (not normalized.startswith(("SELECT ", "SHOW ", "EXPLAIN "))
+    if (not re.match(r"^(?:SELECT|SHOW|EXPLAIN)\s", normalized)
             or ";" in normalized.rstrip(";")
-            or re.search(r"\b(?:FOR UPDATE|INTO OUTFILE|INTO DUMPFILE)\b", normalized)):
+            or re.search(r"\b(?:FOR\s+UPDATE|INTO\s+OUTFILE|INTO\s+DUMPFILE)\b", normalized)):
         raise RuntimeError("read-only query boundary")
     return execute(sql, params, many, context)
 
