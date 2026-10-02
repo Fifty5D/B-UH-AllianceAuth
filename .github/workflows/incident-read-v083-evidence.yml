@@ -1,0 +1,48 @@
+name: Read retained v0.8.3 incident deployment evidence
+
+on:
+  push:
+    branches: ["incident/read-v083-deploy-evidence"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  read-retained-evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Read the trusted sanitizer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 5171737c1279a82005ff83e60468a1c570e48cee
+          persist-credentials: false
+      - name: Download the exact retained attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: platform-v2-deploy-36955595351-1
+          run-id: 36955595351
+          github-token: ${{ github.token }}
+          path: retained
+      - name: Print bounded sanitized receiver and journal evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import runpy
+          from pathlib import Path
+          sanitizer = runpy.run_path("ops/buh-redact-diagnostics.py")
+          for name in ("receiver.txt", "attempt.txt"):
+              path = Path("retained") / name
+              assert path.is_file() and not path.is_symlink()
+              assert path.stat().st_size <= 1024 * 1024
+              safe = sanitizer["redact"](path.read_text(encoding="utf-8", errors="replace"))
+              assert not sanitizer["contains_credential_shape"](safe)
+              print("RETAINED EVIDENCE:", name)
+              if len(safe) > 65536:
+                  print(safe[:32768])
+                  print("[Bounded middle omitted]")
+                  print(safe[-32768:])
+              else:
+                  print(safe)
+          PY
