@@ -105,7 +105,7 @@ def _collect():
     from allianceauth.eveonline.models import EveCharacter
     from esi.models import Token
     from memberaudit.models import Character, CharacterUpdateStatus
-    from structures.models import Owner
+    from structures.models import Owner, OwnerCharacter
 
     owners = bounded(Owner.objects.select_related("corporation").order_by("pk"),
                      MAX_OWNERS)
@@ -158,7 +158,8 @@ def _collect():
         "structures": [], "memberaudit": [],
     }
     for owner in owners:
-        configured = bounded(owner.characters.order_by("pk"), MAX_CHARACTERS)
+        configured = bounded(OwnerCharacter.objects.filter(owner_id=owner.pk).order_by("pk"),
+                             MAX_CHARACTERS)
         configured_rows = []
         for item in configured:
             ownership = ownership_by_id.get(item.character_ownership_id)

@@ -5,6 +5,10 @@ Auth links, token IDs/scopes, Member Audit sticky sections, migration rows,
 runtime identities, active nginx route, retained deployment plan and backup
 metadata into one indented JSON report.
 
+It also checks public ESI corporation/character identity for affected Structures
+owners and the pilot, with no stored credentials. It stops on provider throttling
+or repeated transport failures and caps public requests at 64.
+
 It targets retained attempt `gh-36955595351-1`. It uses the receiver already
 installed on the server for Compose discovery, including existing overlays.
 It does not install the staged code into the application or receiver.

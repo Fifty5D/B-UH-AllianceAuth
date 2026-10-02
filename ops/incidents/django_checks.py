@@ -24,10 +24,6 @@ class DatabaseReportTests(NoSocketsTestCase):
         self.character = EveCharacterFactory(corporation=self.corp)
         self.ownership = CharacterOwnership.objects.create(character=self.character, user=self.user)
         self.owner = Owner.objects.create(corporation=self.corp, is_active=True)
-        self.owner_character = OwnerCharacter.objects.create(
-            owner=self.owner, character_ownership=self.ownership,
-            is_enabled=False, disabled_reason="No valid token found for character",
-        )
         self.token = Token.objects.create(
             user=self.user, character_id=self.character.character_id,
             character_name=self.character.character_name,
@@ -42,6 +38,11 @@ class DatabaseReportTests(NoSocketsTestCase):
             character=self.member, section="location", has_token_error=True,
             is_success=False, error_message="TokenDoesNotExist secret=never-export",
         )
+        self.owner_character = OwnerCharacter.objects.create(
+            owner=self.owner, character_ownership=self.ownership,
+            is_enabled=False, disabled_reason="No valid token found for character",
+        )
+        self.assertTrue(OwnerCharacter.objects.filter(pk=self.owner_character.pk).exists())
 
     def report(self):
         with (patch.object(Token, "refresh", side_effect=AssertionError("must not refresh")),

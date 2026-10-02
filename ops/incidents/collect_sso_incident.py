@@ -116,6 +116,92 @@ def log_owner_evidence(output, owners):
             for key, values in found.items()}
 
 
+
+def public_identity_inventory(database, owner_errors, *, opener=None):
+    """Bounded public ESI GETs, without stored credentials or database writes."""
+    import urllib.error
+    import urllib.request
+    if opener is None:
+        opener = urllib.request.urlopen
+    selected = [
+        owner for owner in database["structures"]
+        if str(owner["owner_pk"]) in owner_errors
+        or (owner["enabled"] and (
+            not owner["configured_characters"]
+            or any(not item["enabled"] for item in owner["configured_characters"])
+        ))
+    ]
+    wanted = []
+    for owner in selected:
+        wanted.append(("corporations", owner["corporation_id"]))
+        for item in owner["configured_characters"]:
+            identity = item.get("identity")
+            if identity:
+                wanted.append(("characters", identity["character_id"]))
+        for identity in owner["other_linked_characters_in_stored_corporation"]:
+            if identity["user_has_structures_owner_permission"] and any(
+                not token["missing_scopes"] and token["has_refresh_credential"]
+                and token["user_id"] == identity["user_id"] for token in identity["tokens"]
+            ):
+                wanted.append(("characters", identity["character_id"]))
+    for character in database["memberaudit"]:
+        if character["character_name"].casefold() == "fifty5d":
+            wanted.append(("characters", character["character_id"]))
+    wanted = list(dict.fromkeys(wanted))
+    result = {"read_only_public_requests": True, "request_bound": 64,
+              "selected_owners": [owner["owner_pk"] for owner in selected],
+              "records": [], "coverage_complete": len(wanted) <= 64}
+    transient_streak = 0
+    stop_reason = None
+    for kind, identity in wanted[:64]:
+        row = {"kind": kind, "id": identity}
+        if stop_reason:
+            row["result"] = stop_reason
+            result["coverage_complete"] = False
+            result["records"].append(row)
+            continue
+        if type(identity) is not int or identity <= 0:
+            raise ValueError("invalid public identity")
+        request = urllib.request.Request(
+            f"https://esi.evetech.net/latest/{kind}/{identity}/?datasource=tranquility",
+            headers={"User-Agent": "B-UH-read-only-incident-diagnostics"},
+        )
+        try:
+            with opener(request, timeout=8) as response:
+                row["http_status"] = response.status
+                data = response.read(16 * 1024 + 1)
+                if len(data) > 16 * 1024:
+                    raise ValueError("public identity response exceeds bound")
+                payload = json.loads(data)
+                allowed = {"corporation_id", "alliance_id", "name"} if kind == "characters" else {
+                    "ceo_id", "creator_id", "alliance_id", "name", "member_count",
+                }
+                row["identity"] = projection(payload, allowed)
+                row["result"] = "success"
+                remaining = response.headers.get("X-Esi-Error-Limit-Remain", "")
+                if remaining.isdigit() and int(remaining) <= 20:
+                    stop_reason = "skipped_provider_error_budget_low"
+                transient_streak = 0
+        except urllib.error.HTTPError as exc:
+            row["http_status"] = exc.code
+            row["result"] = "public_http_rejection"
+            if exc.code in {420, 429}:
+                stop_reason = "skipped_provider_throttling"
+            if exc.code >= 500:
+                transient_streak += 1
+            else:
+                transient_streak = 0
+        except Exception as exc:
+            row["result"] = "public_transport_or_response_failure"
+            row["error_type"] = type(exc).__name__
+            transient_streak += 1
+        row["checked_at"] = datetime.now(timezone.utc).isoformat()
+        result["records"].append(row)
+        if transient_streak >= 3:
+            stop_reason = "skipped_provider_unavailable"
+    result["stop_reason"] = stop_reason
+    return result
+
 def collect():
     if os.geteuid() != 0:
         raise RuntimeError("root required for read-only host evidence")
@@ -270,7 +356,9 @@ def collect():
         report["owner_errors_by_container"] = {}
         owners = report["database"]["structures"]
         live = report["live_service_container_ids"]
-        for role in (config.worker_service, config.beat_service):
+        for role in config.auth_services:
+            if role == config.gunicorn_service:
+                continue
             for container in live.get(role, []):
                 output = host._run(
                     ["docker", "logs", "--timestamps", "--since", since, container],
@@ -279,6 +367,14 @@ def collect():
                 report["owner_errors_by_container"][container] = log_owner_evidence(output, owners)
     if report["database"] and report["database"].get("scan_complete"):
         section("current_owner_logs", logs)
+        owners_with_errors = {
+            owner_id for values in report.get("owner_errors_by_container", {}).values()
+            for owner_id in values
+        }
+        report["current_public_identities"] = section(
+            "public_identity_esi",
+            lambda: public_identity_inventory(report["database"], owners_with_errors),
+        )
     def lock_state():
         import fcntl
         descriptor = os.open(config.state_dir / "deploy.lock", os.O_RDONLY | os.O_NOFOLLOW)

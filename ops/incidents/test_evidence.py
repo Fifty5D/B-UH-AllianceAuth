@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from ops.incidents import collect_sso_incident as host, database_report as database
@@ -101,6 +102,40 @@ class EvidenceTests(unittest.TestCase):
         compile(embedded, "staged-launcher", "exec")
         self.assertIn('wanted = {"collect_sso_incident.py": collector_hash, "database_report.py": database_hash}', launcher)
         self.assertNotIn("recover_incomplete_plan", launcher)
+
+    def test_public_identity_reads_do_not_use_credentials_and_project_only_identity(self):
+        database = {"structures": [{
+            "owner_pk": 42, "corporation_id": 10001, "enabled": True,
+            "configured_characters": [], "other_linked_characters_in_stored_corporation": [],
+        }], "memberaudit": []}
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.headers = {}
+        response.read.return_value = json.dumps({"ceo_id": 90001, "name": "Synthetic",
+                                                "unrecognized": "do-not-export"}).encode()
+        opener = mock.Mock(return_value=response)
+        result = host.public_identity_inventory(database, set(), opener=opener)
+        self.assertTrue(result["coverage_complete"])
+        self.assertEqual(result["records"][0]["identity"]["ceo_id"], 90001)
+        request = opener.call_args.args[0]
+        self.assertNotIn("Authorization", request.headers)
+        self.assertNotIn("do-not-export", json.dumps(result))
+
+    def test_provider_throttling_stops_further_public_requests(self):
+        database = {"structures": [{
+            "owner_pk": 42, "corporation_id": 10001, "enabled": True,
+            "configured_characters": [
+                {"enabled": False, "identity": {"character_id": 90001}},
+            ], "other_linked_characters_in_stored_corporation": [],
+        }], "memberaudit": []}
+        opener = mock.Mock(side_effect=urllib.error.HTTPError(
+            "https://esi.evetech.net/", 429, "do-not-export", {}, None))
+        result = host.public_identity_inventory(database, {"42"}, opener=opener)
+        opener.assert_called_once()
+        self.assertFalse(result["coverage_complete"])
+        self.assertEqual(result["records"][1]["result"], "skipped_provider_throttling")
+        self.assertNotIn("do-not-export", json.dumps(result))
 
     def test_private_plan_projection_never_exports_unrecognized_content(self):
         secret = "do-not-export"
