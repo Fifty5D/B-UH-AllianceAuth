@@ -6,6 +6,7 @@ Deletion after a rejected refresh belongs to the same critical section.
 """
 
 import logging
+from contextvars import ContextVar
 from functools import wraps
 
 import esi
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 _MARKER = "_buh_serialized_refresh"
 _IDENTITY_FIELDS = ("user_id", "character_id", "character_owner_hash", "token_type")
 _REFRESH_FIELDS = ("access_token", "refresh_token", "created", "sso_version")
+_INCOMPLETE_REFRESH = ContextVar("buh_incomplete_token_refresh", default=None)
 
 
 def _database(token):
@@ -41,6 +43,7 @@ def install_token_refresh_guard() -> bool:
         return False
     original_refresh = Token.refresh
     original_refresh_or_delete = Token.refresh_or_delete
+    original_require_valid = TokenQueryset.require_valid
 
     @wraps(original_refresh)
     def refresh(token, session=None, auth=None):
@@ -73,6 +76,7 @@ def install_token_refresh_guard() -> bool:
         alias = queryset.db
         observed = list(queryset.values_list("pk", "created").distinct())
         accepted = []
+        incomplete = False
         for pk, created in observed:
             # Lock only the token row, not the joined scope/user tables. Finish
             # each token before locking another, including on failure.
@@ -99,13 +103,37 @@ def install_token_refresh_guard() -> bool:
                 except IncompleteResponseError:
                     # Temporary/incomplete SSO replies remain retryable. Never
                     # return an expired access token or delete its grant.
+                    incomplete = True
+                    failures = _INCOMPLETE_REFRESH.get()
+                    if failures is not None:
+                        failures.append(True)
                     continue
                 else:
                     accepted.append(pk)
-        return queryset.filter(pk__in=accepted)
+        result = queryset.filter(pk__in=accepted)
+        if incomplete and _INCOMPLETE_REFRESH.get() is None and not result.exists():
+            raise IncompleteResponseError("SSO refresh temporarily unavailable")
+        return result
+
+    @wraps(original_require_valid)
+    def require_valid(queryset):
+        # require_valid combines fresh tokens with the bulk-refresh result. Wait
+        # for that combination before deciding that no usable token remains.
+        # Returning an empty queryset after an incomplete SSO reply makes Member
+        # Audit persist TokenDoesNotExist and permanently skip its section.
+        failures = []
+        context = _INCOMPLETE_REFRESH.set(failures)
+        try:
+            result = original_require_valid(queryset)
+        finally:
+            _INCOMPLETE_REFRESH.reset(context)
+        if failures and not result.exists():
+            raise IncompleteResponseError("SSO refresh temporarily unavailable")
+        return result
 
     setattr(refresh, _MARKER, True)
     Token.refresh = refresh
     Token.refresh_or_delete = refresh_or_delete
     TokenQueryset.bulk_refresh = bulk_refresh
+    TokenQueryset.require_valid = require_valid
     return True

@@ -1,0 +1,3 @@
+app = "structure-ops"
+kind = "fix"
+summary = "Keep incomplete SSO refreshes retryable so Member Audit resumes with existing tokens after an outage."
