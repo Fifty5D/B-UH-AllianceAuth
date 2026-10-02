@@ -77,6 +77,15 @@ def token_evidence(token, required_scopes):
 
 def ownership_evidence(ownership, tokens, required_scopes):
     character = ownership.character
+    owner_hash = getattr(ownership, "owner_hash", None)
+    selected_tokens = [token for token in tokens if token.character_id == character.character_id]
+    token_rows = []
+    for token in selected_tokens:
+        row = token_evidence(token, required_scopes)
+        row["owner_identity_matches_auth_link"] = (
+            token.character_owner_hash == owner_hash
+            if owner_hash and token.character_owner_hash else None)
+        token_rows.append(row)
     return {
         "ownership_id": ownership.pk, "user_id": ownership.user_id,
         "user_active": ownership.user.is_active,
@@ -88,8 +97,8 @@ def ownership_evidence(ownership, tokens, required_scopes):
         "stored_corporation_id": character.corporation_id,
         "stored_corporation_name": character.corporation_name,
         "live_esi_corporation_result": "not_attempted_read_only",
-        "tokens": [token_evidence(token, required_scopes) for token in tokens
-                   if token.character_id == character.character_id],
+        "auth_owner_identity_present": bool(owner_hash),
+        "tokens": token_rows,
         "matching_user_token_ids": [token.pk for token in tokens
                                    if token.character_id == character.character_id
                                    and token.user_id == ownership.user_id],

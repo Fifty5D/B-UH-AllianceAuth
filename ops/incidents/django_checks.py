@@ -22,7 +22,9 @@ class DatabaseReportTests(NoSocketsTestCase):
         self.user.user_permissions.add(Permission.objects.get(codename="add_structure_owner"))
         self.corp = EveCorporationInfoFactory()
         self.character = EveCharacterFactory(corporation=self.corp)
-        self.ownership = CharacterOwnership.objects.create(character=self.character, user=self.user)
+        self.ownership = CharacterOwnership.objects.create(
+            character=self.character, user=self.user, owner_hash="synthetic-owner-hash",
+        )
         self.owner = Owner.objects.create(corporation=self.corp, is_active=True)
         self.token = Token.objects.create(
             user=self.user, character_id=self.character.character_id,
@@ -38,6 +40,8 @@ class DatabaseReportTests(NoSocketsTestCase):
             character=self.member, section="location", has_token_error=True,
             is_success=False, error_message="TokenDoesNotExist secret=never-export",
         )
+        self.assertTrue(CharacterOwnership.objects.filter(pk=self.ownership.pk).exists(),
+                        "Synthetic token must preserve the matching Auth owner identity")
         self.owner_character = OwnerCharacter.objects.create(
             owner=self.owner, character_ownership=self.ownership,
             is_enabled=False, disabled_reason="No valid token found for character",
