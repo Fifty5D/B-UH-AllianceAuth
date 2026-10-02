@@ -27,7 +27,7 @@ PLAN_FIELDS = {
 MARKER_FIELDS = {
     "schema_version", "platform_version", "release_commit", "source_commit",
     "manifest_sha256", "verified_at", "attempt_id", "status", "state",
-    "started_at", "finished_at",
+    "started_at", "finished_at", "updated_at", "result", "operation",
 }
 
 
@@ -175,15 +175,25 @@ def collect():
                 if value.get("attempt_id") != ATTEMPT:
                     report["scan_complete"] = False
                     report["errors"].append({"section": name, "error_type": "UnexpectedAttempt"})
-        elif name in {"deployment_current", "platform_current", "journal", "receiver_install"}:
+        elif name in {"deployment_current", "platform_current", "journal", "receiver_install", "backup_manifest"}:
             value = section(name + "_json", lambda data=data: json.loads(data))
             if value is not None:
                 report[name] = projection(value, MARKER_FIELDS)
+                if name == "backup_manifest":
+                    report[name] = projection(value, {"schema_version", "filename", "sha256",
+                                                     "size", "database_image_id",
+                                                     "evidence_tables", "evidence_rows"})
                 if name == "journal":
                     report[name]["transition_states"] = [
                         projection(item, {"state", "at", "timestamp"})
-                        for item in value.get("transitions", [])[:64]
+                        for item in value.get("history", [])[:64]
                     ]
+                    for field in ("rollback", "cleanup", "verification"):
+                        item = value.get(field)
+                        report[name][field] = (projection(item, {"result", "filename", "sha256", "iterations"})
+                                               if isinstance(item, dict) else None)
+                    report[name]["structures_selection_failure_reported"] = (
+                        "No valid character found for sync" in str(value.get("failure_detail", "")))
         elif name == "upstream":
             report["upstream_targets"] = re.findall(
                 rb"\bserver[ \t]+([A-Za-z0-9_.-]+:[0-9]{1,5})[ \t;]",
@@ -211,6 +221,17 @@ def collect():
                 )
             report["backup_inventory"].append(metadata)
     section("backup_inventory", backups)
+    report["configuration_matches_retained_backup"] = {}
+    for current, previous in (("local_settings", "local.py"), ("dockerfile", "custom.dockerfile"),
+                              ("upstream", "nginx-upstream.conf"),
+                              ("platform_current", "platform-CURRENT.json"),
+                              ("deployment_current", "deployment-current.json")):
+        metadata = report["files"].get(current, {})
+        saved = next((item for item in report["backup_inventory"] if item["name"] == previous), {})
+        report["configuration_matches_retained_backup"][current] = (
+            metadata["sha256"] == saved["sha256"]
+            if "sha256" in metadata and "sha256" in saved else None)
+    report["recovery_completion_is_proven"] = False
 
     def containers():
         ids = host._run(["docker", "ps", "-aq"], bounded_output=True,

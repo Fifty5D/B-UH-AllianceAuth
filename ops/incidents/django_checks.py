@@ -7,6 +7,7 @@ from app_utils.testdata_factories import EveCharacterFactory, EveCorporationInfo
 from allianceauth.authentication.models import CharacterOwnership
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
+from django.db import transaction
 from esi.managers import TokenQueryset
 from esi.models import Scope, Token
 from memberaudit.models import Character, CharacterUpdateStatus
@@ -47,10 +48,17 @@ class DatabaseReportTests(NoSocketsTestCase):
               patch.object(TokenQueryset, "require_valid", side_effect=AssertionError("must not cleanup"))):
             return reporter.collect()
 
+    def owner_row(self, result):
+        return next(row for row in result["structures"] if row["owner_pk"] == self.owner.pk)
+
+    def member_row(self, result):
+        return next(row for row in result["memberaudit"]
+                    if row["memberaudit_character_pk"] == self.member.pk)
+
     def test_sticky_selection_has_evidence_and_does_not_imply_invalid_token(self):
         result = self.report()
         self.assertTrue(result["scan_complete"])
-        owner = result["structures"][0]
+        owner = self.owner_row(result)
         self.assertTrue(owner["enabled"])
         selected = owner["configured_characters"][0]
         self.assertFalse(selected["enabled"])
@@ -83,20 +91,20 @@ class DatabaseReportTests(NoSocketsTestCase):
     def test_scope_problem_is_separate_from_refreshability(self):
         self.token.scopes.clear()
         result = self.report()
-        token = result["structures"][0]["configured_characters"][0]["identity"]["tokens"][0]
+        token = self.owner_row(result)["configured_characters"][0]["identity"]["tokens"][0]
         self.assertEqual(token["missing_scopes"], sorted(Owner.esi_scopes()))
         self.assertFalse(token["permanent_failure_proven"])
 
     def test_foreign_user_token_does_not_count_as_matching_auth_credentials(self):
         outsider = get_user_model().objects.create_user("synthetic-other-owner")
         Token.objects.filter(pk=self.token.pk).update(user=outsider)
-        identity = self.report()["structures"][0]["configured_characters"][0]["identity"]
+        identity = self.owner_row(self.report())["configured_characters"][0]["identity"]
         self.assertEqual(identity["matching_user_token_ids"], [])
         self.assertEqual(identity["tokens"][0]["user_id"], outsider.pk)
 
     def test_missing_auth_link_is_distinguishable_from_missing_token(self):
-        self.ownership.delete()
-        row = self.report()["memberaudit"][0]
+        CharacterOwnership.objects.filter(character=self.character).delete()
+        row = self.member_row(self.report())
         self.assertFalse(row["auth_link_exists"])
         self.assertEqual(row["orphaned_token_records"][0]["id"], self.token.pk)
         self.assertFalse(row["orphaned_token_records"][0]["permanent_failure_proven"])
@@ -104,5 +112,6 @@ class DatabaseReportTests(NoSocketsTestCase):
     def test_read_only_guard_blocks_accidental_real_orm_mutation(self):
         with patch.object(reporter, "_collect", side_effect=lambda: Token.objects.all().delete()):
             with self.assertRaises(RuntimeError):
-                reporter.collect()
+                with transaction.atomic():
+                    reporter.collect()
         self.assertTrue(Token.objects.filter(pk=self.token.pk).exists())

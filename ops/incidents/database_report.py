@@ -100,6 +100,7 @@ def _collect():
     from django.db import connection
     from django.db.models import Count, Q
     from django.db.migrations.recorder import MigrationRecorder
+    from django.db.migrations.executor import MigrationExecutor
     from allianceauth.authentication.models import CharacterOwnership
     from allianceauth.eveonline.models import EveCharacter
     from esi.models import Token
@@ -109,9 +110,16 @@ def _collect():
     owners = bounded(Owner.objects.select_related("corporation").order_by("pk"),
                      MAX_OWNERS)
     corp_ids = {owner.corporation.corporation_id for owner in owners}
+    sticky_character_pks = set(bounded(
+        CharacterUpdateStatus.objects.filter(has_token_error=True)
+        .values_list("character_id", flat=True).distinct().order_by("character_id"),
+        MAX_CHARACTERS,
+    ))
+    pilot_pks = set(Character.objects.filter(
+        eve_character__character_name__iexact="Fifty5D").values_list("pk", flat=True))
     statuses = bounded(
         CharacterUpdateStatus.objects.filter(
-            Q(has_token_error=True) | Q(character__eve_character__character_name__iexact="Fifty5D")
+            character_id__in=sticky_character_pks | pilot_pks
         ).select_related("character__eve_character").order_by("character_id", "section"),
         MAX_STATUSES,
     )
@@ -245,6 +253,11 @@ def _collect():
         CharacterUpdateStatus.objects.values("has_token_error", "is_success")
         .annotate(count=Count("pk")).order_by("has_token_error", "is_success")
     )
+    executor = MigrationExecutor(connection)
+    result["pending_migrations_for_current_runtime"] = [
+        {"app": migration.app_label, "name": migration.name, "backwards": backwards}
+        for migration, backwards in executor.migration_plan(executor.loader.graph.leaf_nodes())
+    ]
     result["database_vendor"] = connection.vendor
     return result
 
