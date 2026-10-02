@@ -47,3 +47,20 @@ validation of the existing credentials.
 These staged operations files and their dedicated tests/workflow are outside
 the application payload and registered platform build inputs. They do not
 republish or change the immutable v0.8.3 release.
+
+Fresh MariaDB sessions initialize through the installed Django driver before
+the SELECT-only report guard is enabled. Session isolation setup is not an
+application-data write. The dedicated regression lane covers the actual
+Django shell invocation and a fresh connection against disposable MariaDB.
+
+The retained `previous-static-root` is listed as a directory; it is preserved,
+and its contents are explicitly not recursively verified. Unsafe entries remain
+visible and incomplete while the other backup entries are still inventoried.
+
+An incomplete database report contains bounded source function/line information
+without exception messages, SQL or locals. The known earlier private collector
+reports are read only to establish their database failure category.
+
+The launcher also copies a compact summary for a normal chat message. It keeps
+the complete JSON on the Desktop and in private host staging. The clipboard
+summary does not prove token validity and does not contain credential strings.

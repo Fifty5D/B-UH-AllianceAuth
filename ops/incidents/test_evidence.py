@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import stat
+from types import SimpleNamespace
 import unittest
 import urllib.error
 from unittest import mock
@@ -144,6 +146,73 @@ class EvidenceTests(unittest.TestCase):
         projected = host.projection(value, host.PLAN_FIELDS)
         self.assertNotIn(secret, json.dumps(projected))
         self.assertEqual(projected["attempt_id"], host.ATTEMPT)
+
+
+    def test_expected_retained_static_directory_is_metadata_only(self):
+        details = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0,
+                                  st_size=4096, st_mtime=1700000000)
+        with (mock.patch.object(Path, "lstat", return_value=details),
+              mock.patch.object(host.os, "open", return_value=41),
+              mock.patch.object(host.os, "fstat", return_value=details),
+              mock.patch.object(host.os, "close") as closed,
+              mock.patch.object(host.os, "fdopen") as reader):
+            metadata, data = host.read_file(
+                "/root/retained/previous-static-root", allow_directory=True)
+        self.assertEqual(metadata["kind"], "directory")
+        self.assertEqual(metadata["content_audit"], "not_recursively_verified")
+        self.assertIsNone(data)
+        reader.assert_not_called()
+        closed.assert_called_once_with(41)
+
+    def test_unknown_directory_is_still_rejected_as_a_payload(self):
+        details = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0)
+        with (mock.patch.object(Path, "lstat", return_value=details),
+              mock.patch.object(host.os, "open", return_value=41),
+              mock.patch.object(host.os, "fstat", return_value=details),
+              mock.patch.object(host.os, "close")):
+            with self.assertRaises(ValueError):
+                host.read_file("/root/retained/unexpected-directory")
+
+    def test_backup_inventory_continues_after_one_unsafe_entry(self):
+        directory = mock.Mock(spec=Path)
+        directory.lstat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+        paths = [Path("/root/retained/" + name) for name in
+                 ("BACKUP.json", "previous-static-root", "staticfiles.previous.json",
+                  "unsafe.json")]
+        directory.iterdir.return_value = paths
+
+        def reader(path, **kwargs):
+            if path.name == "unsafe.json":
+                raise ValueError("secret=do-not-export")
+            if path.name == "previous-static-root":
+                self.assertTrue(kwargs["allow_directory"])
+                return {"kind": "directory", "hash_status": "not_applicable_directory"}, None
+            self.assertFalse(kwargs["allow_directory"])
+            return {"kind": "file", "sha256": "a" * 64}, b"synthetic"
+
+        with mock.patch.object(host, "read_file", side_effect=reader):
+            entries, errors = host.backup_inventory(
+                directory, {"staticfiles.previous.json": "a" * 64})
+        self.assertEqual(len(entries), 4)
+        self.assertEqual(errors, [{"section": "backup_inventory",
+                                  "entry": "unsafe.json", "error_type": "ValueError"}])
+        saved = next(row for row in entries if row["name"] == "staticfiles.previous.json")
+        self.assertTrue(saved["matches_expected_sha256"])
+        self.assertNotIn("do-not-export", json.dumps((entries, errors)))
+
+    def test_database_failure_sites_do_not_export_messages_or_locals(self):
+        namespace = {"__name__": "synthetic"}
+        program = host.database_program(
+            "def broken():\n    raise AttributeError('secret=never-export')\n"
+            "def emit():\n    broken()\n")
+        try:
+            exec(program, namespace)
+        except AttributeError as exc:
+            evidence = database.failure_evidence(exc)
+        self.assertEqual(evidence["error_type"], "AttributeError")
+        self.assertIn({"function": "broken", "line": 2}, evidence["report_frames"])
+        self.assertNotIn("never-export", json.dumps(evidence))
 
 
 if __name__ == "__main__":

@@ -274,8 +274,33 @@ def _collect():
 
 def collect():
     from django.db import connection
+    # Django's MariaDB/MySQL driver performs session-only SET statements while
+    # opening a fresh connection. Initialize it before guarding report queries;
+    # the guard still rejects every application-data write.
+    connection.ensure_connection()
     with connection.execute_wrapper(reject_writes):
         return _collect()
+
+
+def failure_evidence(exc):
+    """Known source locations only; no messages, SQL, locals or credentials."""
+    frames = []
+    trace = exc.__traceback__
+    while trace is not None:
+        frame = trace.tb_frame
+        name = frame.f_code.co_name
+        filename = frame.f_code.co_filename
+        if ((filename.endswith("/database_report.py")
+             or filename == "<buh-database-report>")
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)):
+            frames.append({"function": name, "line": trace.tb_lineno})
+        trace = trace.tb_next
+    result = {"error_type": type(exc).__name__, "report_frames": frames[-12:]}
+    if isinstance(exc, AttributeError):
+        name = getattr(exc, "name", None)
+        if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+            result["attribute_name"] = name
+    return result
 
 
 def emit():
@@ -284,7 +309,7 @@ def emit():
         result = collect()
     except Exception as exc:
         result = {"read_only": True, "scan_complete": False,
-                  "error_type": type(exc).__name__}
+                  **failure_evidence(exc)}
     print("BUH_INCIDENT_REPORT_BEGIN")
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     print("BUH_INCIDENT_REPORT_END")

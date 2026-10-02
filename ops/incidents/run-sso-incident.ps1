@@ -115,6 +115,78 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $desktop) { $desktop = (Get-Location).Path }
 $reportPath = Join-Path $desktop ('BUH-SSO-Incident-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
 [System.IO.File]::WriteAllText($reportPath, $reportText + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+# Keep the full report; a small clipboard handoff avoids large-paste attachments.
+$ownerRows = @(
+    foreach ($owner in $report.database.structures) {
+        [ordered]@{
+            id = $owner.owner_pk
+            name = $owner.corporation_name
+            active = $owner.enabled
+            up = $owner.is_up
+            structures_at = $owner.structures_last_update_at
+            notifications_at = $owner.notifications_last_update_at
+            characters = @(
+                foreach ($character in $owner.configured_characters) {
+                    $identity = $character.identity
+                    [ordered]@{
+                        id = $character.owner_character_id
+                        name = $identity.character_name
+                        enabled = $character.enabled
+                        link = $character.auth_link_exists
+                        no_token_disable = $character.disabled_for_no_valid_token
+                        permission = $identity.user_has_structures_owner_permission
+                        stored_corp_matches = $character.stored_corporation_matches_owner
+                        scope_complete_token_ids = @(
+                            $identity.tokens | Where-Object {
+                                $_.user_id -eq $identity.user_id -and
+                                $_.has_refresh_credential -and
+                                $_.missing_scopes.Count -eq 0
+                            } | ForEach-Object { $_.id }
+                        )
+                        identity_mismatch_token_ids = @(
+                            $identity.tokens | Where-Object {
+                                $_.owner_identity_matches_auth_link -eq $false
+                            } | ForEach-Object { $_.id }
+                        )
+                    }
+                }
+            )
+        }
+    }
+)
+$handoff = [ordered]@{
+    scan_complete = $report.scan_complete
+    errors = $report.errors
+    database_complete = $report.database.scan_complete
+    database_error_type = $report.database.error_type
+    database_failure_sites = $report.database.report_frames
+    prior_database_failures = $report.prior_database_failures
+    summary = $report.database.summary
+    attempt_id = $report.attempt_id
+    journal_state = $report.journal.state
+    hold_status = $report.recovery_hold.status
+    hold_phase = $report.recovery_hold.phase
+    lock_busy = $report.deployment_lock_state.busy
+    platform_version = $report.platform_current.platform_version
+    active_upstream_matches_host = $report.active_upstream_matches_host
+    configuration_matches_backup = $report.configuration_matches_retained_backup
+    pending_migrations = $report.database.pending_migrations_for_current_runtime
+    disk = $report.disk
+    owners = $ownerRows
+    token_refresh_attempted = $false
+}
+$handoffText = $handoff | ConvertTo-Json -Depth 20 -Compress
+if ($handoffText.Length -gt 6000) {
+    $handoff.owners = @()
+    $handoff.owner_details_in_full_report = $true
+    $handoffText = $handoff | ConvertTo-Json -Depth 20 -Compress
+}
+if ($handoffText.Length -le 6000) {
+    Set-Clipboard -Value $handoffText
+    Write-Host 'A compact, secret-free summary is copied. Paste it directly into ChatGPT.'
+} else {
+    Write-Host 'The summary exceeds the clipboard bound; the full report is still saved.'
+}
 Write-Host "Saved report: $reportPath"
 Write-Host 'Existing tokens, links, owner settings, receiver, traffic and recovery resources were preserved.'
 if ($incidentExitCode -ne 0 -or $report.scan_complete -ne $true) {

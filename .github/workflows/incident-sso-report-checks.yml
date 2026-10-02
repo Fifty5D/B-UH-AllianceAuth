@@ -53,6 +53,22 @@ jobs:
     name: Read-only report on real pinned Django models
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    services:
+      db:
+        image: mariadb:11.8@sha256:2439dcd7d14010ecd1ff7a4e1c5abe8e208c34fe35290744deeeaac3569043c3
+        env:
+          MARIADB_ROOT_PASSWORD: test-only-root
+          MARIADB_DATABASE: buh_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -83,4 +99,15 @@ jobs:
           ruff check ops/incidents
           export PYTHONPATH="$PWD/platform/testauth:$PWD"
           export BUH_TEST_SETTINGS=testauth.settings.unit
+          python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks
+      - name: Exercise fresh MariaDB sessions and the production shell invocation
+        env:
+          BUH_TEST_SETTINGS: testauth.settings.integration
+          BUH_DB_HOST: 127.0.0.1
+          BUH_DB_USER: root
+          BUH_DB_PASSWORD: test-only-root
+          BUH_REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/platform/testauth:$PWD"
           python platform/testauth/manage.py test --noinput --no-color ops.incidents.django_checks

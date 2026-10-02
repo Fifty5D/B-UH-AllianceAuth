@@ -1,5 +1,7 @@
 """Use the installed AA/Structures/Member Audit models with synthetic data."""
+import io
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from app_utils.testing import NoSocketsTestCase
@@ -7,13 +9,16 @@ from app_utils.testdata_factories import EveCharacterFactory, EveCorporationInfo
 from allianceauth.authentication.models import CharacterOwnership
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.db import transaction
+from django.core.management import call_command
+from django.db import connection, transaction
+from django.db.utils import load_backend
 from esi.managers import TokenQueryset
 from esi.models import Scope, Token
 from memberaudit.models import Character, CharacterUpdateStatus
 from structures.models import Owner, OwnerCharacter
 
 from ops.incidents import database_report as reporter
+from ops.incidents import collect_sso_incident as host_reporter
 
 
 class DatabaseReportTests(NoSocketsTestCase):
@@ -120,3 +125,48 @@ class DatabaseReportTests(NoSocketsTestCase):
                 with transaction.atomic():
                     reporter.collect()
         self.assertTrue(Token.objects.filter(pk=self.token.pk).exists())
+
+    def test_actual_django_shell_program_emits_the_same_read_only_inventory(self):
+        source = Path(reporter.__file__).read_text(encoding="utf-8")
+        before = (list(Token.objects.values()), list(CharacterOwnership.objects.values()),
+                  list(OwnerCharacter.objects.values()), list(CharacterUpdateStatus.objects.values()))
+        with (patch("sys.stdout", new_callable=io.StringIO) as output,
+              patch.object(Token, "refresh", side_effect=AssertionError("must not refresh")),
+              patch.object(TokenQueryset, "require_valid", side_effect=AssertionError("must not cleanup"))):
+            call_command("shell", command=host_reporter.database_program(source),
+                         verbosity=0, no_imports=True)
+        result = host_reporter.parse_database_output(output.getvalue())
+        self.assertTrue(result["scan_complete"], result.get("report_frames"))
+        self.assertEqual(self.owner_row(result)["owner_pk"], self.owner.pk)
+        self.assertEqual(before, (list(Token.objects.values()),
+                                 list(CharacterOwnership.objects.values()),
+                                 list(OwnerCharacter.objects.values()),
+                                 list(CharacterUpdateStatus.objects.values())))
+
+    def test_fresh_mysql_session_setup_precedes_guarded_report_queries(self):
+        if connection.vendor != "mysql":
+            self.skipTest("Fresh session SET regression needs actual MariaDB/MySQL")
+        backend = load_backend(connection.settings_dict["ENGINE"])
+        fresh = backend.DatabaseWrapper(connection.settings_dict.copy(), alias="incident-fresh")
+        try:
+            # Reproduce the original fresh-shell failure without touching data.
+            with self.assertRaises(RuntimeError):
+                with fresh.execute_wrapper(reporter.reject_writes):
+                    with fresh.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+            fresh.close()
+
+            def selected():
+                with fresh.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    return {"selected": cursor.fetchone()[0]}
+
+            with (patch("django.db.connection", fresh),
+                  patch.object(reporter, "_collect", side_effect=selected)):
+                self.assertEqual(reporter.collect(), {"selected": 1})
+            with fresh.execute_wrapper(reporter.reject_writes):
+                with self.assertRaises(RuntimeError):
+                    with fresh.cursor() as cursor:
+                        cursor.execute("UPDATE esi_token SET refresh_token='never-run'")
+        finally:
+            fresh.close()

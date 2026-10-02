@@ -31,7 +31,7 @@ MARKER_FIELDS = {
 }
 
 
-def read_file(path, maximum=1024 * 1024):
+def read_file(path, maximum=1024 * 1024, *, allow_directory=False):
     """No-follow bounded metadata/hash; never export file bytes by default."""
     path = Path(path)
     if not path.is_absolute() or ".." in path.parts:
@@ -49,12 +49,19 @@ def read_file(path, maximum=1024 * 1024):
         return {"exists": False}, None
     try:
         details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or stat.S_IMODE(details.st_mode) & 0o022:
+        directory = stat.S_ISDIR(details.st_mode)
+        if (not (stat.S_ISREG(details.st_mode) or (allow_directory and directory))
+                or details.st_uid != 0 or stat.S_IMODE(details.st_mode) & 0o022):
             raise ValueError("unsafe evidence file")
         metadata = {"exists": True, "size": details.st_size,
                     "mode": oct(stat.S_IMODE(details.st_mode)),
                     "uid": details.st_uid, "gid": details.st_gid,
                     "mtime": datetime.fromtimestamp(details.st_mtime, timezone.utc).isoformat()}
+        metadata["kind"] = "directory" if directory else "file"
+        if directory:
+            metadata["hash_status"] = "not_applicable_directory"
+            metadata["content_audit"] = "not_recursively_verified"
+            return metadata, None
         if details.st_size > maximum:
             metadata["hash_status"] = "not_hashed_over_bound"
             return metadata, None
@@ -68,6 +75,43 @@ def read_file(path, maximum=1024 * 1024):
         return metadata, data
     finally:
         os.close(descriptor)
+
+
+def backup_inventory(directory, expected):
+    """Inventory every entry; preserve and report the normal static directory."""
+    details = directory.lstat()
+    if (not stat.S_ISDIR(details.st_mode) or details.st_uid != 0
+            or stat.S_IMODE(details.st_mode) & 0o077):
+        raise ValueError("unsafe backup directory")
+    paths = sorted(directory.iterdir())
+    if len(paths) > 64:
+        raise ValueError("backup inventory exceeds bound")
+    entries, errors = [], []
+    for path in paths:
+        try:
+            metadata, _ = read_file(
+                path, maximum=1024 * 1024,
+                allow_directory=path.name == "previous-static-root",
+            )
+            metadata["name"] = path.name
+            if path.name in expected:
+                metadata["expected_sha256"] = expected[path.name]
+                metadata["matches_expected_sha256"] = (
+                    metadata.get("sha256") == expected[path.name]
+                    if "sha256" in metadata else None
+                )
+            entries.append(metadata)
+        except Exception as exc:
+            errors.append({"section": "backup_inventory", "entry": path.name,
+                           "error_type": type(exc).__name__})
+            entries.append({"name": path.name, "error_type": type(exc).__name__,
+                            "payload_read": False})
+    return entries, errors
+
+
+def database_program(code):
+    """Use a named source frame so a safe failure site survives Django shell."""
+    return "exec(compile(" + repr(code) + ", '<buh-database-report>', 'exec'));emit()"
 
 
 def projection(value, fields):
@@ -289,23 +333,12 @@ def collect():
 
     def backups():
         directory = config.backup_dir / ATTEMPT
-        details = directory.lstat()
-        if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0 or stat.S_IMODE(details.st_mode) & 0o077:
-            raise ValueError("unsafe backup directory")
-        paths = sorted(directory.iterdir())
-        if len(paths) > 64:
-            raise ValueError("backup inventory exceeds bound")
         expected = (report.get("recovery_hold") or {}).get("backup_files", {})
-        for path in paths:
-            metadata, _ = read_file(path, maximum=1024 * 1024)
-            metadata["name"] = path.name
-            if path.name in expected:
-                metadata["expected_sha256"] = expected[path.name]
-                metadata["matches_expected_sha256"] = (
-                    metadata.get("sha256") == expected[path.name]
-                    if "sha256" in metadata else None
-                )
-            report["backup_inventory"].append(metadata)
+        entries, errors = backup_inventory(directory, expected)
+        report["backup_inventory"] = entries
+        if errors:
+            report["scan_complete"] = False
+            report["errors"].extend(errors)
     section("backup_inventory", backups)
     report["configuration_matches_retained_backup"] = {}
     for current, previous in (("local_settings", "local.py"), ("dockerfile", "custom.dockerfile"),
@@ -342,7 +375,7 @@ def collect():
 
     def database():
         code = (Path(__file__).with_name("database_report.py")).read_text(encoding="utf-8")
-        program = "exec(" + repr(code) + ");emit()"
+        program = database_program(code)
         output = host._manage_live("shell", "-c", program, context="Read-only token incident database evidence")
         value = parse_database_output(output)
         if not value["scan_complete"]:
@@ -375,6 +408,36 @@ def collect():
             "public_identity_esi",
             lambda: public_identity_inventory(report["database"], owners_with_errors),
         )
+    def prior_database_failures():
+        # Only the known earlier read-only collector's private, retained reports.
+        paths = sorted(Path("/root").glob(
+            "buh-sso-incident-e635c833-*/incident-report.json"))
+        if len(paths) > 8:
+            raise ValueError("prior report inventory exceeds bound")
+        values = []
+        for path in paths:
+            metadata, data = read_file(path)
+            if data is None:
+                values.append({"report_sha256": metadata.get("sha256"),
+                               "read_result": "not_read_over_bound"})
+                continue
+            previous = json.loads(data)
+            if (previous.get("read_only") is not True or
+                    previous.get("diagnostic_source_commit") !=
+                    "e635c83359492c06309ad588e55fb1a630f261da"):
+                raise ValueError("unexpected prior diagnostic source")
+            error_type = (previous.get("database") or {}).get("error_type")
+            if error_type is not None and not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type):
+                raise ValueError("unexpected diagnostic category")
+            values.append({"report_sha256": metadata.get("sha256"),
+                           "database_scan_complete":
+                               (previous.get("database") or {}).get("scan_complete"),
+                           "database_error_type": error_type})
+        return values
+    report["prior_database_failures"] = section(
+        "prior_database_failures", prior_database_failures)
+
     def lock_state():
         import fcntl
         descriptor = os.open(config.state_dir / "deploy.lock", os.O_RDONLY | os.O_NOFOLLOW)
