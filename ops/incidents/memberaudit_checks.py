@@ -324,12 +324,14 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
         self.assertTrue(result["record_presence"]["matching_baseline_token_exists"])
         self.assertEqual(calls, 0)
 
-    def test_missing_stored_scope_does_not_clear_outage_state(self):
+    def test_missing_scope_metadata_is_not_permanent_without_fresh_signed_rejection(self):
         self.token.scopes.clear()
         result, calls = self.invoke()
-        self.assertEqual(result["category"], "missing_required_scopes", result)
-        self.assertEqual(calls, 0)
+        self.assertEqual(result["category"], "stored_scope_metadata_inconsistent", result)
+        self.assertEqual(calls, 1)
         self.assertFalse(result["recovered"])
+        self.assertFalse(result["requires_reauthorization"])
+        self.assertTrue(result["token_attempts"][0]["signed_identity_and_scopes_verified"])
 
     def test_raw_token_delete_and_auth_update_are_blocked(self):
         with transaction.atomic(), recovery.credential_guard(self.token, recovery.identity(self.token)):

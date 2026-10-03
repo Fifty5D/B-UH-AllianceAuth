@@ -339,10 +339,10 @@ def candidates(target, member):
     matching = [t for t in existing if link.owner_hash and t.character_owner_hash == link.owner_hash]
     if not matching:
         raise RecoveryStop("stored_ownership_mismatch_unproven")
-    scoped = [t for t in matching if not (required - set(t.scopes.values_list("name", flat=True)))]
-    if not scoped:
-        raise RecoveryStop("missing_required_scopes")
-    usable = [t for t in scoped if t.refresh_token]
+    # These are frozen, originally full-scope grants. Fresh signed claims, rather
+    # than possibly stale scope-table metadata, decide a permanent scope rejection.
+    usable = [t for t in matching if t.refresh_token]
+    usable.sort(key=lambda t: (bool(required - set(t.scopes.values_list("name", flat=True))), t.pk))
     if not usable:
         raise RecoveryStop("missing_refresh_credential")
     return usable
@@ -390,6 +390,11 @@ def refresh_existing(target, member, outcomes):
             # Never roll back a rotated refresh credential when later validation/update fails.
             outcome.update({"refresh_succeeded": True, "refreshed_at": stamp(token.created)})
             verify_claims(token, member)
+            outcome["signed_identity_and_scopes_verified"] = True
+            missing = sorted(set(member.esi_scopes()) - set(token.scopes.values_list("name", flat=True)))
+            if missing:
+                outcome["missing_stored_scope_metadata"] = missing
+                raise RecoveryStop("stored_scope_metadata_inconsistent")
             outcome.update({"refresh_succeeded": True, "signed_identity_and_scopes_verified": True,
                             "refreshed_at": stamp(token.created), "category": "valid_existing_grant"})
             return token
@@ -699,7 +704,8 @@ def run(target, *, apply=False):
             result["network"] = network
         # No missing link or arbitrary 403 is proof that a stored credential is revoked.
         result["requires_reauthorization"] = (
-            result["phase"] == "refresh_existing_token"
+            bool(result["token_attempts"])
+            and result["phase"] == "refresh_existing_token"
             and result["category"] in {"permanent_invalid_grant", "permanent_ownership_mismatch", "missing_required_scopes"}
         )
     finally:
