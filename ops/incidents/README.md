@@ -212,3 +212,55 @@ It does not repeat recovery on any failure, missing plan or unknown outcome.
 Failed reports export only fixed guard categories, phase and bounded function/
 line information; raw command logs, exception messages and secrets stay private.
 The launcher saves one bounded combined Desktop/root-private JSON report.
+
+
+## Member Audit only while the retained deployment stays held
+
+run-memberaudit-recovery.ps1 defaults to report mode. Apply mode uses the existing
+qualified private diagnostic roster, bound to its SHA-256 and October outage
+time/error shape. It requires exactly 87 linked characters / 348 sections and
+excludes the 12 older characters / 61 sections. No production roster or payload
+is committed to this repository.
+
+The host remains on verified v0.8.2. The existing host helper performs read-only
+runtime, traffic, resource and public-smoke checks. This command never calls the
+retained deployment recovery API, changes its hold, removes safety containers,
+installs application code, publishes a release or resumes deployment. The hold,
+journal, current markers, retained backup inventory and container identities are
+compared before and after.
+
+The sequence is one four-section character, three representatives from different
+users, five characters, then groups of at most ten. Every token is freshly
+refreshed on its existing row, signed identity/scopes and Auth ownership are
+verified, and only the frozen sticky section states may be reset. Alternative
+existing full-scope grants are tried only after an individually proven permanent
+failure. Cleanup/replacement APIs and credential/Auth SQL mutations are blocked.
+A rotated grant commits before any section transaction, so later provider failures
+cannot restore an already-consumed refresh credential.
+
+Native MA methods and update logging execute synchronously for only selected
+sections. Contacts include labels; mail includes subscriptions, labels, headers
+and bounded missing bodies. Native mail/wallet history pruning is suppressed and
+raw history deletion is blocked. Current cache replacement is limited to the
+selected character, including native M2M deletes. Actual payload hashes, reread
+database row digests, persisted status timestamps and unchanged token/link
+inventories are recorded without token values, exception messages, mail bodies,
+ship names or other payload contents. A native HTTP-500 fallback cannot count as
+a successful recovery.
+
+Each character is bounded to 360 seconds, 256 requests and 128 missing mail bodies.
+The sequence stops on the first incomplete recovery, altered excluded states,
+provider throttle/5xx/error-budget failure, unexpected host identity or safety
+threshold. Total runtime is bounded to 45 minutes plus the current operation.
+Atomic root-private progress reports survive a stopped sequence. The launcher
+saves one JSON report to the owner's Desktop, with exact partial/unattempted counts.
+Safe reruns validate the same frozen selection and recognize later persisted
+successful sections instead of resetting them.
+
+Focused synthetic checks use the pinned AA/MA/ESI models on SQLite and MariaDB,
+native four-section persistence, empty and compound pulls, transient and permanent
+refresh failures, alternative grants, history retention, partial commits,
+idempotency, scope/link/token distinctions and raw mutation guards. Launcher checks
+execute the extracted root program with synthetic archives; no production SSH or
+SSO calls occur during testing. These staged helpers remain outside registered
+application/release inputs.
