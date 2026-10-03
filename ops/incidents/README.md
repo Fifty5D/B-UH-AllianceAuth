@@ -254,8 +254,9 @@ provider throttle/5xx/error-budget failure, unexpected host identity or safety
 threshold. Total runtime is bounded to 45 minutes plus the current operation.
 Atomic root-private progress reports survive a stopped sequence. The launcher
 saves one JSON report to the owner's Desktop, with exact partial/unattempted counts.
-Safe reruns validate the same frozen selection and recognize later persisted
-successful sections instead of resetting them.
+Safe reruns validate the same frozen selection and freshly verify its payloads,
+including sections with later green statuses; native current caches are replaced
+without duplicating retained history or creating credentials.
 
 Focused synthetic checks use the pinned AA/MA/ESI models on SQLite and MariaDB,
 native four-section persistence, empty and compound pulls, transient and permanent

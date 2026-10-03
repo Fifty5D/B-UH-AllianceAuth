@@ -179,6 +179,26 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
         self.assertEqual(models.CharacterSkillqueueEntry.objects.filter(character=self.member).count(), 1)
         self.assert_preserved(result)
 
+    def test_later_green_status_with_missing_native_row_still_requires_real_payload(self):
+        for item in self.target["sections"]:
+            CharacterUpdateStatus.objects.filter(pk=item["status_pk"]).update(
+                has_token_error=False, is_success=True, error_message="",
+                run_started_at=now(), run_finished_at=now(), content_hash_1="a" * 32,
+            )
+        self.assertFalse(models.CharacterLocation.objects.filter(character=self.member).exists())
+        result, _ = self.invoke()
+        self.assertTrue(result["recovered"], result)
+        self.assertTrue(models.CharacterLocation.objects.filter(character=self.member).exists())
+        self.assertEqual(models.CharacterOnlineStatus.objects.get(character=self.member).logins, 23)
+        self.assertTrue(all(s.get("payloads") for s in result["sections"]))
+
+    def test_raw_same_pk_token_identity_change_is_blocked(self):
+        with transaction.atomic(), recovery.credential_guard(self.token, recovery.identity(self.token)):
+            with self.assertRaises(recovery.RecoveryStop):
+                Token.objects.filter(pk=self.token.pk).update(character_id=999999999)
+        self.token.refresh_from_db()
+        self.assertEqual(self.token.character_id, self.character.character_id)
+
     def test_report_mode_has_no_refresh_or_status_mutation(self):
         before = list(CharacterUpdateStatus.objects.values())
         result, calls = self.invoke(apply=False)
@@ -233,14 +253,16 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
         self.assertEqual(self.token.refresh_token, self.grant["refresh_token"])
         self.assert_preserved(result)
 
-    def test_idempotent_rerun_proves_success_without_repeating_native_sections(self):
+    def test_idempotent_rerun_proves_fresh_payloads_without_duplicate_current_rows(self):
         first, _ = self.invoke()
         self.assertTrue(first["recovered"], first)
         values = list(CharacterUpdateStatus.objects.filter(character=self.member).values())
         again, _ = self.invoke()
         self.assertTrue(again["recovered"], again)
-        self.assertEqual(values, list(CharacterUpdateStatus.objects.filter(character=self.member).values()))
-        self.assertTrue(all(s["category"] == "already_completed_after_outage" for s in again["sections"]))
+        self.assertEqual(len(values), CharacterUpdateStatus.objects.filter(character=self.member).count())
+        self.assertEqual(models.CharacterSkillqueueEntry.objects.filter(character=self.member).count(), 1)
+        self.assertTrue(all(s["previous_state"] == "already_completed_after_outage" for s in again["sections"]))
+        self.assert_preserved(again)
 
     def test_empty_queue_is_real_success_and_replaces_selected_current_queue_only(self):
         first, _ = self.invoke()

@@ -56,7 +56,7 @@ def classify(error):
                     "unauthorized_client", "temporarily_unavailable", "server_error"}:
             codes.add(code)
         status = getattr(current, "status_code", None)
-        if type(status) is int and 100 <= status <= 599:
+        if isinstance(status, int) and 100 <= status <= 599:
             statuses.add(status)
         if name == "InvalidTokenError" and getattr(current, "description", None) == "Ownership Changed! Revoke me!":
             mismatch = True
@@ -388,6 +388,7 @@ def refresh_existing(target, member, outcomes):
                 if identity(token) != expected or token.created <= before:
                     raise RecoveryStop("fresh_refresh_not_proven")
             # Never roll back a rotated refresh credential when later validation/update fails.
+            outcome.update({"refresh_succeeded": True, "refreshed_at": stamp(token.created)})
             verify_claims(token, member)
             outcome.update({"refresh_succeeded": True, "signed_identity_and_scopes_verified": True,
                             "refreshed_at": stamp(token.created), "category": "valid_existing_grant"})
@@ -583,9 +584,8 @@ def update_one(member, selected, token):
         with transaction.atomic(), preserve_history(member) as history:
             Character.objects.select_for_update().get(pk=member.pk)
             status, state = outage_status(member, selected, lock=True)
-            if state == "already_completed_after_outage":
-                return {"section": section, "verified": True, "category": state,
-                        "status": status_evidence(status), "retained_rows": before_rows}
+            # A later green status can come from the native HTTP-500 fallback.
+            # Revalidate the selected payload; never accept status/hash metadata alone.
             if section not in Character.UpdateSection.enabled_sections():
                 raise RecoveryStop("outage_section_no_longer_enabled")
             started = now()
@@ -627,7 +627,7 @@ def update_one(member, selected, token):
             step = {"section": section, "verified": True, "category": "recovered_existing_token",
                     "status": status_evidence(status), "payloads": observations,
                     "before_rows": before_rows, "retained_rows": after_rows,
-                    "mail_bodies_retained": bodies, **history}
+                    "mail_bodies_retained": bodies, "previous_state": state, **history}
         # Independently reread AFTER the section transaction has committed.
         persisted = CharacterUpdateStatus.objects.get(pk=selected["status_pk"])
         if status_evidence(persisted) != step["status"] or retained_rows(member, section) != after_rows:
@@ -650,6 +650,10 @@ def run(target, *, apply=False):
     }
     before = inventory(target)
     result["before_token_inventory"] = before
+    ownership_before = CharacterOwnership.objects.filter(pk=target["auth_link_pk"]).values(
+        "pk", "user_id", "character_id", "owner_hash",
+    ).first()
+    result["before_auth_identity_sha256"] = digest(ownership_before)
     result["record_presence"] = {
         "auth_link_exists": link_matches(target),
         "matching_baseline_token_exists": Token.objects.filter(
@@ -701,9 +705,15 @@ def run(target, *, apply=False):
     finally:
         result["after_token_inventory"] = inventory(target)
         result["same_token_inventory"] = result["after_token_inventory"] == before
+        ownership_after = CharacterOwnership.objects.filter(pk=target["auth_link_pk"]).values(
+            "pk", "user_id", "character_id", "owner_hash",
+        ).first()
+        result["after_auth_identity_sha256"] = digest(ownership_after)
         result["same_auth_link"] = link_matches(target)
+        result["same_auth_owner_identity"] = ownership_before == ownership_after
         result["finished_at"] = stamp(now())
-        if not result["same_token_inventory"] or not result["same_auth_link"]:
+        if (not result["same_token_inventory"] or not result["same_auth_link"]
+                or not result["same_auth_owner_identity"]):
             result["recovered"] = False
             result["preservation_failure"] = True
     return result
