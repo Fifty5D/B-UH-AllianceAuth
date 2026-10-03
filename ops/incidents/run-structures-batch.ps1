@@ -169,6 +169,7 @@ $report = [ordered]@{
     recovered_in_this_batch = @($attempts | Where-Object { $_.report.result.recovered -eq $true }).Count
     initial_pilot_report = $initial.report; attempts = $attempts; latest_outage_snapshot = $snapshot
     latest_host_evidence = $latest.after_host
+    retained_incident_evidence = $initial.report.retained_incident_evidence
 }
 $desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $desktop) { $desktop = (Get-Location).Path }

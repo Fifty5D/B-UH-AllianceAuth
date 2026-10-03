@@ -1,4 +1,5 @@
 """Exercise existing-token repair on the real pinned production models and native sync methods."""
+from contextlib import contextmanager
 import io
 import json
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from allianceauth.authentication.models import CharacterOwnership
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.core.management import call_command
+from django.db import connection
+from eveuniverse.models import EveSolarSystem, EveType
 from django.utils.timezone import now
 from esi.errors import TokenInvalidError
 from esi.managers import TokenManager, TokenQueryset
@@ -20,7 +23,8 @@ from requests import Response
 from requests.exceptions import Timeout
 import requests
 from requests_oauthlib import OAuth2Session
-from structures.models import Notification, Owner, OwnerCharacter
+from structures.models import FuelAlert, Notification, Owner, OwnerCharacter, Structure, StructureService
+from structures.tests.testdata.factories import FuelAlertFactory, StructureFactory, StructureItemFactory
 from structures.models import owners as owners_module
 
 from ops.incidents import structures_recovery as recovery
@@ -71,6 +75,7 @@ class StructuresRecoveryTests(NoSocketsTestCase):
             Character=SimpleNamespace(GetCharactersCharacterIdNotifications=MagicMock()),
             Corporation=SimpleNamespace(GetCorporationsCorporationIdStructures=MagicMock()),
             Assets=SimpleNamespace(GetCorporationsCorporationIdAssets=MagicMock()),
+            Universe=SimpleNamespace(GetUniverseStructuresStructureId=MagicMock()),
         )
         self.public_payload = {"corporation_id": self.corp.corporation_id}
         self.public_status = 200
@@ -139,6 +144,145 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.ma_status.refresh_from_db()
         self.assertTrue(self.ma_status.has_token_error)
         self.assertEqual(list(Notification.objects.filter(pk=self.retained.pk).values()), self.retained_values)
+
+    @contextmanager
+    def nonempty_native_sync(self):
+        """Use real native structure/service/item persistence with bounded ESI fixtures."""
+        structure = StructureFactory(owner=self.owner, quantum_core=False)
+        payload = {
+            "structure_id": structure.pk, "type_id": structure.eve_type_id,
+            "system_id": structure.eve_solar_system_id, "state": "shield_vulnerable",
+            "fuel_expires": structure.fuel_expires_at,
+            "services": [{"name": "Manufacturing", "state": "online"},
+                         {"name": "Research", "state": "offline"}],
+        }
+        universe = {"name": structure.name, "position": {
+            "x": structure.position_x, "y": structure.position_y, "z": structure.position_z,
+        }}
+        self.client.Corporation.GetCorporationsCorporationIdStructures.return_value.results.return_value = [
+            SimpleNamespace(model_dump=lambda: payload.copy())
+        ]
+        self.client.Universe.GetUniverseStructuresStructureId.return_value.result.return_value = (
+            SimpleNamespace(model_dump=lambda: universe.copy())
+        )
+        with (patch.object(EveType.objects, "get_or_create_esi",
+                           return_value=(structure.eve_type, False)),
+              patch.object(EveSolarSystem.objects, "get_or_create_esi",
+                           return_value=(structure.eve_solar_system, False))):
+            yield structure
+
+    def test_nonempty_native_sync_replaces_only_selected_owner_current_services_and_items(self):
+        other_owner = Owner.objects.create(corporation=EveCorporationInfoFactory(), is_active=True)
+        other_structure = StructureFactory(owner=other_owner, quantum_core=False)
+        other_service = StructureService.objects.create(
+            structure=other_structure, name="Unrelated", state=StructureService.State.OFFLINE,
+        )
+        other_item = StructureItemFactory(structure=other_structure)
+        other_service_values = list(StructureService.objects.filter(pk=other_service.pk).values())
+        other_item_values = list(type(other_item).objects.filter(pk=other_item.pk).values())
+        with self.nonempty_native_sync() as structure:
+            created_at = structure.created_at
+            old_service = StructureService.objects.create(
+                structure=structure, name="Obsolete", state=StructureService.State.ONLINE,
+            )
+            old_item = StructureItemFactory(structure=structure)
+            result, _ = self.invoke()
+        self.assertTrue(result["recovered"], result)
+        self.assertEqual(result["after"]["current_service_count"], 2)
+        self.assertEqual(result["after"]["current_item_count"], 0)
+        self.assertFalse(StructureService.objects.filter(pk=old_service.pk).exists())
+        self.assertFalse(type(old_item).objects.filter(pk=old_item.pk).exists())
+        self.assertEqual(set(structure.services.values_list("name", "state")), {
+            ("Manufacturing", StructureService.State.ONLINE),
+            ("Research", StructureService.State.OFFLINE),
+        })
+        structure.refresh_from_db()
+        self.assertEqual(structure.created_at, created_at)
+        self.assertEqual(structure.owner_id, self.owner.pk)
+        self.assertTrue(Structure.objects.filter(pk=other_structure.pk).exists())
+        self.assertEqual(list(StructureService.objects.filter(pk=other_service.pk).values()),
+                         other_service_values)
+        self.assertEqual(list(type(other_item).objects.filter(pk=other_item.pk).values()), other_item_values)
+        self.assertTrue(all(step["committed"] for step in result["steps"]))
+        self.assert_preserved()
+
+    def test_native_service_replacement_rolls_back_when_later_assets_pull_fails(self):
+        with self.nonempty_native_sync() as structure:
+            service = StructureService.objects.create(
+                structure=structure, name="Retained", state=StructureService.State.OFFLINE,
+            )
+            before = list(StructureService.objects.filter(structure=structure).values())
+            self.client.Assets.GetCorporationsCorporationIdAssets.return_value.results.side_effect = Timeout()
+            result, _ = self.invoke()
+        self.assertFalse(result["recovered"])
+        self.assertEqual(result["failure_phase"], "update_asset_esi")
+        self.assertEqual(list(StructureService.objects.filter(pk=service.pk).values()), before)
+        self.selector.refresh_from_db()
+        self.assertFalse(self.selector.is_enabled)
+        self.token.refresh_from_db()
+        self.assertEqual(self.token.refresh_token, self.grant["refresh_token"])
+        self.assert_preserved()
+
+    def test_other_owner_current_service_deletion_still_fails_closed(self):
+        other_owner = Owner.objects.create(corporation=EveCorporationInfoFactory(), is_active=True)
+        other_structure = StructureFactory(owner=other_owner, quantum_core=False)
+        service = StructureService.objects.create(
+            structure=other_structure, name="Unrelated", state=StructureService.State.ONLINE,
+        )
+
+        def destructive_sync(owner):
+            StructureService.objects.filter(pk=service.pk).delete()
+
+        result, _ = self.invoke(extra=patch.object(Owner, "update_structures_esi", destructive_sync))
+        self.assertEqual(result["category"], "protected_record_deletion_blocked")
+        self.assertEqual(result["protected_record_type"], "structures.structureservice")
+        self.assertTrue(StructureService.objects.filter(pk=service.pk).exists())
+        self.assert_preserved()
+
+    def test_raw_current_service_deletion_requires_owner_checked_django_signals(self):
+        structure = StructureFactory(owner=self.owner, quantum_core=False)
+        service = StructureService.objects.create(
+            structure=structure, name="Retained", state=StructureService.State.ONLINE,
+        )
+
+        def destructive_sync(owner):
+            StructureService.objects.filter(pk=service.pk)._raw_delete("default")
+
+        result, _ = self.invoke(extra=patch.object(Owner, "update_structures_esi", destructive_sync))
+        self.assertEqual(result["category"], "protected_record_deletion_blocked")
+        self.assertEqual(result["protected_record_type"], "unverified_sql_delete")
+        self.assertTrue(StructureService.objects.filter(pk=service.pk).exists())
+        self.assert_preserved()
+
+    def test_structure_and_fuel_alert_history_deletion_remain_blocked(self):
+        structure = StructureFactory(owner=self.owner, quantum_core=False)
+        alert = FuelAlertFactory(structure=structure)
+        for model, record in ((FuelAlert, alert), (Structure, structure)):
+            with self.subTest(model=model._meta.label_lower):
+                def destructive_sync(owner):
+                    model.objects.filter(pk=record.pk).delete()
+
+                result, _ = self.invoke(extra=patch.object(Owner, "update_structures_esi", destructive_sync))
+                self.assertEqual(result["category"], "protected_record_deletion_blocked")
+                self.assertFalse(result["recovered"])
+                self.assertTrue(Structure.objects.filter(pk=structure.pk).exists())
+                self.assertTrue(FuelAlert.objects.filter(pk=alert.pk).exists())
+                self.assert_preserved()
+
+    def test_raw_other_owner_item_deletion_cannot_use_current_snapshot_exception(self):
+        other_owner = Owner.objects.create(corporation=EveCorporationInfoFactory(), is_active=True)
+        other_structure = StructureFactory(owner=other_owner, quantum_core=False)
+        item = StructureItemFactory(structure=other_structure)
+
+        def destructive_sync(owner):
+            item_table = connection.ops.quote_name(type(item)._meta.db_table)
+            with connection.cursor() as cursor:
+                cursor.execute(f"DELETE FROM {item_table}", [])
+
+        result, _ = self.invoke(extra=patch.object(Owner, "update_structures_esi", destructive_sync))
+        self.assertEqual(result["category"], "protected_record_deletion_blocked")
+        self.assertTrue(type(item).objects.filter(pk=item.pk).exists())
+        self.assert_preserved()
 
     def test_native_sync_success_keeps_existing_token_and_link_then_reenables_only_selector(self):
         started = now()

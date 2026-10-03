@@ -142,3 +142,24 @@ claim that notification forwarding or periodic status evaluation has completed.
 Host memory availability and sustained load are checked before and after each
 pilot alongside the existing disk/runtime/public-smoke guards. No notification
 webhook is manually sent by the recovery tools.
+
+
+Native Structures replaces current service rows as part of a non-empty structure
+sync, just as it replaces current asset items. The recovery guard permits those
+two current snapshots only for the selected owner. Each SQL delete must name
+exact primary keys already checked by the Django deletion signal; raw deletes,
+other owners, credentials, links, Structures, notifications and fuel-alert
+history stay blocked. A later sync failure rolls back those replacements while
+retaining the refreshed grant on the same token record.
+
+Focused SQLite and MariaDB regression checks exercise the real non-empty native
+manager/service/item persistence, another owner's unchanged rows, late failure
+rollback, and blocked raw/history deletion. Failure reports identify the safe
+model category that was blocked, without SQL, parameters or credentials.
+
+Initial report mode also includes the sanitized Member Audit/token/section and
+retained recovery evidence already collected in the qualified incident report.
+Its original observation time and SHA-256 remain explicit; it is not a fresh
+validation of Member Audit grants and does not repeat the database collection.
+The combined private batch report carries this evidence once, rather than
+duplicating it for every apply operation.

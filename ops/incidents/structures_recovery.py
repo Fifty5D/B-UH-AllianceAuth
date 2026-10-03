@@ -19,7 +19,7 @@ from django.db import connection, transaction
 from django.db.models.signals import pre_delete, pre_save
 from django.utils.timezone import now
 from esi.models import Token
-from structures.models import Owner, OwnerCharacter, Structure
+from structures.models import Owner, OwnerCharacter, Structure, StructureItem, StructureService
 
 
 DISABLE_REASON = "No valid token found for character"
@@ -30,9 +30,10 @@ SYNC_FIELDS = (
 
 
 class RecoveryStop(Exception):
-    def __init__(self, category, *, status_code=None):
+    def __init__(self, category, *, status_code=None, protected_record_type=None):
         self.category = category
         self.status_code = status_code
+        self.protected_record_type = protected_record_type
         super().__init__(category)
 
 
@@ -73,8 +74,13 @@ def exception_category(error):
         category = error.category
     else:
         category = "retryable_or_unclassified_failure"
-    return {"category": category, "exception_types": classes,
-            "oauth_codes": sorted(set(oauth)), "http_statuses": sorted(set(statuses))}
+    result = {"category": category, "exception_types": classes,
+              "oauth_codes": sorted(set(oauth)), "http_statuses": sorted(set(statuses))}
+    if isinstance(error, RecoveryStop) and error.protected_record_type and re.fullmatch(
+        r"[a-z_][a-z0-9_.]{0,100}", error.protected_record_type,
+    ):
+        result["protected_record_type"] = error.protected_record_type
+    return result
 
 
 
@@ -153,12 +159,27 @@ def identity(token):
 
 @contextmanager
 def preserve_records(owner_pk, token_pk, expected_token_identity):
-    """Refuse deletion of any history/link/token; allow native current item replacement."""
+    """Keep history/credentials; replace only this owner's current items/services."""
+    current_models = (StructureItem, StructureService)
+    approved_ids = {model._meta.db_table: set() for model in current_models}
+    delete_patterns = {}
+    for table in approved_ids:
+        qualified_id = connection.ops.quote_name(table) + "." + connection.ops.quote_name("id")
+        delete_patterns[table] = re.compile(
+            r"DELETE\s+FROM\s+" + re.escape(connection.ops.quote_name(table))
+            + r"\s+WHERE\s+" + re.escape(qualified_id)
+            + r"\s+IN\s*\((?P<slots>%s(?:,\s*%s)*)\)\s*;?",
+            re.I,
+        )
+
     def before_delete(sender, instance, **kwargs):
-        if sender._meta.label_lower == "structures.structureitem":
-            if instance.structure.owner_id == owner_pk:
-                return
-        raise RecoveryStop("protected_record_deletion_blocked")
+        if sender in current_models and instance.structure.owner_id == owner_pk:
+            approved_ids[sender._meta.db_table].add(instance.pk)
+            if len(approved_ids[sender._meta.db_table]) > 50000:
+                raise RecoveryStop("current_snapshot_replacement_exceeds_bound")
+            return
+        raise RecoveryStop("protected_record_deletion_blocked",
+                           protected_record_type=sender._meta.label_lower)
 
     def before_save(sender, instance, **kwargs):
         if sender is Token and (
@@ -171,12 +192,23 @@ def preserve_records(owner_pk, token_pk, expected_token_identity):
             ).first()
             if instance.owner_id != owner_pk or previous not in {None, owner_pk}:
                 raise RecoveryStop("structure_owner_change_blocked")
+        if sender in current_models and instance.structure.owner_id != owner_pk:
+            raise RecoveryStop("current_snapshot_owner_change_blocked")
 
     def guard_sql(execute, sql, params, many, context):
-        command = sql.lstrip()
+        command = sql.strip()
         if re.match(r"DELETE\s", command, re.I):
-            if not re.match(r"DELETE\s+FROM\s+[\"\x60]?structures_structureitem[\"\x60]?\s", command, re.I):
-                raise RecoveryStop("protected_record_deletion_blocked")
+            for table, pattern in delete_patterns.items():
+                match = pattern.fullmatch(command)
+                if match and not many and params and (
+                    len(params) == match.group("slots").count("%s")
+                    and all(type(value) is int and value in approved_ids[table] for value in params)
+                ):
+                    result = execute(sql, params, many, context)
+                    approved_ids[table].difference_update(params)
+                    return result
+            raise RecoveryStop("protected_record_deletion_blocked",
+                               protected_record_type="unverified_sql_delete")
         return execute(sql, params, many, context)
 
     pre_delete.connect(before_delete, weak=False)
@@ -263,6 +295,8 @@ def describe(owner_character, token):
         },
         "forwarding_last_update_at": stamp(owner.forwarding_last_update_at),
         "structure_count": owner.structures.count(),
+        "current_service_count": StructureService.objects.filter(structure__owner_id=owner.pk).count(),
+        "current_item_count": StructureItem.objects.filter(structure__owner_id=owner.pk).count(),
         "notification_count": owner.notification_set.count(),
         "existing_token_ids": list(Token.objects.filter(
             character_id=ownership.character.character_id

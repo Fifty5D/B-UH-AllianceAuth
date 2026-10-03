@@ -69,6 +69,28 @@ def latest_report():
     return path, value, hashlib.sha256(data).hexdigest()
 
 
+def retained_incident_evidence(report, digest):
+    """Reuse sanitized evidence already collected; do not take another DB snapshot."""
+    database_fields = (
+        "read_only", "scan_complete", "generated_at", "bounds", "limits",
+        "auth_totals", "structures_required_scopes", "memberaudit_required_scopes",
+        "structures", "memberaudit", "summary", "memberaudit_status_totals",
+        "pending_migrations_for_current_runtime", "database_vendor",
+    )
+    recovery_fields = (
+        "attempt_id", "journal", "recovery_hold", "deployment_current", "platform_current",
+        "receiver_install", "backup_manifest", "backup_recovery", "backup_inventory",
+        "configuration_matches_retained_backup", "recovery_completion_is_proven",
+    )
+    return {
+        "read_only": True, "source": "retained_sanitized_incident_report",
+        "source_commit": report["diagnostic_source_commit"],
+        "report_sha256": digest, "observed_at": report["finished_at"],
+        "database": {key: report["database"][key] for key in database_fields if key in report["database"]},
+        "recovery": {key: report[key] for key in recovery_fields if key in report},
+    }
+
+
 def select_pilot(report, name):
     targets = []
     for owner in report["database"]["structures"]:
@@ -281,6 +303,8 @@ def collect(attempt, name, apply):
         target = select_pilot(report, name)
         output["baseline_report_path"], output["baseline_report_sha256"] = str(path), digest
         output["before_host"] = verify_host(host, config, attempt)
+        if not apply:
+            output["retained_incident_evidence"] = retained_incident_evidence(report, digest)
         output["target"] = target
         source = Path(__file__).with_name("structures_recovery.py").read_text(encoding="utf-8")
         roster = snapshot_targets(report)

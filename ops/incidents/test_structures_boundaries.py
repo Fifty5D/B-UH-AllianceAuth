@@ -25,6 +25,29 @@ class PilotBoundaryTests(unittest.TestCase):
             }],
         }]}}
 
+    def test_retained_evidence_reuses_only_known_report_fields_and_original_observation_time(self):
+        report = self.report()
+        report.update({
+            "diagnostic_source_commit": pilot.QUALIFIED_REPORT_COMMIT,
+            "finished_at": "2026-10-01T12:00:00+00:00", "attempt_id": "gh-111111-1",
+            "journal": {"state": "migrated"}, "raw_env": "synthetic-secret-must-not-export",
+        })
+        report["database"].update({
+            "read_only": True, "scan_complete": True, "memberaudit": [{"character_id": 60000}],
+            "memberaudit_required_scopes": ["synthetic-scope"],
+            "password": "synthetic-password-must-not-export",
+        })
+        evidence = pilot.retained_incident_evidence(report, "a" * 64)
+        self.assertTrue(evidence["read_only"])
+        self.assertEqual(evidence["source"], "retained_sanitized_incident_report")
+        self.assertEqual(evidence["observed_at"], report["finished_at"])
+        self.assertEqual(evidence["database"]["memberaudit"], report["database"]["memberaudit"])
+        self.assertEqual(evidence["report_sha256"], "a" * 64)
+        self.assertEqual(evidence["recovery"]["journal"], report["journal"])
+        encoded = json.dumps(evidence)
+        self.assertNotIn("synthetic-secret-must-not-export", encoded)
+        self.assertNotIn("synthetic-password-must-not-export", encoded)
+
     def test_exact_single_existing_token_selection(self):
         selected = pilot.select_pilot(self.report(), "Synthetic Pilot")
         self.assertEqual(selected, {"owner_pk": 20, "owner_character_pk": 30,
