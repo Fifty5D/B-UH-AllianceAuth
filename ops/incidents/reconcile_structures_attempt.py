@@ -280,9 +280,9 @@ def reconcile(config, Host, pilot, source, attempt, expected_hold, pilot_name, r
         require_backup_unchanged(host, output["retained_database_backup"])
         output["after_owners"] = snapshot(host, pilot, source, target, roster)
         require_healthy_owners(output["after_owners"], roster)
-        inventories = lambda value: {row["owner_pk"]: (row["state"]["auth_link_pk"],
-                                                      row["state"]["existing_token_ids"])
-                                     for row in value["owners"]}
+        def inventories(value):
+            return {row["owner_pk"]: (row["state"]["auth_link_pk"], row["state"]["existing_token_ids"])
+                    for row in value["owners"]}
         if inventories(output["before_owners"]) != inventories(output["after_owners"]):
             raise RecoveryGate("token_or_auth_inventory_changed")
         output["token_and_auth_inventory_preserved"] = True
