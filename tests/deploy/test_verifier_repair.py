@@ -9,6 +9,8 @@ from unittest import mock
 
 from ops.deploy import verifier_repair as repair
 from ops.deploy.contracts import DeploymentError
+from ops.deploy.docker_host import DockerHost
+from tests.deploy.test_verifier_corrections import retained_host
 
 
 class VerifierActivationTests(unittest.TestCase):
@@ -121,3 +123,45 @@ class CompletedMemberAuditReferenceTests(unittest.TestCase):
         self.assertIn("SET TRANSACTION READ ONLY", repair.MA_READ_CODE)
         for forbidden in (".save(", ".delete(", ".update(", ".refresh(", "bulk_refresh(", "has_token_error ="):
             self.assertNotIn(forbidden, repair.MA_READ_CODE)
+
+
+class SupportedCleanupOrderingTests(unittest.TestCase):
+    def test_fresh_memberaudit_or_structures_failure_preserves_all_safety_resources(self):
+        for failure in ("memberaudit", "structures"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                host, _ = retained_host(Path(temp))
+                calls = []
+                def member(current):
+                    calls.append("memberaudit")
+                    if failure == "memberaudit":
+                        raise DeploymentError("synthetic changed recovered section")
+                def structures(current):
+                    calls.append("structures")
+                    if failure == "structures":
+                        raise DeploymentError("synthetic unhealthy Structures owner")
+                host.__class__ = repair.reconciliation_host(DockerHost, member, structures)
+                with mock.patch.object(host, "_restore_candidate_configuration"), mock.patch.object(
+                        DockerHost, "_verify_restored", side_effect=lambda *_: calls.append("health")), mock.patch.object(
+                        host, "_remove_web_slots") as cleanup, mock.patch.object(
+                        host, "_discard_previous_image_pins") as pins, mock.patch.object(
+                        host, "complete_recovery_plan") as complete, self.assertRaises(DeploymentError):
+                    host.rollback(None, "candidate-slot-start-1")
+                cleanup.assert_not_called()
+                pins.assert_not_called()
+                complete.assert_not_called()
+                self.assertEqual(calls[0:2], ["health", "memberaudit"])
+                self.assertTrue((host.config.state_dir / "active-recovery.json").exists())
+
+    def test_all_health_and_preservation_gates_precede_supported_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            host, _ = retained_host(Path(temp))
+            order = []
+            host.__class__ = repair.reconciliation_host(
+                DockerHost, lambda *_: order.append("memberaudit"), lambda *_: order.append("structures"))
+            with mock.patch.object(host, "_restore_candidate_configuration"), mock.patch.object(
+                    DockerHost, "_verify_restored", side_effect=lambda *_: order.append("health")), mock.patch.object(
+                    host, "_remove_web_slots", side_effect=lambda *_: order.append("slots")), mock.patch.object(
+                    host, "_discard_previous_image_pins", side_effect=lambda *_: order.append("pins")), mock.patch.object(
+                    host, "complete_recovery_plan", side_effect=lambda *_: order.append("hold")):
+                host.rollback(None, "candidate-slot-start-1")
+            self.assertEqual(order, ["health", "memberaudit", "structures", "slots", "pins", "hold"])

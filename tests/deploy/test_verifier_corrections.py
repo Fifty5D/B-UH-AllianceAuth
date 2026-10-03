@@ -69,7 +69,7 @@ class RestartRehydrationTests(unittest.TestCase):
         self.path = self.original.config.state_dir / "active-recovery.json"
         self.enterContext(simulated_root_owned_lstat(self.path))
 
-    def health(self, host, *, restart_delta=0, identity_change=False, role_change=False, image_change=False):
+    def health(self, host, *, restart_delta=0, identity_change=False, role_change=False, image_change=False, manual_restart=False):
         def discover(role, **kwargs):
             ids = [identity for identity, service in self.original.restart_baseline_services.items()
                    if service == role]
@@ -80,7 +80,7 @@ class RestartRehydrationTests(unittest.TestCase):
 
         def command(args, **kwargs):
             if args[3].startswith("{{.Image}}|"):
-                return "sha256:" + "f" * 64 if image_change else (host.retained_restart_images[args[-1]] + "|" + host.retained_restart_started_at[args[-1]] + "|false")
+                return "sha256:" + "f" * 64 if image_change else (host.retained_restart_images[args[-1]] + "|" + ("2026-10-03T19:10:00.123456789Z" if manual_restart else host.retained_restart_started_at[args[-1]]) + "|false")
             return f"running|{self.original.restart_baselines.get(args[-1], 0)+restart_delta}|healthy"
 
         required = {**host.auth_replica_counts, host.config.database_service: 1,
@@ -134,7 +134,7 @@ class RestartRehydrationTests(unittest.TestCase):
         with simulated_root_owned_lstat(review):
             loaded, _ = DockerHost.load_incomplete_plan(self.original.config)
         self.assertTrue(self.health(loaded))
-        for kw in ({"restart_delta": 1}, {"identity_change": True}, {"role_change": True}, {"image_change": True}):
+        for kw in ({"restart_delta": 1}, {"identity_change": True}, {"role_change": True}, {"image_change": True}, {"manual_restart": True}):
             with self.subTest(kw=kw):
                 self.assertFalse(self.health(loaded, **kw))
         self.assertEqual(self.path.read_text(), json.dumps(plan))

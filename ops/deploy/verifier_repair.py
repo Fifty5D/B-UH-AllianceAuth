@@ -289,6 +289,17 @@ def install_single_file(host, candidate, source_hash, review_path, commit):
     return result
 
 
+
+def reconciliation_host(BaseHost, memberaudit_gate, structures_gate):
+    """Add preservation reads inside the supported pre-cleanup verification."""
+    class ScopedReconciliationHost(BaseHost):
+        def _verify_restored(self, bundle, replaced_services):
+            super()._verify_restored(bundle, replaced_services)
+            memberaudit_gate(self)
+            structures_gate(self)
+    return ScopedReconciliationHost
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
@@ -368,7 +379,16 @@ def main(argv=None):
                                                            review_path, args.commit)
         phase = "supported_retained_recovery"
         report["supported_recovery_attempted"] = True
-        report["recovery"] = bridge.reconcile(config, module.DockerHost, pilot, owner_source,
+        def memberaudit_gate(current):
+            report["memberaudit_before_cleanup"] = verify_memberaudit(current, refs, excluded, completed)
+
+        def structures_gate(current):
+            report["owners_before_cleanup"] = bridge.snapshot(current, pilot, owner_source, target, roster)
+            bridge.require_healthy_owners(report["owners_before_cleanup"], roster)
+
+        ScopedReconciliationHost = reconciliation_host(
+            module.DockerHost, memberaudit_gate, structures_gate)
+        report["recovery"] = bridge.reconcile(config, ScopedReconciliationHost, pilot, owner_source,
                                               assessment["attempt_id"], assessment["hold_sha256"], "Fifty5D", True)
         if report["recovery"].get("scan_complete") is not True:
             raise DeploymentError("Supported retained recovery did not complete; do not deploy")
