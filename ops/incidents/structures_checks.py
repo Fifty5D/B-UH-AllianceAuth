@@ -408,13 +408,48 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.assertTrue(second["recovered"], second)
         self.assert_preserved()
 
+
+    def test_current_snapshot_reads_roster_and_sticky_counts_without_refresh_or_state_changes(self):
+        before = (list(Token.objects.values()), list(Owner.objects.values()),
+                  list(OwnerCharacter.objects.values()), list(CharacterOwnership.objects.values()),
+                  list(CharacterUpdateStatus.objects.values()))
+        with patch.object(Token, "refresh", side_effect=AssertionError("snapshot cannot refresh")):
+            snapshot = recovery.outage_snapshot([self.target])
+        self.assertTrue(snapshot["read_only"])
+        self.assertEqual(snapshot["memberaudit_sticky_characters"], 1)
+        self.assertEqual(snapshot["memberaudit_sticky_sections"], 1)
+        self.assertTrue(snapshot["owners"][0]["same_auth_link_pk"])
+        self.assertEqual(snapshot["owners"][0]["state"]["token_pk"], self.token.pk)
+        self.assertEqual(before, (list(Token.objects.values()), list(Owner.objects.values()),
+                                 list(OwnerCharacter.objects.values()), list(CharacterOwnership.objects.values()),
+                                 list(CharacterUpdateStatus.objects.values())))
+        self.assert_preserved()
+
+    def test_native_sync_does_not_manufacture_forwarding_freshness_or_up_status(self):
+        result, _ = self.invoke()
+        self.assertTrue(result["recovered"], result)
+        state = recovery.outage_snapshot([self.target])["owners"][0]["state"]
+        for key in ("structures", "assets", "notifications"):
+            self.assertTrue(state["freshness"][key])
+        self.assertFalse(state["freshness"]["forwarding"])
+        self.assertFalse(state["freshness"]["all"])
+        self.assertFalse(state["owner_is_up"])
+        self.assert_preserved()
+
+    def test_outage_snapshot_rejects_oversized_roster_before_queries(self):
+        with self.assertRaises(recovery.RecoveryStop):
+            recovery.outage_snapshot([self.target] * 17)
+        self.assert_preserved()
+
     def test_actual_production_shell_invocation_emits_bounded_result(self):
         from pathlib import Path
         source = Path(recovery.__file__).read_text(encoding="utf-8")
-        code = "exec(compile(" + repr(source) + ", '<buh-structures-recovery>', 'exec'));emit(" + repr(self.target) + ",apply=False)"
+        code = "exec(compile(" + repr(source) + ", '<buh-structures-recovery>', 'exec'));emit(" + repr(self.target) + ",apply=False,snapshot_targets=" + repr([self.target]) + ")"
         with patch("sys.stdout", new_callable=io.StringIO) as output:
             call_command("shell", command=code, verbosity=0, no_imports=True)
         result = parse_result(output.getvalue())
+        self.assertTrue(result["outage_snapshot"]["read_only"])
+        self.assertEqual(result["outage_snapshot"]["memberaudit_sticky_sections"], 1)
         self.assertTrue(result["read_only"])
         self.assertFalse(result["refresh_attempted"])
         self.assert_preserved()

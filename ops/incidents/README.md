@@ -123,3 +123,22 @@ Focused checks use the real pinned provider to prove that restriction and
 exercise the prepared public HTTP request, native sync methods and retained
 rows. Failure reports include only the operation phase and bounded function/line
 locations, never exception messages, locals, response bodies or credentials.
+
+
+The optional run-structures-batch.ps1 launcher reuses the same pilot for an
+explicit bounded incident roster. It inspects the already-recovered pilot in
+report mode, then verifies two representative owners before continuing in groups
+of at most three, sequentially. The first incomplete refresh/sync, preservation
+mismatch, changed recovery/traffic identity, excessive disk growth or invocation
+with an unknown mutation outcome stops additional apply operations. Every owner
+retains its separate root-private report; one combined Desktop report and compact
+clipboard result cover the sequence.
+
+Current snapshots read the qualified outage roster, each owner's four native
+freshness properties and persisted is_up flag, plus live Member Audit sticky
+counts. They never refresh another owner's token, modify forwarding/status
+timestamps or clear Member Audit. A successful three-section repair does not
+claim that notification forwarding or periodic status evaluation has completed.
+Host memory availability and sustained load are checked before and after each
+pilot alongside the existing disk/runtime/public-smoke guards. No notification
+webhook is manually sent by the recovery tools.

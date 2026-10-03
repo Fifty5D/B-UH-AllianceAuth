@@ -254,6 +254,13 @@ def describe(owner_character, token):
             and ownership.owner_hash == token.character_owner_hash,
         "token_has_refresh_credential": bool(token.refresh_token),
         "owner_timestamps": {field: stamp(getattr(owner, field)) for field in SYNC_FIELDS},
+        "freshness": {
+            "structures": owner.is_structure_sync_fresh,
+            "assets": owner.is_assets_sync_fresh,
+            "notifications": owner.is_notification_sync_fresh,
+            "forwarding": owner.is_forwarding_sync_fresh,
+            "all": owner.are_all_syncs_ok,
+        },
         "forwarding_last_update_at": stamp(owner.forwarding_last_update_at),
         "structure_count": owner.structures.count(),
         "notification_count": owner.notification_set.count(),
@@ -481,7 +488,40 @@ def run(target, *, apply=False):
     return result
 
 
-def emit(target, *, apply=False):
+
+def outage_snapshot(targets):
+    """Read current health for the bounded roster from the retained incident report."""
+    if not targets or len(targets) > 16:
+        raise RecoveryStop("outage_snapshot_exceeds_bound")
+    rows = []
+    for target in targets:
+        row = {"owner_pk": target["owner_pk"],
+               "owner_character_pk": target["owner_character_pk"],
+               "character_id": target["character_id"], "token_pk": target["token_pk"]}
+        try:
+            owner_character, token = selected(target)
+            row["state"] = describe(owner_character, token)
+            row["same_auth_link_pk"] = owner_character.character_ownership_id == target["auth_link_pk"]
+            row["same_owner_pk"] = owner_character.owner_id == target["owner_pk"]
+            row["same_character_id"] = token.character_id == target["character_id"]
+        except Exception as error:
+            row.update(exception_category(error))
+        rows.append(row)
+    # Read only the current counts; no section flags are cleared or tasks enqueued.
+    from memberaudit.models import CharacterUpdateStatus
+    sticky = CharacterUpdateStatus.objects.filter(has_token_error=True)
+    return {"read_only": True, "observed_at": stamp(now()), "owners": rows,
+            "memberaudit_sticky_characters": sticky.values("character_id").distinct().count(),
+            "memberaudit_sticky_sections": sticky.count()}
+
+
+def emit(target, *, apply=False, snapshot_targets=None):
+    result = run(target, apply=apply)
+    if snapshot_targets is not None:
+        try:
+            result["outage_snapshot"] = outage_snapshot(snapshot_targets)
+        except Exception as error:
+            result["outage_snapshot_error_type"] = type(error).__name__
     print("BUH_STRUCTURES_RECOVERY_BEGIN")
-    print(json.dumps(run(target, apply=apply), sort_keys=True))
+    print(json.dumps(result, sort_keys=True))
     print("BUH_STRUCTURES_RECOVERY_END")

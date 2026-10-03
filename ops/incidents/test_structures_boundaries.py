@@ -114,7 +114,10 @@ class PilotBoundaryTests(unittest.TestCase):
                 return route
             return b"synthetic unchanged configuration"
 
-        with (patch.object(pilot, "private_bytes", side_effect=private),
+        with (patch.object(pilot, "host_resources", return_value={
+                  "cpu_count": 4, "host_load_average": [0.1, 0.1, 0.1],
+                  "memory_total_bytes": 4 * 1024 ** 3, "memory_available_bytes": 2 * 1024 ** 3}),
+              patch.object(pilot, "private_bytes", side_effect=private),
               patch.object(pilot.os, "statvfs", return_value=SimpleNamespace(
                   f_bavail=100 * 1024 ** 3, f_frsize=1, f_blocks=200 * 1024 ** 3))):
             result = pilot.verify_host(host, config, attempt)
@@ -126,6 +129,25 @@ class PilotBoundaryTests(unittest.TestCase):
             with self.assertRaises(pilot.PilotStop):
                 pilot.verify_host(host, config, attempt)
         host._manage_live.assert_not_called()
+
+
+    def test_resource_guard_stops_low_memory_or_sustained_load(self):
+        healthy = {"cpu_count": 4, "host_load_average": [0.1, 0.1, 0.1],
+                   "memory_total_bytes": 4 * 1024 ** 3, "memory_available_bytes": 2 * 1024 ** 3}
+        pilot.guard_resources(healthy)
+        with self.assertRaises(pilot.PilotStop):
+            pilot.guard_resources({**healthy, "memory_available_bytes": 128 * 1024 ** 2})
+        with self.assertRaises(pilot.PilotStop):
+            pilot.guard_resources({**healthy, "host_load_average": [0.1, 7.0, 0.1]})
+
+    def test_snapshot_roster_is_only_qualified_outage_selection(self):
+        self.assertEqual(pilot.snapshot_targets(self.report()), [
+            pilot.select_pilot(self.report(), "Synthetic Pilot")
+        ])
+        report = self.report()
+        report["database"]["structures"][0]["configured_characters"][0]["disabled_for_no_valid_token"] = False
+        with self.assertRaises(pilot.PilotStop):
+            pilot.snapshot_targets(report)
 
     def test_mode_defaults_to_report_and_launcher_is_explicitly_bounded(self):
         source = Path(__file__).with_name("run-structures-pilot.ps1").read_text(encoding="utf-8")

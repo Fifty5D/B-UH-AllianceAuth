@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^gh-[0-9]+-[0-9]+$')][string]$AttemptId,
     [Parameter(Mandatory = $true)][ValidateLength(1,100)][string]$CharacterName,
     [ValidateSet('report','apply')][string]$Mode = 'report',
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$SshHost = 'b-uh'
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$SshHost = 'b-uh',
+    [switch]$PassThru
 )
 # report: no refresh or application mutations.
 # apply: refresh ONE existing token and complete ONE owner's native sync,
@@ -23,7 +24,7 @@ $expectedFiles = @{
 foreach ($name in $expectedFiles.Keys) {
     $path = Join-Path $sourceDirectory $name
     $url = "https://raw.githubusercontent.com/Fifty5D/B-UH-AllianceAuth/$ReviewedCommit/ops/incidents/$name"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $path
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri $url -OutFile $path
     if ((Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant() -ne $expectedFiles[$name]) {
         throw 'Downloaded pilot source did not match its tested hash.'
     }
@@ -161,6 +162,9 @@ function Compact-HostEvidence($value) {
         )
         disk = $value.disk
         load_average = $value.host_load_average
+        cpu_count = $value.cpu_count
+        memory_available_bytes = $value.memory_available_bytes
+        memory_total_bytes = $value.memory_total_bytes
     }
 }
 $handoff = [ordered]@{
@@ -188,4 +192,8 @@ Write-Host "Saved report: $reportPath"
 Write-Host "Mode: $Mode. Only the selected Structures owner was eligible; Member Audit and retained deployment were not changed."
 if ($pilotExitCode -ne 0 -or $report.scan_complete -ne $true -or ($Mode -eq 'apply' -and $report.result.recovered -ne $true)) {
     Write-Host 'The pilot is not proven recovered. Review the result before another apply operation.'
+}
+
+if ($PassThru) {
+    [pscustomobject]@{ report = $report; report_path = $reportPath; exit_code = $pilotExitCode }
 }

@@ -126,6 +126,45 @@ def assert_previous_image(container, expected):
         raise PilotStop("runtime is not the verified previous image")
 
 
+
+def host_resources():
+    """Small host-wide resource counters only; no process/env/credential data."""
+    with open("/proc/meminfo", encoding="ascii") as stream:
+        data = stream.read(16 * 1024)
+    memory = {key: int(value) * 1024 for key, value in re.findall(
+        r"^(MemTotal|MemAvailable):[ \t]+([0-9]+)[ \t]+kB$", data, re.M,
+    )}
+    if set(memory) != {"MemTotal", "MemAvailable"}:
+        raise PilotStop("memory counters unavailable")
+    cpus = os.cpu_count() or 1
+    load = list(os.getloadavg())
+    return {"cpu_count": cpus, "host_load_average": load,
+            "memory_total_bytes": memory["MemTotal"],
+            "memory_available_bytes": memory["MemAvailable"]}
+
+
+def guard_resources(resources):
+    if resources["memory_available_bytes"] < max(512 * 1024 ** 2, resources["memory_total_bytes"] // 10):
+        raise PilotStop("memory safety threshold")
+    if resources["host_load_average"][1] > resources["cpu_count"] * 1.5:
+        raise PilotStop("load safety threshold")
+
+
+def snapshot_targets(report):
+    """Selection stays bound to the specific qualified outage roster."""
+    names = []
+    for owner in report["database"]["structures"]:
+        for character in owner["configured_characters"]:
+            if owner["enabled"] and character["disabled_for_no_valid_token"]:
+                name = (character.get("identity") or {}).get("character_name")
+                if not name:
+                    raise PilotStop("outage identity missing")
+                names.append(name)
+    if not names or len(names) > 16 or len(names) != len(set(names)):
+        raise PilotStop("outage roster exceeds bound or is ambiguous")
+    return [select_pilot(report, name) for name in names]
+
+
 def verify_host(host, config, attempt):
     hold_data = private_bytes(config.state_dir / "active-recovery.json", 64 * 1024)
     hold = json.loads(hold_data)
@@ -206,12 +245,14 @@ def verify_host(host, config, attempt):
     free_bytes, total_bytes = usage.f_bavail * usage.f_frsize, usage.f_blocks * usage.f_frsize
     if free_bytes < max(10 * 1024 ** 3, total_bytes // 10):
         raise PilotStop("disk safety threshold")
+    resources = host_resources()
+    guard_resources(resources)
     host._public_smoke_checks()
     return {"hold_sha256": hashlib.sha256(hold_data).hexdigest(),
             "attempt_id": attempt, "hold_phase": hold["phase"], "journal_state": journal["state"],
             "runtime_container_id": selected["Id"], "runtime_image_id": selected["Image"],
             "platform_version": "0.8.2", "live_auth_services": services,
-            "host_load_average": list(os.getloadavg()), "active_upstream_container_ids": sorted(set(route_ids)),
+            **resources, "active_upstream_container_ids": sorted(set(route_ids)),
             "active_upstream_sha256": hashlib.sha256(route).hexdigest(),
             "traffic_only_verified_previous_image": True, "public_smoke_passed": True,
             "disk": {"free_bytes": free_bytes, "total_bytes": total_bytes}}
@@ -242,7 +283,9 @@ def collect(attempt, name, apply):
         output["before_host"] = verify_host(host, config, attempt)
         output["target"] = target
         source = Path(__file__).with_name("structures_recovery.py").read_text(encoding="utf-8")
-        code = "exec(compile(" + repr(source) + ", '<buh-structures-recovery>', 'exec'));emit(" + repr(target) + ",apply=" + repr(apply) + ")"
+        roster = snapshot_targets(report)
+        code = ("exec(compile(" + repr(source) + ", '<buh-structures-recovery>', 'exec'));emit("
+                + repr(target) + ",apply=" + repr(apply) + ",snapshot_targets=" + repr(roster) + ")")
         returned = host._manage_live("shell", "--no-imports", "-c", code,
                                     context="Bounded existing-token Structures pilot")
         output["result"] = parse_result(returned)
