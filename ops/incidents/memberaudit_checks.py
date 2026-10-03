@@ -293,9 +293,13 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
         result, calls = self.invoke()
         self.assertEqual(result["category"], "missing_token_record", result)
         self.assertEqual(calls, 0)
+        self.assertFalse(result["record_presence"]["matching_baseline_token_exists"])
+
+    def test_missing_auth_link_is_reported_with_existing_token_presence(self):
         CharacterOwnership.objects.filter(pk=self.link.pk).delete()
         result, calls = self.invoke()
         self.assertEqual(result["category"], "missing_auth_link", result)
+        self.assertTrue(result["record_presence"]["matching_baseline_token_exists"])
         self.assertEqual(calls, 0)
 
     def test_missing_stored_scope_does_not_clear_outage_state(self):
@@ -325,6 +329,17 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
                 with connection.cursor() as cursor:
                     cursor.execute("DELETE FROM " + connection.ops.quote_name(models.CharacterMail._meta.db_table))
         self.assertTrue(models.CharacterSkillqueueEntry.objects.filter(pk=row.pk).exists())
+
+    def test_native_server_error_fallback_cannot_clear_sticky_state(self):
+        class ServerFailure(Exception):
+            status_code = 500
+        self.client.Location.GetCharactersCharacterIdLocation.return_value.result.side_effect = ServerFailure()
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "provider_server_failure", result)
+        self.assertFalse(result["recovered"])
+        self.assertEqual(CharacterUpdateStatus.objects.filter(character=self.member, has_token_error=True).count(), 4)
+        self.token.refresh_from_db()
+        self.assertEqual(self.token.refresh_token, self.grant["refresh_token"])
 
     def test_real_prepared_http_throttle_stops_with_no_secret_response_export(self):
         response = Response()

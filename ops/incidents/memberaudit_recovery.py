@@ -234,6 +234,17 @@ def credential_guard(token, expected_identity):
                              r"\." + re.escape(quoted("id")) + r"\s*=\s*%s\s*$", command, re.I)
             if many or not tail or not params or params[-1] != token.pk:
                 raise RecoveryStop("unbounded_credential_update_blocked")
+            assignments = command.split(" SET ", 1)[-1].rsplit(" WHERE ", 1)[0]
+            fields = re.findall(r'[`"]([a-z_]+)[`"]\s*=\s*%s', assignments)
+            if len(fields) != len(params) - 1:
+                raise RecoveryStop("unrecognized_credential_update_shape")
+            expected = dict(zip(
+                ("user_id", "character_id", "character_owner_hash", "token_type"),
+                expected_identity[1:],
+            ))
+            for column, value in zip(fields, params[:-1]):
+                if column in expected and expected[column] != value:
+                    raise RecoveryStop("credential_identity_sql_change_blocked")
         return execute(sql, params, many, context)
 
     pre_save.connect(before_save, weak=False)
@@ -672,6 +683,7 @@ def run(target, *, apply=False):
                     result["phase"] = "update_" + selected["section"]
                     result["sections"].append(update_one(member, selected, token))
             result["network"] = network
+        member.reset_token_error_notified_if_status_ok()
         member.clear_cache()
         result["category"] = "recovered_existing_token"
         result["recovered"] = all(s["verified"] for s in result["sections"]) and len(result["sections"]) == len(target["sections"])
