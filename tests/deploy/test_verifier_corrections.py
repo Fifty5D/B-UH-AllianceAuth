@@ -79,8 +79,8 @@ class RestartRehydrationTests(unittest.TestCase):
             return ["f" * 64] if identity_change else ids
 
         def command(args, **kwargs):
-            if args[3] == "{{.Image}}":
-                return "sha256:" + "f" * 64 if image_change else host.retained_restart_images[args[-1]]
+            if args[3].startswith("{{.Image}}|"):
+                return "sha256:" + "f" * 64 if image_change else (host.retained_restart_images[args[-1]] + "|" + host.retained_restart_started_at[args[-1]] + "|false")
             return f"running|{self.original.restart_baselines.get(args[-1], 0)+restart_delta}|healthy"
 
         required = {**host.auth_replica_counts, host.config.database_service: 1,
@@ -99,7 +99,8 @@ class RestartRehydrationTests(unittest.TestCase):
 
     def review(self, plan):
         rows = [{"container_id": identity, "service": role, "restart_count": self.original.restart_baselines[identity],
-                 "image_id": self.original.previous_images.get(role, ("sha256:" + "c"*64, ""))[0]}
+                 "image_id": self.original.previous_images.get(role, ("sha256:" + "c"*64, ""))[0],
+                 "started_at": "2026-10-01T00:00:00.123456789Z"}
                 for identity, role in self.original.restart_baseline_services.items()]
         return {"schema_version": 1, "attempt_id": self.attempt,
                 "plan_sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),

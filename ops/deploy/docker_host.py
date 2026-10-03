@@ -678,6 +678,7 @@ class DockerHost:
         self.restart_baselines: dict[str, int] = {}
         self.restart_baseline_services: dict[str, str] = {}
         self.retained_restart_images: dict[str, str] = {}
+        self.retained_restart_started_at: dict[str, str] = {}
         self.retained_verifier_review: dict | None = None
         self.recovered_discord_429_hashes: set[str] = set()
         self.recovered_discord_429_seen: dict[str, int] = {}
@@ -1158,14 +1159,16 @@ class DockerHost:
                 raise ValueError()
         except (TypeError, ValueError) as error:
             raise DeploymentError("Retained verifier review time boundary is invalid") from error
-        counts, services, images = {}, {}, {}
+        counts, services, images, started = {}, {}, {}, {}
         for row in review["containers"]:
             if (not isinstance(row, dict)
-                    or set(row) != {"container_id", "service", "image_id", "restart_count"}
+                    or set(row) != {"container_id", "service", "image_id", "restart_count", "started_at"}
                     or not isinstance(row["image_id"], str)
                     or SAFE_IMAGE_ID_RE.fullmatch(row["image_id"]) is None
                     or not isinstance(row["container_id"], str)
                     or not isinstance(row["service"], str)
+                    or not isinstance(row["started_at"], str)
+                    or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", row["started_at"]) is None
                     or row["container_id"] in counts
                     or row["service"] in self.previous_images
                     and row["image_id"] != self.previous_images[row["service"]][0]):
@@ -1173,10 +1176,12 @@ class DockerHost:
             counts[row["container_id"]] = row["restart_count"]
             services[row["container_id"]] = row["service"]
             images[row["container_id"]] = row["image_id"]
+            started[row["container_id"]] = row["started_at"]
         self._hydrate_restart_baselines(counts, services)
         if not counts:
             raise DeploymentError("Retained verifier review baseline is empty")
         self.retained_restart_images = images
+        self.retained_restart_started_at = started
         self.retained_verifier_review = review
         self.log_since = review["verification_since"]
 
@@ -4626,9 +4631,12 @@ class DockerHost:
                 for container in ids:
                     if container in self.retained_restart_images:
                         image = self._run(
-                            ["docker", "inspect", "--format", "{{.Image}}", container],
+                            ["docker", "inspect", "--format",
+                             "{{.Image}}|{{.State.StartedAt}}|{{.State.OOMKilled}}", container],
                             context=f"Retained restart image identity for {service}").strip()
-                        if image != self.retained_restart_images[container]:
+                        expected = (f"{self.retained_restart_images[container]}|"
+                                    f"{self.retained_restart_started_at[container]}|false")
+                        if image != expected:
                             return False
                     state = self._run(
                         [

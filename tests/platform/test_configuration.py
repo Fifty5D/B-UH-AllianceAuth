@@ -20,6 +20,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 ENV_FILE = ROOT / "platform" / "testenv" / "env.example"
 SOURCE_WORKFLOWS = (
     "source-ci.yml",
+    "recovery-verifier-checks.yml",
     "reusable-source-tests.yml",
     "source-compatibility.yml",
     "source-supply-chain.yml",
