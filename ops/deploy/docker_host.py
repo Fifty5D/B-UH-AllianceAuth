@@ -206,6 +206,127 @@ MAX_RECOVERY_PLAN_BYTES = 256 * 1024
 CELERY_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}@[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
+def _prove_discord_nickname_429(lines, proof):
+    """Accept only one complete, correlated nickname request and its short retry."""
+    def fail():
+        raise DeploymentError("Discord nickname 429 recovery is not proven")
+
+    try:
+        begin = datetime.fromisoformat(proof["since"])
+        end = datetime.fromisoformat(proof["until"])
+        if (begin.utcoffset() is None or end.utcoffset() is None
+                or not 0 < (end - begin).total_seconds() <= 5
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", proof["username"])
+                or any(not re.fullmatch(r"[0-9]{1,20}", proof[key])
+                       for key in ("guild_id", "member_id"))
+                or any(not re.fullmatch(r"[0-9a-f]{32}", proof[key])
+                       for key in ("request_id", "retry_request_id"))
+                or proof["request_id"] == proof["retry_request_id"]
+                or not isinstance(proof["error_line_sha256"], list)
+                or len(set(proof["error_line_sha256"])) != 2
+                or any(SHA256_RE.fullmatch(item) is None
+                       for item in proof["error_line_sha256"])):
+            fail()
+    except (KeyError, TypeError, ValueError):
+        fail()
+    endpoint = (f"https://discord.com/api/guilds/{proof['guild_id']}"
+                f"/members/{proof['member_id']}")
+    client = "allianceauth.services.modules.discord.discord_client.client"
+    tasks = "allianceauth.services.modules.discord.tasks"
+    models = "allianceauth.services.modules.discord.models"
+    rows, errors, families = [], [], set()
+    for line in lines:
+        aa = ALLIANCEAUTH_LOG_HEADER_RE.match(line)
+        celery = CELERY_LOG_HEADER_RE.match(line)
+        if aa:
+            clock = (f"{aa['year']}-{ALLIANCEAUTH_LOG_MONTHS[aa['month']]}-"
+                     f"{aa['day']} {aa['clock']}+00:00")
+            event, level, component = datetime.fromisoformat(clock), aa["level"], aa["component"]
+            family, message = "allianceauth", line[aa.end():]
+        elif celery:
+            event = datetime.fromisoformat(celery["timestamp"] + "+00:00")
+            level, component = celery["level"], ""
+            family, message = "celery", line[celery.end():]
+            if celery["process"] != "MainProcess":
+                if FATAL_LOG_RE.search(line):
+                    fail()
+                continue
+        else:
+            if FATAL_LOG_RE.search(line):
+                fail()
+            continue
+        if not begin <= event < end:
+            fail()
+        error = re.fullmatch(
+            r"\[Discord Service\] ([0-9a-f]{32}): Discord API returned error code 429 "
+            r"for member ID ([0-9]{1,20}) with this response: (.+)", message)
+        if level == "ERROR":
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            if (error is None or digest not in proof["error_line_sha256"]
+                    or error[1] != proof["request_id"] or error[2] != proof["member_id"]
+                    or family == "allianceauth" and component != client
+                    or family in families):
+                fail()
+            try:
+                payload = json.loads(error[3])
+                if (set(payload) != {"message", "retry_after", "global"}
+                        or payload["message"] != "You are being rate limited."
+                        or payload["global"] is not False
+                        or type(payload["retry_after"]) not in {int, float}
+                        or not 0 < payload["retry_after"] <= 60000):
+                    fail()
+            except (TypeError, ValueError):
+                fail()
+            errors.append((event, digest))
+            families.add(family)
+        elif level == "CRITICAL" or re.search(
+            r"error code (?:403|401)|returned status code (?:403|401)|50013|"
+            r"Missing Permissions|after max retries", message, re.IGNORECASE
+        ):
+            fail()
+        if family == "allianceauth":
+            rows.append((event, level, component, message))
+    if len(errors) != 2 or families != {"allianceauth", "celery"}:
+        fail()
+
+    def one(level, component, pattern):
+        found = [(event, message) for event, severity, logger, message in rows
+                 if severity == level and logger == component and re.fullmatch(pattern, message)]
+        if len(found) != 1:
+            fail()
+        return found[0][0]
+
+    start = one("INFO", client, re.escape(
+        f"[Discord Service] {proof['request_id']}: sending PATCH request to url '{endpoint}'"))
+    rejected = one("DEBUG", client, re.escape(
+        f"[Discord Service] {proof['request_id']}: returned status code 429 with headers: ") + r".+")
+    retry = one("INFO", client, re.escape(
+        f"[Discord Service] {proof['retry_request_id']}: sending PATCH request to url '{endpoint}'"))
+    success = one("DEBUG", client, re.escape(
+        f"[Discord Service] {proof['retry_request_id']}: returned status code 204 with headers: ") + r".+")
+    backoff = one("INFO", tasks, re.escape(
+        f"[Discord Service] API back off for update_nickname wth user {proof['username']} "
+        "due to DiscordTooManyRequestsError(), retrying in 1 seconds"))
+    done = one("INFO", models, re.escape(
+        f"[Discord Service] Nickname for {proof['username']} has been updated"))
+    running = [event for event, severity, logger, message in rows
+               if severity == "INFO" and logger == tasks and message ==
+               f"[Discord Service] Running update_nickname for user {proof['username']}"]
+    # AA headers have one-second precision. Celery mirrors independently bind the
+    # exact fatal records; allow equality within that precision, never reversed seconds.
+    if (len(running) != 2 or not running[0] <= start <= rejected <= backoff
+            or not backoff < retry <= success <= done or not backoff < running[1] <= retry
+            or not 0 < (success - rejected).total_seconds() <= 5
+            or any(abs((event - rejected).total_seconds()) > 1 for event, _ in errors)):
+        fail()
+    hashes = {digest for _, digest in errors}
+    original_digest = hashlib.sha256("\n".join(sorted(hashes)).encode("ascii")).hexdigest()
+    return hashes, (
+        "recovered warning: Discord nickname HTTP 429 -> HTTP 204 within 5s; "
+        f"original ERROR pair sha256={original_digest}"
+    )
+
+
 def celery_nodename(pattern: str, hostname: str) -> str:
     """Celery 5.6.3 Hostname.convert semantics, without a host Celery dependency.
 
@@ -555,6 +676,11 @@ class DockerHost:
         self.candidate_image_ids: dict[str, str] = {}
         self.auth_replica_counts: dict[str, int] = {}
         self.restart_baselines: dict[str, int] = {}
+        self.restart_baseline_services: dict[str, str] = {}
+        self.retained_restart_images: dict[str, str] = {}
+        self.retained_verifier_review: dict | None = None
+        self.recovered_discord_429_hashes: set[str] = set()
+        self.recovered_discord_429_seen: dict[str, int] = {}
         self.live_replacement_started = False
         self.original_upstream: Path | None = None
         self.original_upstream_metadata: tuple[int, int, int] | None = None
@@ -627,6 +753,8 @@ class DockerHost:
             },
             "previous_image_pins": dict(self.previous_image_pins),
             "auth_replica_counts": dict(self.auth_replica_counts),
+            "restart_baselines": dict(self.restart_baselines),
+            "restart_baseline_services": dict(self.restart_baseline_services),
             "previous_web_slots": list(self.previous_web_slots),
             "candidate_web_slots": list(self.candidate_web_slots),
             "original_local_settings_metadata": list(
@@ -754,7 +882,8 @@ class DockerHost:
         }
         if (
             not isinstance(value, dict)
-            or set(value) != expected_keys
+            or set(value) not in (expected_keys, expected_keys | {
+                "restart_baselines", "restart_baseline_services"})
             or value["schema_version"] != RECOVERY_PLAN_SCHEMA_VERSION
             or value["status"] != "active"
             or not isinstance(value["attempt_id"], str)
@@ -935,6 +1064,10 @@ class DockerHost:
             host.static_assets_backup = backup / "static-assets.previous.tar"
         for name, item in flags.items():
             setattr(host, name, item)
+        host._hydrate_restart_baselines(value.get("restart_baselines", {}),
+                                       value.get("restart_baseline_services", {}))
+        if not host.restart_baselines:
+            host._load_retained_verifier_review(value, sha256_file(active))
         return host, value
 
     @classmethod
@@ -969,6 +1102,120 @@ class DockerHost:
                 return "A verified prior attempt left only a stale recovery marker."
         recovery = host.rollback(None, value["phase"])  # type: ignore[arg-type]
         return "Recovered an incomplete prior deployment before accepting new input: " + recovery
+
+
+    def _hydrate_restart_baselines(self, counts, services) -> None:
+        """Restore evidence, never learn a new baseline from current containers."""
+        expected = {*self.config.auth_services, self.config.database_service,
+                    self.config.redis_service, self.config.proxy_service}
+        if (not isinstance(counts, dict) or not isinstance(services, dict)
+                or set(counts) != set(services)
+                or len(counts) > MAX_SERVICE_REPLICAS * len(expected)
+                or any(not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None
+                       or type(value) is not int or not 0 <= value <= 2**31 - 1
+                       for key, value in counts.items())
+                or any(not isinstance(role, str) or role not in expected
+                       for role in services.values())):
+            raise DeploymentError("Retained restart baseline is malformed")
+        if counts:
+            required = {**self.auth_replica_counts, self.config.database_service: 1,
+                        self.config.redis_service: 1, self.config.proxy_service: 1}
+            if any(sum(role == item for item in services.values()) != number
+                   for role, number in required.items()):
+                raise DeploymentError("Retained restart baseline topology differs")
+        self.restart_baselines = dict(counts)
+        self.restart_baseline_services = dict(services)
+
+    def _load_retained_verifier_review(self, value, plan_digest, *, review_path=None) -> None:
+        """Legacy plans require separately reviewed, private, attempt-bound evidence."""
+        assert self.backup_path is not None
+        path = review_path or self.backup_path / "VERIFIER-REVIEW.json"
+        if not path.exists() and not path.is_symlink():
+            return
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+                or info.st_size > 64 * 1024
+                or (os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600))):
+            raise DeploymentError("Retained verifier review is unsafe")
+        try:
+            review = json.loads(path.read_text(encoding="ascii"))
+        except (OSError, ValueError) as error:
+            raise DeploymentError("Retained verifier review is unreadable") from error
+        if (not isinstance(review, dict)
+                or set(review) != {"schema_version", "attempt_id", "plan_sha256",
+                                  "host_evidence_sha256", "host_observed_at", "containers",
+                                  "discord_429", "verification_since"}
+                or review["schema_version"] != 1 or review["attempt_id"] != value["attempt_id"]
+                or review["plan_sha256"] != plan_digest
+                or not isinstance(review["host_evidence_sha256"], str)
+                or SHA256_RE.fullmatch(review["host_evidence_sha256"]) is None
+                or not isinstance(review["containers"], list)):
+            raise DeploymentError("Retained verifier review identity differs")
+        try:
+            observed = datetime.fromisoformat(review["host_observed_at"])
+            since = datetime.fromisoformat(review["verification_since"])
+            if observed.utcoffset() is None or since.utcoffset() is None or since > observed:
+                raise ValueError()
+        except (TypeError, ValueError) as error:
+            raise DeploymentError("Retained verifier review time boundary is invalid") from error
+        counts, services, images = {}, {}, {}
+        for row in review["containers"]:
+            if (not isinstance(row, dict)
+                    or set(row) != {"container_id", "service", "image_id", "restart_count"}
+                    or not isinstance(row["image_id"], str)
+                    or SAFE_IMAGE_ID_RE.fullmatch(row["image_id"]) is None
+                    or not isinstance(row["container_id"], str)
+                    or not isinstance(row["service"], str)
+                    or row["container_id"] in counts
+                    or row["service"] in self.previous_images
+                    and row["image_id"] != self.previous_images[row["service"]][0]):
+                raise DeploymentError("Retained verifier review container identity differs")
+            counts[row["container_id"]] = row["restart_count"]
+            services[row["container_id"]] = row["service"]
+            images[row["container_id"]] = row["image_id"]
+        self._hydrate_restart_baselines(counts, services)
+        if not counts:
+            raise DeploymentError("Retained verifier review baseline is empty")
+        self.retained_restart_images = images
+        self.retained_verifier_review = review
+        self.log_since = review["verification_since"]
+
+    def _verified_discord_429(self) -> tuple[str, ...]:
+        """Re-read the original bounded request, retaining its recovered warning."""
+        review = self.retained_verifier_review
+        if review is None or review["discord_429"] is None:
+            self.recovered_discord_429_hashes = set()
+            return ()
+        proof = review["discord_429"]
+        if (not isinstance(proof, dict)
+                or set(proof) != {"service", "container_id", "since", "until", "username",
+                                 "guild_id", "member_id", "request_id", "retry_request_id",
+                                 "error_line_sha256"}
+                or proof["service"] != "allianceauth_worker_services"
+                or self.restart_baseline_services.get(proof["container_id"]) != proof["service"]):
+            raise DeploymentError("Retained Discord review identity differs")
+        expected = {proof["service"]: sum(role == proof["service"]
+                    for role in self.restart_baseline_services.values())}
+        if not self._containers_healthy(expected, zero_restart_services=set()):
+            raise DeploymentError("Retained Discord runtime identity or restart changed")
+        deadline = time.monotonic() + self.config.command_timeout_seconds
+        stream = self._stream_log_lines(
+            ["docker", "logs", f"--since={proof['since']}", f"--until={proof['until']}",
+             proof["container_id"]],
+            deadline=deadline, context="Reviewed Discord nickname recovery evidence")
+        lines, size = [], 0
+        try:
+            for line in stream:
+                size += len(line.encode("utf-8")) + 1
+                if size > LOG_READ_BYTES or len(lines) >= 2048:
+                    raise DeploymentError("Retained Discord evidence exceeds its safe bound")
+                lines.append(line)
+        finally:
+            stream.close()
+        hashes, warning = _prove_discord_nickname_429(lines, proof)
+        self.recovered_discord_429_hashes = hashes
+        self.recovered_discord_429_seen = {}
+        return (warning,)
 
     @property
     def compose_prefix(self) -> list[str]:
@@ -2407,6 +2654,7 @@ class DockerHost:
         reference_images: dict[str, str] = {}
         replica_counts: dict[str, int] = {}
         restart_baselines: dict[str, int] = {}
+        restart_services: dict[str, str] = {}
         seen_containers: set[str] = set()
         for service in self.config.auth_services:
             image_ids: set[str] = set()
@@ -2451,6 +2699,7 @@ class DockerHost:
                 image_ids.add(image_id)
                 image_references.add(reference)
                 restart_baselines[container] = int(parts[3])
+                restart_services[container] = service
             if len(image_ids) != 1:
                 raise DeploymentError(
                     f"Live replicas for service {service} do not share one image"
@@ -2470,9 +2719,11 @@ class DockerHost:
         self.previous_images = service_images
         self.auth_replica_counts = replica_counts
         self.restart_baselines = restart_baselines
+        self.restart_baseline_services = restart_services
 
     def _capture_infrastructure_restart_baselines(self) -> None:
         baselines = dict(self.restart_baselines)
+        services = dict(self.restart_baseline_services)
         for service in (
             self.config.database_service,
             self.config.redis_service,
@@ -2501,7 +2752,9 @@ class DockerHost:
                     f"Infrastructure service {service} is not stable"
                 )
             baselines[containers[0]] = int(parts[1])
+            services[containers[0]] = service
         self.restart_baselines = baselines
+        self.restart_baseline_services = services
 
     def _capture_candidate_images(self, bundle: ValidatedBundle) -> None:
         if set(self.previous_images) != set(self.config.auth_services):
@@ -4365,7 +4618,18 @@ class DockerHost:
                 )
                 if len(ids) != expected_count:
                     return False
+                retained = {identity for identity, role in self.restart_baseline_services.items()
+                            if role == service}
+                if (service not in zero_restart_services and retained
+                        and set(ids) != retained):
+                    return False
                 for container in ids:
+                    if container in self.retained_restart_images:
+                        image = self._run(
+                            ["docker", "inspect", "--format", "{{.Image}}", container],
+                            context=f"Retained restart image identity for {service}").strip()
+                        if image != self.retained_restart_images[container]:
+                            return False
                     state = self._run(
                         [
                             "docker",
@@ -5081,7 +5345,7 @@ class DockerHost:
                     f"New web-slot log scan for {slot}",
                 )
             )
-        findings: list[str] = []
+        findings: list[str] = list(self._verified_discord_429())
         failures: list[str] = []
         scan_complete = True
         truncated = False
@@ -5511,6 +5775,16 @@ class DockerHost:
                     reject(_failure_sample(source_lines, index))
                     continue
                 if not FATAL_LOG_RE.search(raw_line):
+                    continue
+                digest = hashlib.sha256(raw_line.encode("utf-8")).hexdigest()
+                if (self.retained_verifier_review is not None
+                        and source == "allianceauth_worker_services"
+                        and digest in self.recovered_discord_429_hashes):
+                    seen = self.recovered_discord_429_seen.get(digest, 0) + 1
+                    self.recovered_discord_429_seen[digest] = seen
+                    if seen == 1:
+                        continue
+                    reject(_failure_sample(source_lines, index))
                     continue
                 safe = _safe_report_text(raw_line, MAX_RETAINED_LOG_FINDING_CHARS)
                 if any(pattern.fullmatch(raw_line) for pattern in allowlist):
