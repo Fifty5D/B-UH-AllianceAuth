@@ -1,4 +1,6 @@
 """Host selection/traffic/report boundaries use synthetic metadata only."""
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +49,43 @@ class PilotBoundaryTests(unittest.TestCase):
         encoded = json.dumps(evidence)
         self.assertNotIn("synthetic-secret-must-not-export", encoded)
         self.assertNotIn("synthetic-password-must-not-export", encoded)
+
+    def test_early_host_setup_failure_emits_structured_safe_readonly_report(self):
+        with (patch("sys.argv", ["pilot", "gh-111111-1", "Synthetic Pilot", "report"]),
+              patch.object(pilot, "collect", side_effect=ValueError("synthetic-secret-never-export")),
+              redirect_stdout(io.StringIO()) as output):
+            code = pilot.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertTrue(report["read_only"])
+        self.assertFalse(report["scan_complete"])
+        self.assertEqual(report["error_type"], "ValueError")
+        self.assertEqual(report["failure_phase"], "host_invocation")
+        self.assertEqual(report["mutation_result"], "not_attempted_read_only")
+        self.assertTrue(report["failure_sites"])
+        self.assertNotIn("synthetic-secret-never-export", json.dumps(report))
+
+    def test_unexpected_apply_host_failure_never_claims_no_mutation(self):
+        with (patch("sys.argv", ["pilot", "gh-111111-1", "Synthetic Pilot", "apply"]),
+              patch.object(pilot, "collect", side_effect=RuntimeError("synthetic-secret-never-export")),
+              redirect_stdout(io.StringIO()) as output):
+            code = pilot.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(report["read_only"])
+        self.assertEqual(report["mutation_result"], "unknown_requires_report_review")
+        self.assertNotIn("synthetic-secret-never-export", json.dumps(report))
+
+    def test_malformed_host_invocation_emits_fail_closed_schema(self):
+        with (patch("sys.argv", ["pilot", "invalid"]),
+              patch.object(pilot, "collect") as collect,
+              redirect_stdout(io.StringIO()) as output):
+            code = pilot.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(report["scan_complete"])
+        self.assertEqual(report["error_type"], "ValueError")
+        collect.assert_not_called()
 
     def test_exact_single_existing_token_selection(self):
         selected = pilot.select_pilot(self.report(), "Synthetic Pilot")

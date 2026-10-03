@@ -338,10 +338,40 @@ def collect(attempt, name, apply):
 
 
 def main():
-    attempt, name, mode = sys.argv[1:]
-    if mode not in {"apply", "report"}:
-        raise PilotStop("invalid mode")
-    output = collect(attempt, name, mode == "apply")
+    mode = "unknown"
+    try:
+        attempt, name, mode = sys.argv[1:]
+        if mode not in {"apply", "report"}:
+            raise PilotStop("invalid mode")
+        output = collect(attempt, name, mode == "apply")
+    except Exception as error:
+        # Setup failures before collect's normal report must still be structured.
+        # Never export stderr, arbitrary messages, configuration values or locals.
+        output = {
+            "schema_version": 1, "single_character_pilot": True,
+            "read_only": mode == "report", "scan_complete": False,
+            "preserve_recovery_resources": True,
+            "error_type": type(error).__name__, "failure_phase": "host_invocation",
+            "mutation_result": ("not_attempted_read_only" if mode == "report"
+                                else "unknown_requires_report_review"),
+            "failure_sites": [],
+        }
+        trace = error.__traceback__
+        while trace is not None and len(output["failure_sites"]) < 12:
+            frame = trace.tb_frame
+            function = frame.f_code.co_name
+            module = frame.f_globals.get("__name__", "")
+            if frame.f_code.co_filename == __file__:
+                component = "incident_host"
+            elif re.fullmatch(r"ops\.deploy(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module):
+                component = module
+            else:
+                component = None
+            if component and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function):
+                output["failure_sites"].append({
+                    "component": component, "function": function, "line": trace.tb_lineno,
+                })
+            trace = trace.tb_next
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0 if output.get("scan_complete") else 1
 
