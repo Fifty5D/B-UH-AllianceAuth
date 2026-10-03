@@ -26,7 +26,7 @@ jobs:
       - name: Compile and test the isolated evidence boundaries
         run: |
           python3 -m compileall -q ops/incidents
-          python3 -m unittest ops.incidents.test_evidence ops.incidents.test_structures_boundaries -v
+          python3 -m unittest ops.incidents.test_evidence ops.incidents.test_structures_boundaries ops.incidents.test_structures_launcher -v
       - name: Parse the PowerShell launcher
         shell: pwsh
         run: |

@@ -163,3 +163,17 @@ Its original observation time and SHA-256 remain explicit; it is not a fresh
 validation of Member Audit grants and does not repeat the database collection.
 The combined private batch report carries this evidence once, rather than
 duplicating it for every apply operation.
+
+
+The pilot launcher caps source archives at 256 KiB and each source file at
+128 KiB. Apply reports remain capped at 256 KiB. Read-only report mode admits up
+to 10 MiB because it carries the existing sanitized incident inventory (whose
+source file is separately capped at 8 MiB), plus bounded live host/owner evidence.
+No collection limits, provider limits, deadlines or mutation bounds are relaxed.
+
+Launcher failures include only fixed guard categories, phase/function/line and
+byte counts. Raw stdout, stderr and arbitrary exception messages are not exported.
+A failure of the initial read-only probe prevents every apply operation. Tests
+execute the actual extracted root launcher with synthetic archives and child
+reports, including a complete report above the former 256 KiB limit and rejected
+oversize/malformed output, wrong mode/schema and source hash mismatch.

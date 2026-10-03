@@ -62,6 +62,21 @@ import zipfile
 
 stage = None
 mode = "unknown"
+phase = "validate_arguments"
+process_started = False
+output_evidence = {"stdout_bytes": None, "stderr_bytes": None, "limit_bytes": None}
+safe_guard_reasons = {
+    "invalid staging arguments": "invalid_staging_arguments",
+    "invalid name": "invalid_name",
+    "invalid staging archive": "invalid_staging_archive",
+    "pilot source changed or exceeded bound": "staging_archive_changed_or_oversized",
+    "unexpected pilot archive members": "unexpected_archive_members",
+    "pilot source exceeds bound": "source_file_exceeded_bound",
+    "pilot source hash mismatch": "source_hash_mismatch",
+    "pilot output missing": "pilot_output_missing",
+    "pilot output exceeded bound": "pilot_output_exceeded_bound",
+    "unexpected report": "unexpected_report_schema",
+}
 try:
     upload, expected, commit, host_hash, recovery_hash, attempt, name_encoded, mode = sys.argv[1:]
     if (not re.fullmatch(r"/tmp/buh-incident-upload\.[A-Za-z0-9]+", upload)
@@ -71,10 +86,13 @@ try:
             or not re.fullmatch(r"gh-[0-9]+-[0-9]+", attempt)
             or mode not in {"apply", "report"}):
         raise ValueError("invalid staging arguments")
+    output_evidence["limit_bytes"] = 10 * 1024 * 1024 if mode == "report" else 256 * 1024
+    phase = "validate_character_name"
     name = base64.b64decode(name_encoded, validate=True).decode("utf-8")
     if not name or len(name) > 100 or any(ord(char) < 32 for char in name):
         raise ValueError("invalid name")
     os.umask(0o077)
+    phase = "validate_archive"
     descriptor = os.open(Path(upload) / "pilot.zip", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -84,6 +102,7 @@ try:
         raise ValueError("pilot source changed or exceeded bound")
     stage = Path(tempfile.mkdtemp(prefix="buh-structures-pilot-" + commit[:8] + "-", dir="/root"))
     wanted = {"run_structures_pilot.py": host_hash, "structures_recovery.py": recovery_hash}
+    phase = "validate_and_extract_sources"
     with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
         members = zipped.infolist()
         if len(members) != 2 or {member.filename for member in members} != set(wanted):
@@ -98,23 +117,37 @@ try:
             destination = stage / member.filename
             destination.write_bytes(data)
             destination.chmod(0o600)
+    phase = "record_invocation"
     (stage / "invocation.json").write_text(json.dumps({
         "source_commit": commit, "attempt_id": attempt, "mode": mode,
         "character_name": name, "host_sha256": host_hash, "recovery_sha256": recovery_hash,
     }, indent=2), encoding="utf-8")
+    phase = "run_pilot"
+    process_started = True
     result = subprocess.run(
         ["/usr/bin/python3", "-B", "-P", str(stage / "run_structures_pilot.py"), attempt, name, mode],
         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "PYTHONPATH": "/usr/local/lib/buh-platform-v2"},
         cwd="/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600,
     )
-    if not result.stdout or len(result.stdout) > 256 * 1024:
-        raise ValueError("pilot output missing or exceeded bound")
+    phase = "check_output_size"
+    output_evidence.update({"stdout_bytes": len(result.stdout), "stderr_bytes": len(result.stderr)})
+    if not result.stdout:
+        raise ValueError("pilot output missing")
+    if len(result.stdout) > output_evidence["limit_bytes"]:
+        raise ValueError("pilot output exceeded bound")
+    phase = "parse_report"
     report = json.loads(result.stdout)
-    if report.get("read_only") != (mode == "report") or not report.get("single_character_pilot"):
+    phase = "validate_report"
+    if (not isinstance(report, dict) or report.get("schema_version") != 1
+            or type(report.get("scan_complete")) is not bool
+            or report.get("read_only") is not (mode == "report")
+            or report.get("single_character_pilot") is not True):
         raise ValueError("unexpected report")
+    report["launcher_output"] = output_evidence
     report["pilot_source_commit"] = commit
     report["staged_report_path"] = str(stage / "pilot-report.json")
     report["process_exit_code"] = result.returncode
+    phase = "save_report"
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
     (stage / "pilot-report.json").write_text(encoded, encoding="utf-8")
     print(encoded, end="", flush=True)
@@ -124,8 +157,17 @@ except SystemExit:
 except Exception as error:
     report = {"read_only": mode == "report", "single_character_pilot": True,
               "scan_complete": False, "preserve_recovery_resources": True,
-              "mutation_result": "unknown_requires_report_review",
-              "error_type": type(error).__name__}
+              "mutation_result": ("not_attempted_read_only" if mode == "report"
+                                  else "unknown_requires_report_review" if process_started else "not_started"),
+              "error_type": type(error).__name__, "failure_phase": phase,
+              "guard_reason": safe_guard_reasons.get(str(error)),
+              "launcher_output": output_evidence, "failure_sites": []}
+    trace = error.__traceback__
+    while trace is not None and len(report["failure_sites"]) < 8:
+        if trace.tb_frame.f_globals is globals():
+            report["failure_sites"].append({"component": "launcher", "function": "root_launcher",
+                                            "line": trace.tb_lineno})
+        trace = trace.tb_next
     if stage is not None:
         report["staged_report_path"] = str(stage / "pilot-failure.json")
         (stage / "pilot-failure.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
