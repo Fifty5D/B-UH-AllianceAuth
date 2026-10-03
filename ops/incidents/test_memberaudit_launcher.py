@@ -102,7 +102,7 @@ class MemberAuditLauncherTests(unittest.TestCase):
         report, code, process = self.invoke(mode="apply")
         self.assertEqual(code, 0)
         self.assertFalse(report["read_only"])
-        self.assertEqual(report["launcher_output"]["limit_bytes"], 256 * 1024)
+        self.assertEqual(report["launcher_output"]["limit_bytes"], 2 * 1024 * 1024)
         self.assertEqual(process.call_args.args[0][-1], "apply")
 
     def test_missing_output_reports_lengths_without_exporting_stderr(self):

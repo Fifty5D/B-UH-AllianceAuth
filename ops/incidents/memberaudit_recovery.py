@@ -514,7 +514,7 @@ def verify_primary_payload(member, section, data):
 
 
 def update_one(member, selected, token):
-    section = selected["section"]
+    section = Character.UpdateSection(selected["section"])
     observations, payloads = [], {}
     original_if_changed = member.update_section_if_changed
     original_fetch = member.fetch_token
@@ -639,7 +639,16 @@ def run(target, *, apply=False):
     }
     before = inventory(target)
     result["before_token_inventory"] = before
+    result["record_presence"] = {
+        "auth_link_exists": link_matches(target),
+        "matching_baseline_token_exists": Token.objects.filter(
+            pk__in=target["token_ids"], user_id=target["user_id"], character_id=target["character_id"],
+        ).exists(),
+        "memberaudit_character_exists": Character.objects.filter(pk=target["memberaudit_character_pk"]).exists(),
+    }
     try:
+        if not result["record_presence"]["matching_baseline_token_exists"]:
+            raise RecoveryStop("missing_token_record")
         from django.db.migrations.executor import MigrationExecutor
         executor = MigrationExecutor(connection)
         if executor.migration_plan(executor.loader.graph.leaf_nodes()):
