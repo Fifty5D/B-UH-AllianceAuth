@@ -5,10 +5,13 @@ No installed application, infrastructure, Member Audit status or release is chan
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import logging
 import re
 import signal
 import time
+
+import requests
 from unittest.mock import patch
 
 from allianceauth.authentication.models import CharacterOwnership
@@ -17,7 +20,6 @@ from django.db.models.signals import pre_delete, pre_save
 from django.utils.timezone import now
 from esi.models import Token
 from structures.models import Owner, OwnerCharacter, Structure
-from structures.models import owners as owners_module
 
 
 DISABLE_REASON = "No valid token found for character"
@@ -28,8 +30,9 @@ SYNC_FIELDS = (
 
 
 class RecoveryStop(Exception):
-    def __init__(self, category):
+    def __init__(self, category, *, status_code=None):
         self.category = category
+        self.status_code = status_code
         super().__init__(category)
 
 
@@ -72,6 +75,75 @@ def exception_category(error):
         category = "retryable_or_unclassified_failure"
     return {"category": category, "exception_types": classes,
             "oauth_codes": sorted(set(oauth)), "http_statuses": sorted(set(statuses))}
+
+
+
+def failure_sites(error):
+    """Bounded code locations only; no paths, messages, locals or response bodies."""
+    sites, seen = [], set()
+    current = error
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        trace = current.__traceback__
+        while trace is not None:
+            code = trace.tb_frame.f_code
+            module = trace.tb_frame.f_globals.get("__name__", "")
+            if code.co_filename in {globals().get("__file__"), "<buh-structures-recovery>"}:
+                component = "recovery"
+            elif re.fullmatch(r"(?:structures|esi)(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module):
+                component = module
+            else:
+                component = None
+            if component and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", code.co_name):
+                site = {"component": component, "function": code.co_name, "line": trace.tb_lineno}
+                if site not in sites:
+                    sites.append(site)
+                    if len(sites) >= 16:
+                        return {"failure_sites": sites, "failure_sites_truncated": True}
+            trace = trace.tb_next
+        current = current.__cause__ or current.__context__
+    return {"failure_sites": sites, "failure_sites_truncated": current is not None}
+
+
+def public_character_identity(character_id):
+    """Fresh public identity lookup independent of Structures' restricted client.
+
+    No stored credential is sent. The enclosing request/deadline guard applies
+    to this GET as well as the native SSO/ESI calls.
+    """
+    if type(character_id) is not int or character_id <= 0:
+        raise RecoveryStop("invalid_public_character_id")
+    url = f"https://esi.evetech.net/latest/characters/{character_id}/?datasource=tranquility"
+    started = now()
+    with requests.get(
+        url, headers={"User-Agent": "B-UH-existing-token-incident-recovery",
+                      "Cache-Control": "no-cache"},
+        stream=True, allow_redirects=False, timeout=15,
+    ) as response:
+        if response.status_code != 200:
+            raise RecoveryStop(
+                "public_character_unavailable" if response.status_code == 404
+                else "public_character_http_rejection",
+                status_code=response.status_code,
+            )
+        if response.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            raise RecoveryStop("public_character_response_not_json")
+        chunks, size = [], 0
+        for chunk in response.iter_content(chunk_size=4096):
+            size += len(chunk)
+            if size > 16 * 1024:
+                raise RecoveryStop("public_character_response_exceeds_bound")
+            chunks.append(chunk)
+        try:
+            data = json.loads(b"".join(chunks))
+        except (ValueError, UnicodeError):
+            raise RecoveryStop("public_character_response_incomplete") from None
+        if (not isinstance(data, dict) or type(data.get("corporation_id")) is not int
+                or data["corporation_id"] <= 0):
+            raise RecoveryStop("public_character_identity_incomplete")
+        return {"character_id": character_id, "corporation_id": data["corporation_id"],
+                "http_status": response.status_code, "byte_size": size,
+                "requested_at": stamp(started), "received_at": stamp(now())}
 
 
 def identity(token):
@@ -120,7 +192,6 @@ def preserve_records(owner_pk, token_pk, expected_token_identity):
 @contextmanager
 def bounded_requests(maximum_seconds=360):
     """Bound requests used by the pinned SSO/ESI client; emit no credential logs."""
-    import requests
     original = requests.sessions.Session.request
     deadline = time.monotonic() + maximum_seconds
     previous_level = logging.root.manager.disable
@@ -138,13 +209,18 @@ def bounded_requests(maximum_seconds=360):
             raise RecoveryStop("operation_deadline_exceeded")
         kwargs["timeout"] = min(15, remaining)
         response = original(session, method, url, *args, **kwargs)
+        failure = None
         if response.status_code in {420, 429}:
-            raise RecoveryStop("provider_throttling")
+            failure = "provider_throttling"
+        elif response.status_code >= 500:
+            failure = "provider_server_failure"
         remaining_errors = response.headers.get("X-Esi-Error-Limit-Remain")
-        if remaining_errors is not None and str(remaining_errors).isdigit() and int(remaining_errors) <= 5:
-            raise RecoveryStop("provider_error_budget_low")
-        if response.status_code >= 500:
-            raise RecoveryStop("provider_server_failure")
+        if (failure is None and remaining_errors is not None
+                and str(remaining_errors).isdigit() and int(remaining_errors) <= 5):
+            failure = "provider_error_budget_low"
+        if failure:
+            response.close()
+            raise RecoveryStop(failure, status_code=response.status_code)
         return response
 
     logging.disable(logging.CRITICAL)
@@ -258,7 +334,8 @@ def run(target, *, apply=False):
     result = {
         "schema_version": 1, "read_only": not apply, "apply_requested": apply,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "category": "not_attempted", "recovered": False, "refresh_attempted": False,
+        "category": "not_attempted", "phase": "preflight",
+        "recovered": False, "refresh_attempted": False,
         "memberaudit_changes": False, "tokens_deleted": False, "links_removed": False,
         "historical_records_deleted": False, "steps": [],
     }
@@ -273,6 +350,7 @@ def run(target, *, apply=False):
             "auth_link_exists": CharacterOwnership.objects.filter(pk=target["auth_link_pk"]).exists(),
             "configured_character_exists": OwnerCharacter.objects.filter(pk=target["owner_character_pk"]).exists(),
         }
+        result["phase"] = "select_existing_records"
         owner_character, token = selected(target)
         eligible(owner_character, token, target)
         before = describe(owner_character, token)
@@ -284,6 +362,7 @@ def run(target, *, apply=False):
         with bounded_requests(), preserve_records(
             owner_character.owner_id, token.pk, expected_identity
         ):
+            result["phase"] = "refresh_existing_token"
             result["refresh_attempted"] = True
             # Deliberately never require_valid, refresh_or_delete, or create a token.
             token.refresh()
@@ -293,12 +372,13 @@ def run(target, *, apply=False):
             ):
                 raise RecoveryStop("fresh_refresh_not_proven")
             result["refresh_succeeded"] = True
+            result["phase"] = "verify_fresh_claims"
             verify_claims(token)
             result["fresh_identity_and_scopes_verified"] = True
-            current_character = owners_module.esi.client.Character.GetCharactersCharacterId(
-                character_id=token.character_id
-            ).results(use_etag=False)
-            if current_character.corporation_id != owner_character.owner.corporation.corporation_id:
+            result["phase"] = "verify_public_character_identity"
+            current_character = public_character_identity(token.character_id)
+            result["public_character_identity"] = current_character
+            if current_character["corporation_id"] != owner_character.owner.corporation.corporation_id:
                 raise RecoveryStop("current_corporation_changed")
             result["current_corporation_verified"] = True
             # The disabled selector stays disabled throughout the native sync.
@@ -335,6 +415,7 @@ def run(target, *, apply=False):
                         ("update_asset_esi", "assets_last_update_at"),
                         ("fetch_notifications_esi", "notifications_last_update_at"),
                     ):
+                        result["phase"] = method
                         started = now()
                         getattr(owner, method)()
                         owner.refresh_from_db()
@@ -349,6 +430,7 @@ def run(target, *, apply=False):
                     owner.fetch_token = original_fetch
                     owner._fetch_owner_assets_from_esi = original_assets
                     owner._fetch_notifications_from_esi = original_notifications
+                result["phase"] = "reenable_verified_selector"
                 if not owner_character.is_enabled:
                     changed = OwnerCharacter.objects.filter(
                         pk=owner_character.pk, is_enabled=False,
@@ -357,6 +439,7 @@ def run(target, *, apply=False):
                     ).update(is_enabled=True, disabled_reason="", error_count=0)
                     if changed != 1:
                         raise RecoveryStop("disabled_state_changed_during_sync")
+                result["phase"] = "verify_record_preservation"
                 if not CharacterOwnership.objects.filter(
                     pk=target["auth_link_pk"], user_id=token.user_id,
                     character__character_id=token.character_id,
@@ -365,6 +448,7 @@ def run(target, *, apply=False):
                 if list(Token.objects.filter(character_id=token.character_id).order_by("pk")
                         .values_list("pk", flat=True)) != before["existing_token_ids"]:
                     raise RecoveryStop("token_inventory_changed_during_sync")
+        result["phase"] = "complete"
         result["category"] = "recovered_existing_token"
         result["recovered"] = True
         result["sync_transaction_committed"] = True
@@ -372,6 +456,8 @@ def run(target, *, apply=False):
             step["committed"] = True
     except Exception as error:
         result.update(exception_category(error))
+        result.update(failure_sites(error))
+        result["failure_phase"] = result["phase"]
         result["sync_transaction_committed"] = False
         # Attempts that completed before a failure were rolled back together.
         for step in result["steps"]:
@@ -396,7 +482,6 @@ def run(target, *, apply=False):
 
 
 def emit(target, *, apply=False):
-    import json
     print("BUH_STRUCTURES_RECOVERY_BEGIN")
     print(json.dumps(run(target, apply=apply), sort_keys=True))
     print("BUH_STRUCTURES_RECOVERY_END")

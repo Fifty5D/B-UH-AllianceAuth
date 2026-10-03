@@ -110,3 +110,16 @@ Apply mode should first be used for a single incident pilot. Subsequent operatio
 must follow reviewed pilot results. Rerunning uses the same record and does not
 create a replacement credential. No output contains a grant, access token, owner
 hash, raw OAuth response, arbitrary exception message, or connection secret.
+
+
+The pilot checks the character's current public corporation with a separate
+credential-free, streamed ESI GET. The pinned Structures provider deliberately
+does not expose that public character operation. The GET has a 15-second request
+limit, the overall pilot deadline, a 16 KiB response cap, no redirects, and
+strict JSON/corporation validation. Provider failures leave the selector
+disabled without mislabelling a freshly refreshed SSO token as revoked.
+
+Focused checks use the real pinned provider to prove that restriction and
+exercise the prepared public HTTP request, native sync methods and retained
+rows. Failure reports include only the operation phase and bounded function/line
+locations, never exception messages, locals, response bodies or credentials.

@@ -16,7 +16,9 @@ from esi.managers import TokenManager, TokenQueryset
 from esi.models import Token
 from memberaudit.models import Character, CharacterUpdateStatus
 from oauthlib.oauth2 import InvalidGrantError
+from requests import Response
 from requests.exceptions import Timeout
+import requests
 from requests_oauthlib import OAuth2Session
 from structures.models import Notification, Owner, OwnerCharacter
 from structures.models import owners as owners_module
@@ -64,10 +66,18 @@ class StructuresRecoveryTests(NoSocketsTestCase):
             "auth_link_pk": self.link.pk, "character_id": self.character.character_id,
             "token_pk": self.token.pk,
         }
-        self.client = MagicMock()
-        self.client.Character.GetCharactersCharacterId.return_value.results.return_value = SimpleNamespace(
-            corporation_id=self.corp.corporation_id
+        # Unlisted operations must raise, as on the real pinned Structures provider.
+        self.client = SimpleNamespace(
+            Character=SimpleNamespace(GetCharactersCharacterIdNotifications=MagicMock()),
+            Corporation=SimpleNamespace(GetCorporationsCorporationIdStructures=MagicMock()),
+            Assets=SimpleNamespace(GetCorporationsCorporationIdAssets=MagicMock()),
         )
+        self.public_payload = {"corporation_id": self.corp.corporation_id}
+        self.public_status = 200
+        self.public_headers = {"Content-Type": "application/json; charset=utf-8"}
+        self.public_body = None
+        self.public_error = None
+        self.public_requests = []
         self.client.Corporation.GetCorporationsCorporationIdStructures.return_value.results.return_value = []
         self.client.Assets.GetCorporationsCorporationIdAssets.return_value.results.return_value = []
         self.client.Character.GetCharactersCharacterIdNotifications.return_value.results.return_value = []
@@ -76,10 +86,38 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.grant = {"access_token": "synthetic-access-secret-after",
                       "refresh_token": "synthetic-refresh-secret-after"}
 
+
+    def public_send(self, request, **kwargs):
+        """Exercise requests' prepared GET and streaming response, not a provider mock."""
+        self.assertEqual(
+            request.url,
+            f"https://esi.evetech.net/latest/characters/{self.character.character_id}/?datasource=tranquility",
+        )
+        self.assertEqual(request.method, "GET")
+        self.assertNotIn("Authorization", request.headers)
+        self.assertNotIn("Cookie", request.headers)
+        self.assertIsNone(request.body)
+        self.assertLessEqual(kwargs["timeout"], 15)
+        self.assertFalse(kwargs["allow_redirects"])
+        self.assertTrue(kwargs["stream"])
+        self.public_requests.append(request.url)
+        if self.public_error:
+            raise self.public_error
+        response = Response()
+        response.status_code = self.public_status
+        response.headers.update(self.public_headers)
+        response.request, response.url = request, request.url
+        body = self.public_body
+        if body is None:
+            body = json.dumps(self.public_payload).encode("utf-8")
+        response.raw = io.BytesIO(body)
+        return response
+
     def invoke(self, *, apply=True, oauth_error=None, extra=None):
         with (patch.object(OAuth2Session, "refresh_token", return_value=self.grant,
                            side_effect=oauth_error) as oauth,
               patch.object(TokenManager, "validate_access_token", return_value=self.claims),
+              patch.object(requests.sessions.Session, "send", side_effect=self.public_send),
               patch.object(owners_module, "esi", SimpleNamespace(client=self.client)),
               patch.object(owners_module, "STRUCTURES_FEATURE_CUSTOMS_OFFICES", False),
               patch.object(owners_module, "STRUCTURES_FEATURE_STARBASES", False),
@@ -120,6 +158,9 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         for field in recovery.SYNC_FIELDS:
             self.assertGreaterEqual(getattr(self.owner, field), started)
         self.assertEqual(self.token.refresh_token, self.grant["refresh_token"])
+        self.assertEqual(len(self.public_requests), 1)
+        self.assertEqual(result["public_character_identity"]["corporation_id"], self.corp.corporation_id)
+        self.assertTrue(result["current_corporation_verified"])
         self.assertEqual(len(result["steps"]), 3)
         self.assertTrue(all(step["committed"] for step in result["steps"]))
         self.assert_preserved()
@@ -135,6 +176,7 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.assertEqual(calls, 0)
         self.assertTrue(result["read_only"])
         self.assertFalse(result["refresh_attempted"])
+        self.assertEqual(self.public_requests, [])
         self.assertEqual(before, (list(Token.objects.values()), list(Owner.objects.values()),
                                  list(OwnerCharacter.objects.values()), list(CharacterOwnership.objects.values()),
                                  list(CharacterUpdateStatus.objects.values())))
@@ -202,12 +244,115 @@ class StructuresRecoveryTests(NoSocketsTestCase):
         self.assert_preserved()
 
     def test_current_corporation_change_stays_fail_closed(self):
-        self.client.Character.GetCharactersCharacterId.return_value.results.return_value = SimpleNamespace(
-            corporation_id=self.corp.corporation_id + 1
-        )
+        self.public_payload = {"corporation_id": self.corp.corporation_id + 1}
         result, _ = self.invoke()
         self.assertEqual(result["category"], "current_corporation_changed")
         self.assertFalse(result["recovered"])
+        self.assert_preserved()
+
+
+    def test_real_pinned_structures_provider_does_not_expose_public_character_lookup(self):
+        client = owners_module.esi.client
+        self.assertTrue(callable(client.Character.GetCharactersCharacterIdNotifications))
+        with self.assertRaises(AttributeError):
+            getattr(client.Character, "GetCharactersCharacterId")
+        result, _ = self.invoke()
+        self.assertTrue(result["recovered"], result)
+        self.assert_preserved()
+
+    def test_truncated_public_json_preserves_rotated_token_and_disabled_selector(self):
+        self.public_body = b'{"corporation_id":'
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "public_character_response_incomplete")
+        self.assertEqual(result["failure_phase"], "verify_public_character_identity")
+        self.assertTrue(result["refresh_succeeded"])
+        self.assertTrue(result["same_token_pk"])
+        self.selector.refresh_from_db()
+        self.token.refresh_from_db()
+        self.assertFalse(self.selector.is_enabled)
+        self.assertEqual(self.token.refresh_token, self.grant["refresh_token"])
+        self.assertEqual(result["steps"], [])
+        self.assertTrue(result["failure_sites"])
+        self.assertFalse(result["failure_sites_truncated"])
+        self.assert_preserved()
+
+    def test_malformed_public_corporation_identity_never_clears_disabled_state(self):
+        for payload in ({}, [], {"corporation_id": True}, {"corporation_id": 0},
+                        {"corporation_id": "123"}):
+            with self.subTest(payload=payload):
+                self.public_payload = payload
+                result, _ = self.invoke()
+                self.assertEqual(result["category"], "public_character_identity_incomplete")
+                self.assertFalse(result["recovered"])
+                self.selector.refresh_from_db()
+                self.assertFalse(self.selector.is_enabled)
+                self.assert_preserved()
+
+    def test_oversized_public_response_is_bounded_before_native_sync(self):
+        self.public_body = b" " * (16 * 1024 + 1)
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "public_character_response_exceeds_bound")
+        self.assertEqual(result["steps"], [])
+        self.assert_preserved()
+
+    def test_public_provider_errors_are_not_misclassified_as_revoked_sso_tokens(self):
+        for status, category in ((404, "public_character_unavailable"),
+                                 (403, "public_character_http_rejection"),
+                                 (429, "provider_throttling"),
+                                 (502, "provider_server_failure"),
+                                 (302, "public_character_http_rejection")):
+            with self.subTest(status=status):
+                self.public_status = status
+                self.public_body = b"synthetic-response-secret"
+                result, _ = self.invoke()
+                self.assertEqual(result["category"], category)
+                self.assertEqual(result["http_statuses"], [status])
+                self.assertFalse(result["permanent_oauth_failure_proven"])
+                self.assertTrue(result["refresh_succeeded"])
+                self.assertEqual(result["steps"], [])
+                self.assertNotIn("synthetic-response-secret", json.dumps(result))
+                self.assert_preserved()
+
+    def test_low_public_esi_error_budget_stops_before_native_sync(self):
+        self.public_headers["X-Esi-Error-Limit-Remain"] = "5"
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "provider_error_budget_low")
+        self.assertEqual(result["steps"], [])
+        self.assert_preserved()
+
+    def test_public_transport_failure_then_same_token_rerun_recovers(self):
+        self.public_error = Timeout("synthetic-transport-secret")
+        result, _ = self.invoke()
+        self.assertEqual(result["failure_phase"], "verify_public_character_identity")
+        self.assertTrue(result["refresh_succeeded"])
+        self.assertFalse(result["permanent_oauth_failure_proven"])
+        self.assertNotIn("synthetic-transport-secret", json.dumps(result))
+        self.assert_preserved()
+        self.public_error = None
+        recovered, _ = self.invoke()
+        self.assertTrue(recovered["recovered"], recovered)
+        self.assert_preserved()
+
+    def test_non_json_public_response_never_clears_disabled_state(self):
+        self.public_headers["Content-Type"] = "text/html"
+        self.public_body = b"synthetic-response-secret"
+        result, _ = self.invoke()
+        self.assertEqual(result["category"], "public_character_response_not_json")
+        self.assertNotIn("synthetic-response-secret", json.dumps(result))
+        self.assert_preserved()
+
+    def test_attribute_error_in_native_sync_reports_only_safe_phase_and_code_locations(self):
+        def failing_sync(owner, *args, **kwargs):
+            raise AttributeError("synthetic-attribute-secret")
+        result, _ = self.invoke(extra=patch.object(Owner, "update_asset_esi", failing_sync))
+        self.assertEqual(result["exception_types"], ["AttributeError"])
+        self.assertEqual(result["failure_phase"], "update_asset_esi")
+        self.assertFalse(result["recovered"])
+        self.assertFalse(result["steps"][0]["committed"])
+        self.assertTrue(any(site["function"] == "run" for site in result["failure_sites"]))
+        encoded = json.dumps(result)
+        self.assertNotIn("synthetic-attribute-secret", encoded)
+        self.assertNotIn("structures_checks.py", encoded)
         self.assert_preserved()
 
     def test_failed_later_sync_rolls_back_native_updates_but_keeps_rotated_refresh_grant(self):
