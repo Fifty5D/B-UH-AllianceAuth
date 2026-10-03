@@ -50,7 +50,7 @@ jobs:
           PY
           python -m pip install --require-hashes --only-binary=:all: -r /tmp/buh-verifier-deps.txt
       - run: python -m compileall -q ops/deploy tests/deploy
-      - run: ruff check ops/deploy/docker_host.py tests/deploy/test_verifier_corrections.py tests/deploy/verifier_fixtures.py
+      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/verifier_fixtures.py
       - name: Run focused regressions and complete host-independent deployment suite
         run: python -m unittest discover -s tests/deploy -t . -p 'test_*.py' -v
       - name: Parse the owner launcher without executing it
