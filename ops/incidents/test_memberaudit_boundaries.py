@@ -1,7 +1,11 @@
 """Synthetic selection, accounting, and launcher safety; no production services."""
 import copy
 import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ops.incidents import memberaudit_selection as select
 from ops.incidents import run_memberaudit_recovery as host
@@ -120,6 +124,97 @@ class MemberAuditBoundaryTests(unittest.TestCase):
         source = Path(host.__file__).read_text()
         for prohibited in ("recover_incomplete_plan(", "remove_safety_containers(", '["docker", "rm"', '["docker", "stop"'):
             self.assertNotIn(prohibited, source)
+
+
+class MemberAuditSequenceTests(unittest.TestCase):
+    def invoke(self, failure_at=None):
+        from ops.deploy.contracts import ReceiverConfig
+        targets = []
+        for i in range(1, 88):
+            targets.append({
+                "memberaudit_character_pk": i, "character_id": 900000000 + i,
+                "character_name": "Synthetic " + str(i), "user_id": i,
+                "auth_link_pk": i, "token_ids": [i],
+                "sections": [{"section": name} for name in (
+                    "location", "online_status", "ship", "skill_queue")],
+            })
+        excluded = [{"status_pk": i + 1000, "memberaudit_character_pk": 1000 + i % 12}
+                    for i in range(61)]
+        snapshot = {"sections": 61, "characters": 12, "states_sha256": "e" * 64}
+        state = {
+            "hold_sha256": host.HOLD_SHA, "active_upstream_sha256": "b" * 64,
+            "live_auth_services": {"web": [{"container_id": "c" * 64}]},
+            "runtime_container_id": "c" * 64, "active_upstream_container_ids": ["c" * 64],
+            "platform_version": "0.8.2", "disk": {"free_bytes": 100 * 1024 ** 3},
+        }
+        pilot = MagicMock()
+        pilot.latest_report.return_value = (Path("/root/synthetic-baseline"), {"attempt_id": "gh-111-1"}, host.BASELINE_SHA)
+        pilot.verify_host.return_value = state
+        config = SimpleNamespace(state_dir=Path("/root/synthetic-state"),
+                                 gunicorn_service="web", manage_py="manage.py")
+        engine = MagicMock()
+        count = 0
+
+        def run_shell(*args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == 1:
+                value = {"schema_version": 1, "recovered": False,
+                         "category": "eligible_existing_token_not_yet_validated",
+                         "excluded_snapshot": snapshot}
+            else:
+                index = count - 1
+                success = index != failure_at
+                value = {
+                    "schema_version": 1, "memberaudit_character_pk": index,
+                    "recovered": success, "category": "recovered_existing_token" if success else "provider_throttling",
+                    "requires_reauthorization": False, "excluded_snapshot": snapshot,
+                    "sections": [{"verified": True} for _ in range(4)] if success else [],
+                }
+            return "BUH_MEMBERAUDIT_BEGIN\n" + json.dumps(value) + "\nBUH_MEMBERAUDIT_END"
+
+        engine._compose.side_effect = run_shell
+        with (patch.object(host, "qualified_host", return_value=pilot),
+              patch.object(host, "select_outage", return_value=(targets, excluded)),
+              patch.object(host, "checkpoint") as saved,
+              patch.object(host, "retained_fingerprint", return_value={"synthetic": "preserved"}),
+              patch.object(ReceiverConfig, "load", return_value=config),
+              patch("ops.deploy.docker_host.DockerHost", return_value=engine),
+              patch.object(host.os, "geteuid", return_value=0),
+              patch.object(host.os, "open", return_value=123),
+              patch.object(host.os, "close"),
+              patch.object(host.fcntl, "flock")):
+            result = host.recover("gh-111-1", "Synthetic 1", "apply", "/root/synthetic-stage")
+        self.assertGreater(saved.call_count, 1)
+        # No retained-plan method may have been called.
+        self.assertEqual([call[0] for call in engine.method_calls], ["_compose"] * count)
+        return result, count
+
+    def test_pilot_failure_stops_before_representatives_or_bulk(self):
+        result, count = self.invoke(failure_at=1)
+        self.assertTrue(result["scan_complete"], result)
+        self.assertFalse(result["recovery_complete"])
+        self.assertEqual(count, 2)
+        self.assertEqual(result["counts"]["not_attempted"], 86)
+        self.assertEqual(result["stop_reason"], "provider_throttling")
+        self.assertTrue(result["retained_resources_unchanged_verified"])
+
+    def test_representative_failure_stops_before_later_batches(self):
+        result, count = self.invoke(failure_at=3)
+        self.assertEqual(count, 4)
+        self.assertEqual(result["counts"]["recovered_with_existing_tokens"], 2)
+        self.assertEqual(result["counts"]["sections_successfully_recovered"], 8)
+        self.assertEqual(result["counts"]["not_attempted"], 84)
+
+    def test_all_success_finishes_exact_roster_and_counts_then_stops(self):
+        result, count = self.invoke()
+        self.assertTrue(result["recovery_complete"], result)
+        self.assertEqual(count, 88)
+        self.assertEqual(result["counts"]["recovered_with_existing_tokens"], 87)
+        self.assertEqual(result["counts"]["sections_successfully_recovered"], 348)
+        self.assertTrue(result["retained_resources_unchanged_verified"])
+        self.assertEqual([b["size"] for b in result["batches"]][:3], [1, 3, 5])
+        self.assertLessEqual(max(b["size"] for b in result["batches"]), 10)
 
 
 if __name__ == "__main__":
