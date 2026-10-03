@@ -177,3 +177,38 @@ A failure of the initial read-only probe prevents every apply operation. Tests
 execute the actual extracted root launcher with synthetic archives and child
 reports, including a complete report above the former 256 KiB limit and rejected
 oversize/malformed output, wrong mode/schema and source hash mismatch.
+
+
+## Reconcile the retained attempt after Structures recovery
+
+The run-retained-recovery.ps1 bridge defaults to report mode. It reuses the
+already-staged, checksum-qualified pilot sources and the installed receiver;
+it does not install replacement application or receiver code.
+
+Recover mode is a production host operation. It takes the existing receiver
+lock and calls only the installed DockerHost.recover_incomplete_plan API.
+Before that call, every qualified incident owner must currently be enabled,
+up, identity/scope complete and fresh for all four native checks, including
+notification forwarding. A false is_up or stale forwarding timestamp blocks
+cleanup. The exact attempt and retained hold digest must match. The installed
+receiver runtime files are checked against its root-owned receipt.
+
+The supported API restores and verifies the previous configuration, images,
+replica topology, migrations, Redis/Celery, HTTP/static routes, application
+health and new logs before removing its own safety containers/image pins and
+retiring the active plan. No global log exception is added. Database migrations
+are not reversed and no history/database restore is performed.
+
+One existing database backup, bounded to 1 GiB, receives a streamed SHA-256 check
+against BACKUP.json before recovery. Its inode/size/mtime and continued presence
+are checked afterward. The bridge also verifies the unchanged service container
+identities, exclusive previous-service traffic, current owner health and exact
+Auth/token inventories after recovery. It retains a completion receipt in the
+existing backup directory only after those checks pass.
+
+The bridge never refreshes credentials, clears Member Audit flags, manually
+forwards notifications, deploys a release or performs custom container cleanup.
+It does not repeat recovery on any failure, missing plan or unknown outcome.
+Failed reports export only fixed guard categories, phase and bounded function/
+line information; raw command logs, exception messages and secrets stay private.
+The launcher saves one bounded combined Desktop/root-private JSON report.

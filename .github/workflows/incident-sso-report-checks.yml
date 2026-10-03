@@ -26,13 +26,13 @@ jobs:
       - name: Compile and test the isolated evidence boundaries
         run: |
           python3 -m compileall -q ops/incidents
-          python3 -m unittest ops.incidents.test_evidence ops.incidents.test_structures_boundaries ops.incidents.test_structures_launcher -v
+          python3 -m unittest ops.incidents.test_evidence ops.incidents.test_structures_boundaries ops.incidents.test_structures_launcher ops.incidents.test_retained_recovery -v
       - name: Parse the PowerShell launcher
         shell: pwsh
         run: |
           $parseTokens = $null
           $parseErrors = $null
-          foreach ($launcher in @('run-sso-incident.ps1', 'run-structures-pilot.ps1', 'run-structures-batch.ps1', 'test_structures_batch.ps1')) {
+          foreach ($launcher in @('run-sso-incident.ps1', 'run-structures-pilot.ps1', 'run-structures-batch.ps1', 'test_structures_batch.ps1', 'run-retained-recovery.ps1')) {
             [System.Management.Automation.Language.Parser]::ParseFile(
               (Join-Path (Get-Location).Path ('ops/incidents/' + $launcher)),
               [ref]$parseTokens, [ref]$parseErrors) | Out-Null
@@ -49,7 +49,7 @@ jobs:
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
-          for name in ("collect_sso_incident.py", "database_report.py", "run-sso-incident.ps1", "run_structures_pilot.py", "structures_recovery.py", "run-structures-pilot.ps1", "run-structures-batch.ps1"):
+          for name in ("collect_sso_incident.py", "database_report.py", "run-sso-incident.ps1", "run_structures_pilot.py", "structures_recovery.py", "run-structures-pilot.ps1", "run-structures-batch.ps1", "reconcile_structures_attempt.py", "run-retained-recovery.ps1"):
               path = Path("ops/incidents") / name
               print("TESTED_FILE_SHA256", name, hashlib.sha256(path.read_bytes()).hexdigest())
           PY
