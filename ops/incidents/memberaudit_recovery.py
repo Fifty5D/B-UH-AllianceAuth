@@ -445,7 +445,7 @@ def verify_primary_payload(member, section, data):
     if section == "location":
         row = models.CharacterLocation.objects.get(character=member)
         if (row.eve_solar_system_id != data["solar_system_id"]
-                or row.location_id != data.get("station_id", data.get("structure_id", data["solar_system_id"]))):
+                or row.location_id != (data.get("station_id") or data.get("structure_id") or data["solar_system_id"])):
             raise RecoveryStop("location_payload_row_mismatch")
     elif section == "online_status":
         row = models.CharacterOnlineStatus.objects.get(character=member)

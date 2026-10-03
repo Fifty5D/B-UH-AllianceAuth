@@ -199,6 +199,13 @@ class MemberAuditRecoveryTests(NoSocketsTestCase):
         self.token.refresh_from_db()
         self.assertEqual(self.token.character_id, self.character.character_id)
 
+    def test_nullable_provider_location_ids_match_native_solar_system_fallback(self):
+        self.payloads["location"].update(station_id=None, structure_id=None)
+        result, _ = self.invoke()
+        self.assertTrue(result["recovered"], result)
+        self.assertEqual(models.CharacterLocation.objects.get(character=self.member).location_id, self.system.pk)
+        self.assert_preserved(result)
+
     def test_report_mode_has_no_refresh_or_status_mutation(self):
         before = list(CharacterUpdateStatus.objects.values())
         result, calls = self.invoke(apply=False)
