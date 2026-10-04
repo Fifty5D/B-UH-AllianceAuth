@@ -136,11 +136,15 @@ class ActualDockerHealthTemplateTests(unittest.TestCase):
         return subprocess.run(["docker", "inspect", "--format", template, name],
                               capture_output=True, text=True, timeout=15)
 
-    def test_original_formatter_fails_on_real_absent_health_and_all_corrected_templates_pass(self):
+    def test_real_absent_health_and_all_corrected_templates_pass_across_docker_client_versions(self):
         name = self.create()
         original = self.inspect(name, "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}")
-        self.assertNotEqual(original.returncode, 0)
-        self.assertIn("Health", original.stderr)
+        # Some CLI releases tolerate absent map keys; the production client
+        # rejects them. The strict Go regression below reproduces that failure.
+        if original.returncode:
+            self.assertIn("Health", original.stderr)
+        else:
+            self.assertEqual(original.stdout.strip(), "none")
         for template in self.templates:
             with self.subTest(template=template):
                 result = self.inspect(name, template)
@@ -174,3 +178,75 @@ class ActualDockerHealthTemplateTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.strip().split("|")[-1], expected)
 
+
+class StrictDockerGoTemplateTests(unittest.TestCase):
+    def test_production_missingkey_error_is_reproduced_and_all_live_templates_pass(self):
+        if shutil.which("go") is None:
+            if os.environ.get("BUH_REQUIRE_DOCKER_HEALTH_REGRESSION") == "1":
+                self.fail("Hosted production-strict template regression requires the runner Go compiler")
+            self.skipTest("Go is unavailable on this local executor")
+        templates = [*live_templates(), INSPECT_FORMAT]
+        program = r'''
+package main
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "os"
+    "text/template"
+)
+func evaluate(source string, data map[string]interface{}) (string, error) {
+    functions := template.FuncMap{"json": func(value interface{}) (string, error) {
+        raw, err := json.Marshal(value)
+        return string(raw), err
+    }}
+    parsed, err := template.New("docker").Option("missingkey=error").Funcs(functions).Parse(source)
+    if err != nil { return "", err }
+    var output bytes.Buffer
+    err = parsed.Execute(&output, data)
+    return output.String(), err
+}
+func main() {
+    var sources []string
+    if err := json.Unmarshal([]byte(os.Args[1]), &sources); err != nil { panic(err) }
+    var data map[string]interface{}
+    if err := json.Unmarshal([]byte(os.Args[2]), &data); err != nil { panic(err) }
+    _, err := evaluate(`{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, data)
+    if err == nil { panic("Original missing Health dereference did not reproduce the production failure") }
+    state := data["State"].(map[string]interface{})
+    for _, status := range []string{"absent", "healthy", "unhealthy", "starting"} {
+        if status == "absent" { delete(state, "Health") } else {
+            state["Health"] = map[string]interface{}{"Status": status}
+        }
+        for _, source := range sources {
+            output, err := evaluate(source, data)
+            if err != nil { panic(err) }
+            fmt.Println(status + "\t" + output)
+        }
+    }
+}
+'''
+        data = {"Id": "a" * 64, "Name": "/synthetic-web", "Image": "sha256:" + "b" * 64,
+                "RestartCount": 0, "State": {"Status": "running", "OOMKilled": False,
+                    "StartedAt": "2026-10-01T00:00:00.000000000Z"},
+                "Config": {"Labels": None}, "HostConfig": {"RestartPolicy": {"Name": "always"}},
+                "Mounts": []}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "strict_health.go"
+            path.write_text(program)
+            environment = dict(os.environ, GO111MODULE="off", GOTOOLCHAIN="local")
+            result = subprocess.run(["go", "run", str(path), json.dumps(templates), json.dumps(data)],
+                                    capture_output=True, text=True, timeout=90, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = result.stdout.splitlines()
+        self.assertEqual(len(rows), 12)
+        for row in rows:
+            status, rendered = row.split("\t", 1)
+            if rendered.startswith("["):
+                values = json.loads(rendered)
+                self.assertEqual(values[0], data["Id"])
+                self.assertEqual(values[2], data["Image"])
+                state = values[4]
+                self.assertNotIn("Health", state) if status == "absent" else self.assertEqual(state["Health"]["Status"], status)
+            else:
+                self.assertEqual(rendered.split("|")[-1], "none" if status == "absent" else status)

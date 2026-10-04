@@ -17,8 +17,10 @@ The Go templates use `index .State "Health"` instead of dereferencing a missing
 map key. Absence remains `none`/`null`; a present unhealthy or starting state
 remains distinct. The read-only worker-restart collector retains normal runtime,
 identity, image, count, OOM, exit and time evidence and rejects malformed metadata.
-Hosted regressions reproduce the original failure against real Docker containers,
-then verify absent, healthy and unhealthy cases through the actual templates.
+Hosted regressions reproduce production's strict Go missing-key failure, then
+verify absent, healthy and unhealthy cases through the actual templates against
+real Docker containers. Docker client versions with permissive map-key handling
+are also supported; absence remains distinct from a healthy result.
 
 `collect_worker_restart_evidence.py` reads the existing retained plan and private
 diagnostic store without refreshing tokens, running healthcheck scripts or
