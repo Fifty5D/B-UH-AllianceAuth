@@ -116,7 +116,12 @@ def verify_retained_container(host, target, row, *, name=None):
     if actual[5:7] != [str(row["restart_count"]), row["started_at"]]:
         if not actual[5].isdigit():
             raise DeploymentError("Retained previous runtime restart count is invalid")
-        host._verify_retained_worker_recycles(row["container_id"], int(actual[5]), actual[6])
+        try:
+            host._verify_retained_worker_recycles(row["container_id"], int(actual[5]), actual[6])
+        except DeploymentError as error:
+            host.blocked_worker_recycles[row["container_id"]] = str(error)[:200]
+            raise
+        host.blocked_worker_recycles.pop(row["container_id"], None)
 
 
 def verify_previous_slot_routing(host, plan, assessment, rows):
@@ -431,7 +436,7 @@ def main(argv=None):
               "started_at": datetime.now(timezone.utc).isoformat(), "source_commit": args.commit,
               "deployment_attempted": False, "memberaudit_mutation_attempted": False,
               "supported_recovery_attempted": False}
-    lock, phase = None, "validate_source_and_assessment"
+    lock, host, phase = None, None, "validate_source_and_assessment"
     try:
         if (os.geteuid() != 0 or re.fullmatch(r"[0-9a-f]{40}", args.commit) is None
                 or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in
@@ -541,6 +546,9 @@ def main(argv=None):
         report["error_sha256"] = digest(str(error).encode())
         if isinstance(error, DeploymentError):
             report["guard_reason"] = str(error)[:200]
+        if host is not None:
+            report["proven_worker_recycles"] = host.accepted_worker_recycles
+            report["blocked_worker_recycles"] = host.blocked_worker_recycles
         report["preserve_recovery_resources"] = True
     finally:
         if lock is not None:

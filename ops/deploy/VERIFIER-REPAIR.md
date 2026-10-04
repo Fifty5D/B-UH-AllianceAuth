@@ -109,6 +109,15 @@ rollback API once. Fresh Structures and read-only Member Audit preservation gate
 run inside its final verification before safety slots or the active hold may be
 removed. The database backup and historical incident reports are retained.
 
+The recycle reader shares the existing health-log rule for the exact DEBUG ESI
+`Error` schema-model listing, including the worker's MainProcess mirror. It
+retains the listing count, bounded samples and full evidence digest in each
+accepted recycle. This is a schema name, not a runtime failure. Different
+severity, logger, source line, process or message, and any adjacent real failure
+remain blocking. Schema records never substitute for warm-shutdown evidence.
+An early routing/restart rejection reports the specific blocked worker and any
+already-proven recycles before stopping without activation or cleanup.
+
 A failure produces one bounded JSON report and stops; do not replay an installer
 or begin another deployment without reviewing its result. Successful recovery
 permits a separate fresh preflight and the already-authorized immutable release

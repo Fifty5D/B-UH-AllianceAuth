@@ -95,6 +95,82 @@ class CausalProofTests(unittest.TestCase):
                 self.prove(case)
 
 
+class SchemaListingRecycleTests(unittest.TestCase):
+    """Schema rebuilding after a recycle must not invent an application failure."""
+    schema = "[03/Oct/2026 23:12:46] DEBUG [esi.aiopenapi3.plugins:121]  - Error"
+    mirror = "[2026-10-03 23:12:46,035: DEBUG/MainProcess]  - Error"
+    warm = "worker: Warm shutdown (MainProcess)"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.host, _ = retained_host(Path(self.temp.name))
+
+    def application(self, messages):
+        begin = adapter._recycle_time(causal_case()[2][0]["at"])
+        lines = [stamp(begin + timedelta(milliseconds=index)) + " " + message
+                 for index, message in enumerate(messages)]
+        with mock.patch.object(self.host, "_stream_log_lines", return_value=iter(lines)):
+            return self.host._worker_recycle_application(IDENTITY, "since", "until")
+
+    def prove(self, application):
+        event, events, _, journal = causal_case()
+        return adapter._prove_worker_recycle(event, events, application, journal,
+                                            container=IDENTITY, name=NAME, observed=OBSERVED)
+
+    def classify(self, messages, service=None):
+        return self.host._classify_log_batch(
+            [(service or self.host.config.worker_service, "\n".join(messages))], set(), None)
+
+    def test_real_reader_accepts_exact_schema_label_and_retains_it_in_the_graceful_recycle_proof(self):
+        messages = [self.warm, self.schema, self.mirror]
+        application = self.application(messages)
+        proof = self.prove(application)
+        self.assertEqual([row["kind"] for row in application],
+                         ["warm", "schema_model_listing", "schema_model_listing"])
+        self.assertEqual(proof["schema_model_log_count"], 2)
+        self.assertEqual(proof["schema_model_log_samples"], application[1:])
+        self.assertFalse(proof["schema_model_log_samples_truncated"])
+        self.assertEqual(len(proof["schema_model_log_evidence_sha256"]), 64)
+        self.assertEqual(proof["exit_code"], 0)
+        self.assertEqual(self.classify(messages), ())
+
+    def test_wrong_severity_logger_source_shape_process_and_adjacent_failures_remain_blocking(self):
+        cases = [self.schema.replace("DEBUG", "ERROR"), self.schema.replace("DEBUG", "INFO"),
+                 self.schema.replace("plugins:121", "plugins:122"),
+                 self.schema.replace("esi.aiopenapi3.plugins", "another.logger"),
+                 self.schema.replace("- Error", "- Error: token failure"),
+                 self.mirror.replace("MainProcess", "ForkPoolWorker-1"),
+                 self.mirror.replace("DEBUG", "ERROR"),
+                 "[2026-10-03 23:12:46,036: ERROR/MainProcess] actual failure",
+                 "[2026-10-03 23:12:46,036: DEBUG/MainProcess] actual ERROR in response",
+                 "Traceback (most recent call last):"]
+        for message in cases:
+            with self.subTest(message=message):
+                messages = [self.warm, self.schema, self.mirror, message]
+                application = self.application(messages)
+                self.assertEqual(application[-1]["kind"], "conflicting")
+                with self.assertRaises(DeploymentError):
+                    self.prove(application)
+                with self.assertRaises(DeploymentError):
+                    self.classify(messages)
+
+    def test_schema_labels_cannot_substitute_for_the_required_warm_shutdown(self):
+        with self.assertRaises(DeploymentError):
+            self.prove(self.application([self.schema, self.mirror]))
+
+    def test_nonworker_unpaired_celery_label_remains_blocking_in_the_health_gate(self):
+        with self.assertRaises(DeploymentError):
+            self.classify([self.mirror], self.host.config.beat_service)
+
+    def test_many_exact_listings_retain_total_and_full_digest_without_unbounded_proof_samples(self):
+        application = self.application([self.warm] + [self.schema, self.mirror] * 12)
+        proof = self.prove(application)
+        self.assertEqual(proof["schema_model_log_count"], 24)
+        self.assertEqual(len(proof["schema_model_log_samples"]), 16)
+        self.assertTrue(proof["schema_model_log_samples_truncated"])
+
+
 class RuntimeRecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -247,6 +323,23 @@ class RuntimeRecycleTests(unittest.TestCase):
             return original(args, **kwargs)
         with mock.patch.object(self.host, "_run", side_effect=transport):
             repair.verify_retained_container(self.host, self.container, row)
+        self.assertEqual(self.host.restart_baselines, self.original_counts)
+
+    def test_direct_routing_failure_reports_the_specific_worker_without_changing_its_baseline(self):
+        self.advance(proven=False)
+        row = {"container_id": self.container, "image_id": self.runtime["image_id"],
+               "restart_count": self.baseline_count, "started_at": self.host.retained_restart_started_at[self.container]}
+        output = "|".join([self.container, "/" + NAME, self.runtime["image_id"], "running", "false",
+                           str(self.runtime["restart_count"]), self.runtime["started_at"], "healthy"])
+        original = self.command
+        def transport(args, **kwargs):
+            if args[0] == "docker" and args[3].startswith("{{.Id}}|"):
+                return output
+            return original(args, **kwargs)
+        with mock.patch.object(self.host, "_run", side_effect=transport), self.assertRaises(DeploymentError):
+            repair.verify_retained_container(self.host, self.container, row)
+        self.assertEqual(set(self.host.blocked_worker_recycles), {self.container})
+        self.assertIn("warm-shutdown", self.host.blocked_worker_recycles[self.container])
         self.assertEqual(self.host.restart_baselines, self.original_counts)
 
     def test_changed_boot_or_daemon_and_unreadable_evidence_do_not_pass(self):

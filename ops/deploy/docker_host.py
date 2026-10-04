@@ -718,6 +718,17 @@ def _validate_worker_recycle_policy(policy, rows, worker_service):
             raise DeploymentError("Worker recycle daemon baseline is malformed")
 
 
+def _is_esi_error_schema_log(line, *, worker=False):
+    """The existing exact DEBUG model-name rule, never a generic DEBUG exception."""
+    schema = ALLIANCEAUTH_LOG_HEADER_RE.match(line)
+    if schema is not None:
+        return (schema["level"] == "DEBUG" and schema["component"] == "esi.aiopenapi3.plugins"
+                and schema["source_line"] == "121" and line[schema.end():] == "- Error")
+    mirrored = CELERY_LOG_HEADER_RE.match(line)
+    return bool(worker and mirrored is not None and mirrored["level"] == "DEBUG"
+                and mirrored["process"] == "MainProcess" and line[mirrored.end():] == "- Error")
+
+
 def _prove_worker_recycle(event, events, application, journal, *, container, name, observed):
     """Prove one complete causal chain; a warm exit or a count alone is insufficient."""
     exit_at, restart_at = _recycle_time(event["exited_at"]), _recycle_time(event["at"])
@@ -744,7 +755,7 @@ def _prove_worker_recycle(event, events, application, journal, *, container, nam
     warm = [row for row in application if row.get("kind") == "warm"]
     if (len(unhealthy) != 1 or len(warm) != 1
             or not 0 <= (_recycle_time(warm[0]["at"]) - points[-1]).total_seconds() <= 0.5
-            or any(row.get("kind") != "warm" for row in application)):
+            or any(row.get("kind") not in {"warm", "schema_model_listing"} for row in application)):
         raise DeploymentError("Worker recycle lacks the threshold/SIGTERM/warm-shutdown proof")
     # An unrelated fatal exception, OOM, host restart, or explicit control action
     # remains a blocker. These records are never put on the health log allowlist.
@@ -767,11 +778,15 @@ def _prove_worker_recycle(event, events, application, journal, *, container, nam
         raise DeploymentError("Worker recycle lifecycle ordering is invalid")
     # Preserve the original warning/evidence without retaining arbitrary payloads
     # or auth credentials from application/host logs.
+    schema_logs = [row for row in application if row.get("kind") == "schema_model_listing"]
     return {"container_id": container, "restart_count": event["restart_count"],
             "exit_code": 0, "manual_restart": False, "exited_at": event["exited_at"],
             "started_event_at": starts[0]["at"], "healthy_at": healthy[0]["at"],
             "warm_shutdown_at": warm[0]["at"], "memory_check_at": checks[-1]["at"],
-            "threshold_evidence": "reviewed script branch plus third-failure Docker health transition",
+             "threshold_evidence": "reviewed script branch plus third-failure Docker health transition",
+             "schema_model_log_count": len(schema_logs), "schema_model_log_samples": schema_logs[:16],
+             "schema_model_log_samples_truncated": len(schema_logs) > 16,
+             "schema_model_log_evidence_sha256": hashlib.sha256(canonical_json_bytes(schema_logs)).hexdigest(),
             "restart_record_sha256": event["message_sha256"],
             "evidence_sha256": hashlib.sha256(canonical_json_bytes(
                 {"event": event, "events": events, "application": application,
@@ -1444,6 +1459,11 @@ class DockerHost:
             _recycle_time(at)
             if message == "worker: Warm shutdown (MainProcess)":
                 rows.append({"at": at, "kind": "warm", "sha256": hashlib.sha256(message.encode()).hexdigest()})
+            elif _is_esi_error_schema_log(message, worker=True):
+                # Use the same precise model-name classification as the existing
+                # health-log gate, and retain its evidence in the recycle proof.
+                rows.append({"at": at, "kind": "schema_model_listing",
+                             "sha256": hashlib.sha256(message.encode()).hexdigest()})
             elif re.search(r"\b(?:SIGTERM|SIGINT|SIGKILL|CRITICAL|FATAL|ERROR)\b|^Traceback|Cold shutdown|"
                            r"Connection (?:lost|refused)|Cannot connect|broker.*disconnect", message, re.I):
                 # A distinct failure in this narrow shutdown interval needs its
@@ -6078,13 +6098,7 @@ class DockerHost:
             schema_indexes: set[int] = set()
             for schema_index, schema_line in enumerate(source_lines):
                 schema = ALLIANCEAUTH_LOG_HEADER_RE.match(schema_line)
-                if (
-                    schema is None
-                    or schema.group("level") != "DEBUG"
-                    or schema.group("component") != "esi.aiopenapi3.plugins"
-                    or schema.group("source_line") != "121"
-                    or schema_line[schema.end():] != "- Error"
-                ):
+                if not _is_esi_error_schema_log(schema_line):
                     continue
                 schema_indexes.add(schema_index)
                 if schema_index + 1 >= len(source_lines):
@@ -6112,14 +6126,7 @@ class DockerHost:
                 # configured worker service, this exact DEBUG model-name line
                 # is still benign; every other line remains subject to the
                 # fatal scan, including a following traceback.
-                celery_schema = CELERY_LOG_HEADER_RE.match(raw_line)
-                if (
-                    source == self.config.worker_service
-                    and celery_schema is not None
-                    and celery_schema.group("level") == "DEBUG"
-                    and celery_schema.group("process") == "MainProcess"
-                    and raw_line[celery_schema.end():] == "- Error"
-                ):
+                if _is_esi_error_schema_log(raw_line, worker=source == self.config.worker_service):
                     continue
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
