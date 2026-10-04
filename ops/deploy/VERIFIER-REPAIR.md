@@ -4,6 +4,18 @@ This correction changes receiver verification only; it does not install an
 application, build or alter an immutable release, refresh tokens, update Member
 Audit, or initiate a new deployment.
 
+`collect_retained_log_findings.py` is a separate, read-only diagnostic for the
+remaining selected asset-name 404 and handled callback traceback. It uses the
+already-staged, digest-pinned verifier and existing deployment lock. It reads
+the selected character's current asset status, token/link metadata and asset relationships;
+independently checks at most 16 retained asset payloads; and collects complete
+selected traceback records, session-hash-correlated login continuation and
+HTTP statuses. It checks preservation of the completed 87/348 recovery,
+excluded 12/61 state, Structures and retained recovery resources. Database reads
+use `SET TRANSACTION READ ONLY`. Token refresh and update/recovery/installation
+operations are absent. Report or evidence bounds cannot grant recovery
+eligibility. The diagnostic does not classify either finding as recovered.
+
 New durable plans retain restart counts and their exact service/container
 mapping. Old plans fail closed unless a root-private `VERIFIER-REVIEW.json`
 reconstructs that mapping from Work's reviewed retained attempt and host evidence.

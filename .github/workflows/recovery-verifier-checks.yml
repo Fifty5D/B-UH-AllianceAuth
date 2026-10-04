@@ -9,6 +9,8 @@ on:
       - ops/deploy/verifier_repair.py
       - ops/deploy/run-verifier-repair.ps1
       - ops/deploy/collect_worker_restart_evidence.py
+      - ops/deploy/collect_retained_log_findings.py
+      - ops/deploy/run-retained-log-findings.ps1
       - tests/deploy/**
       - .github/workflows/recovery-verifier-checks.yml
 permissions:
@@ -51,7 +53,7 @@ jobs:
           PY
           python -m pip install --require-hashes --only-binary=:all: -r /tmp/buh-verifier-deps.txt
       - run: python -m compileall -q ops/deploy tests/deploy
-      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/test_worker_memory_recycles.py tests/deploy/verifier_fixtures.py
+      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py ops/deploy/collect_retained_log_findings.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/test_worker_memory_recycles.py tests/deploy/test_retained_log_findings.py tests/deploy/verifier_fixtures.py
       - name: Run focused regressions and complete host-independent deployment suite
         env:
           BUH_REQUIRE_DOCKER_HEALTH_REGRESSION: '1'
@@ -61,8 +63,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          $path = 'ops/deploy/run-verifier-repair.ps1'
-          if (Test-Path -LiteralPath $path) {
+          foreach ($path in @('ops/deploy/run-verifier-repair.ps1', 'ops/deploy/run-retained-log-findings.ps1')) {
             [System.Management.Automation.Language.Parser]::ParseFile(
               (Join-Path (Get-Location).Path $path), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw 'Recovery launcher syntax failed.' }
@@ -72,7 +73,8 @@ jobs:
           python - <<'PY'
           import hashlib
           from pathlib import Path
-          for name in ('docker_host.py', 'verifier_repair.py', 'run-verifier-repair.ps1'):
+          for name in ('docker_host.py', 'verifier_repair.py', 'run-verifier-repair.ps1',
+                       'collect_retained_log_findings.py', 'run-retained-log-findings.ps1'):
               path = Path('ops/deploy') / name
               if path.exists():
                   print('TESTED_FILE_SHA256', name, hashlib.sha256(path.read_bytes()).hexdigest())
