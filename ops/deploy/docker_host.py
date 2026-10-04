@@ -794,6 +794,318 @@ def _prove_worker_recycle(event, events, application, journal, *, container, nam
                              for row in journal]})).hexdigest()}
 
 
+def _retained_log_records(rows):
+    """Complete selected application records, with hashes of the original lines."""
+    record = []
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("text"), str)
+                or not isinstance(row.get("raw_sha256"), str)
+                or SHA256_RE.fullmatch(row["raw_sha256"]) is None):
+            raise DeploymentError("Retained finding record is incomplete")
+        if ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
+            if record:
+                yield record
+            record = []
+        if record or ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
+            record.append(row)
+    if record:
+        yield record
+
+
+ASSET_ERROR_FRAMES = tuple(line.split(":", 1) for line in """esi/openapi_clients.py:result
+esi/openapi_clients.py:_make_request
+tenacity/__init__.py:__call__
+tenacity/__init__.py:iter
+tenacity/__init__.py:<lambda>
+concurrent/futures/_base.py:result
+concurrent/futures/_base.py:__get_result
+tenacity/__init__.py:__call__
+esi/openapi_clients.py:__func
+aiopenapi3/request.py:request
+aiopenapi3/v30/glue.py:_process_request
+aiopenapi3/request.py:_raise_on_http_status
+memberaudit/models/characters.py:perform_update_with_error_logging
+memberaudit/models/characters.py:assets_build_list_from_esi
+memberaudit/managers/character_sections_1.py:fetch_from_esi
+memberaudit/models/characters.py:update_section_if_changed
+memberaudit/decorators.py:_wrapped_view
+memberaudit/managers/character_sections_1.py:_fetch_data_from_esi
+memberaudit/managers/character_sections_1.py:_fetching_asset_names_from_esi
+esi/openapi_clients.py:results
+buh_max_history/capture.py:result
+esi/openapi_clients.py:result""".splitlines())
+ASSET_TASK_FRAMES = tuple(line.split(":", 1) for line in """celery/app/trace.py:trace_task
+celery_once/tasks.py:__call__
+celery/app/trace.py:__protected_call__
+esi/decorators.py:wrapper
+memberaudit/tasks.py:assets_build_list_from_esi
+memberaudit/models/characters.py:perform_update_with_error_logging
+memberaudit/models/characters.py:perform_update_with_error_logging""".splitlines()) + ASSET_ERROR_FRAMES[13:]
+CALLBACK_LOOKUP_SHA256 = "3cb440117225d96aac40de9d417dc4481a9f5691480327eb383c8d4ccde2b681"
+
+
+def _asset_trace_frames(text):
+    frames = re.findall(r'  File "([^"]+)", line [0-9]+, in ([^\n]+)', text)
+    return tuple([path.split("site-packages/", 1)[-1].split("lib/python3.12/", 1)[-1], function]
+                 for path, function in frames)
+
+
+def _prove_retained_findings(report, review, config, proof):
+    """Only digest-pinned historical records with later/current success qualify.
+
+    A handled DEBUG lookup is distinct from an OAuth failure. Its normal redirect
+    or token-selection continuation and eventual successful authentication must
+    both be present; an initial login redirect alone cannot qualify a traceback.
+    """
+    if (report.get("schema_version") != 1 or report.get("scan_complete") is not True
+            or report.get("read_only") is not True or report.get("diagnostic_only") is not True
+            or report.get("errors") != [] or report.get("attempt_id") != review["attempt_id"]
+            or report.get("protected_state_unchanged") is not True
+            or any(report.get(key) is not False for key in (
+                "deployment_attempted", "tooling_installation_attempted", "supported_recovery_attempted",
+                "token_refresh_attempted", "memberaudit_mutation_attempted", "structures_mutation_attempted"))):
+        raise DeploymentError("Retained finding report identity or preservation differs")
+    if (not isinstance(proof, dict) or set(proof) != {"report_path", "report_sha256", "asset_task_id", "asset_error_at"}
+            or not isinstance(proof.get("report_path"), str) or not Path(proof["report_path"]).is_absolute()
+            or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None
+            or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", proof.get("asset_task_id", "")) is None):
+        raise DeploymentError("Retained finding selection differs")
+    for key in ("memberaudit_preserved", "memberaudit_preserved_after"):
+        preserved = report.get(key, {})
+        if (preserved.get("characters") != 87 or preserved.get("successful_sections") != 348
+                or preserved.get("auth_and_token_inventory_preserved") is not True
+                or preserved.get("older_sections_unchanged") is not True
+                or preserved.get("older_section_count") != 61):
+            raise DeploymentError("Retained finding Member Audit preservation differs")
+    for boundary in ("before_host", "after_host"):
+        host = report.get(boundary, {})
+        if (host.get("hold_sha256") != review["plan_sha256"] or host.get("platform_version") != "0.8.2"
+                or host.get("public_smoke_passed") is not True
+                or host.get("traffic_only_verified_previous_image") is not True):
+            raise DeploymentError("Retained finding production boundary differs")
+    selected = report.get("selected_character", {})
+    status, assets, identity = (selected.get(key, {}) for key in ("assets_status", "current_assets", "identity"))
+    if (selected.get("scan_complete") is not True or selected.get("errors") != []
+            or selected.get("later_successful_assets_run") is not True
+            or status.get("is_success") is not True or status.get("has_token_error") is not False
+            or status.get("error_length") != 0 or not status.get("content_hashes", [None])[0]
+            or assets.get("all_rows_metadata_valid") is not True
+            or not isinstance(assets.get("relationship_issues"), dict)
+            or any(assets["relationship_issues"].values())
+            or identity.get("is_disabled") is not False
+            or any(identity.get(key) is not True for key in (
+                "same_token_character", "same_token_owner", "same_token_user", "required_assets_scope_present"))
+            or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in (
+                "character_id", "memberaudit_character_pk", "token_pk", "auth_link_pk", "user_id"))):
+        raise DeploymentError("Recovered assets or existing credential evidence differs")
+    payloads = selected.get("historical_asset_payloads", []) + selected.get("later_asset_payloads", [])
+    if (not selected.get("historical_asset_payloads") or not selected.get("later_asset_payloads")
+            or not payloads or len(payloads) > 16
+            or any(any(row.get(key) is not True for key in (
+                "actual_hash_matches", "actual_size_matches", "format_valid")) for row in payloads)):
+        raise DeploymentError("Independent retained asset byte evidence is incomplete")
+    containers = {row["container_id"]: row["service"] for row in review["containers"]}
+    streams = report.get("logs", [])
+    if (not streams or any(stream.get("complete") is not True for stream in streams)
+            or any(stream["since"] != review["verification_since"] for stream in streams)):
+        raise DeploymentError("Retained finding log interval is incomplete")
+    for stream in streams:
+        service, separator, container = stream["source"].partition("/")
+        if not separator or containers.get(container) != service:
+            raise DeploymentError("Retained finding log container differs")
+    web = [stream for stream in streams if stream["source"].partition("/")[0] == config.gunicorn_service]
+    if len(web) != 1:
+        raise DeploymentError("Retained callback source is ambiguous")
+    http_sources = report.get("login_http", [])
+    if (len(http_sources) != 1 or http_sources[0].get("complete") is not True
+            or containers.get(http_sources[0].get("container_id")) != config.proxy_service):
+        raise DeploymentError("Retained callback HTTP evidence is incomplete")
+    http = http_sources[0]["rows"]
+    if any(row["status"] >= 400 for row in http):
+        raise DeploymentError("Retained login HTTP failure remains unresolved")
+    web_rows = web[0]["rows"]
+    if any(re.search(r"\b(?:ERROR|CRITICAL)\b", row["text"]) for row in web_rows):
+        raise DeploymentError("Retained login application failure remains unresolved")
+    records, warnings = {}, []
+    def add(source, record, warning):
+        key = (source, record[0]["raw_sha256"])
+        hashes = tuple(row["raw_sha256"] for row in record)
+        if len(hashes) > MAX_OWNER_RECORD_LINES:
+            raise DeploymentError("Retained finding record exceeds its bound")
+        records.setdefault(key, []).append(hashes)
+        if warning not in warnings:
+            warnings.append(warning)
+    name = re.escape(identity["character_name"])
+    asset_errors, task_errors = [], []
+    for stream in streams:
+        service = stream["source"].partition("/")[0]
+        if service != config.worker_service:
+            continue
+        for record in _retained_log_records(stream["rows"]):
+            header = record[0]["text"]
+            if not re.search(r"\bERROR(?: |/MainProcess\])", header):
+                continue
+            text = "\n".join(row["text"] for row in record)
+            if re.search(name + r" \(ID:" + str(identity["memberaudit_character_pk"])
+                         + r"\): assets: Error occurred: HTTPClientError: <HTTPClientError 404 "
+                         r"details=None error='Invalid IDs in the request' Headers\(", header):
+                aa, celery = ALLIANCEAUTH_LOG_HEADER_RE.match(header), CELERY_LOG_HEADER_RE.match(header)
+                if (_asset_trace_frames(text) != ASSET_ERROR_FRAMES
+                        or not ((aa is not None and aa["level"] == "ERROR"
+                                 and aa["component"] == "memberaudit.models.characters" and aa["source_line"] == "551")
+                                or (celery is not None and celery["level"] == "ERROR" and celery["process"] == "MainProcess"))
+                        or re.search(r"\b(?:invalid_grant|50013|PermissionError|403|500)\b", text)):
+                    raise DeploymentError("Retained asset-name traceback differs")
+                asset_errors.append((record, re.findall(r"\('x-esi-request-id', '([0-9a-f-]{36})'\)", header), stream["source"]))
+            elif re.search(r"Task memberaudit\.tasks\.assets_build_list_from_esi\[" + re.escape(proof["asset_task_id"]) + r"\] "
+                           r"raised unexpected: HTTPError\(\)$", header):
+                if (_asset_trace_frames(text) != ASSET_TASK_FRAMES
+                        or record[-1]["text"] != "aiopenapi3.errors.HTTPError"):
+                    raise DeploymentError("Retained asset task traceback differs")
+                task_errors.append((record, stream["source"]))
+    if (len(asset_errors) != 2 or len(task_errors) != 1
+            or len(asset_errors[0][1]) != 1 or asset_errors[0][1] != asset_errors[1][1]
+            or asset_errors[0][2] != asset_errors[1][2] or asset_errors[0][2] != task_errors[0][1]
+            or asset_errors[0][0][0]["at"] != proof["asset_error_at"]
+            or abs((_recycle_time(asset_errors[0][0][0]["at"]) - _recycle_time(task_errors[0][0][0]["at"])).total_seconds()) > 1
+            or _recycle_time(status["run_finished_at"]) <= _recycle_time(task_errors[0][0][0]["at"])
+            or _recycle_time(status["update_finished_at"]) <= _recycle_time(task_errors[0][0][0]["at"])):
+        raise DeploymentError("One exact asset-name incident and its later success are not proven")
+    asset_warning = ("recovered warning: exact historical asset-name Invalid IDs 404; "
+                     f"character {identity['character_id']} original {proof['asset_error_at']} "
+                     f"header {asset_errors[0][0][0]['raw_sha256']}; status {status['pk']} "
+                     f"later assets update {status['update_finished_at']} and run {status['run_finished_at']}")
+    for record, source in [(row[0], row[2]) for row in asset_errors] + task_errors:
+        add(source, record, asset_warning)
+    callbacks = 0
+    lookup = selected.get("installed_sources", {}).get("callback_lookup", {})
+    if (selected.get("versions", {}).get("django-esi") != "9.6.0"
+            or lookup.get("sha256") != CALLBACK_LOOKUP_SHA256):
+        raise DeploymentError("Installed handled callback lookup source differs")
+    for record in _retained_log_records(web_rows):
+        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record[0]["text"])
+        if header is None or "No callback for " not in record[0]["text"]:
+            continue
+        text = "\n".join(row["text"] for row in record)
+        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', text)
+        expected_frames = [(lookup["filename"], "29", "_check_callback"),
+            ("/usr/local/lib/python3.12/site-packages/django/db/models/manager.py", "87", "manager_method"),
+            ("/usr/local/lib/python3.12/site-packages/django/db/models/query.py", "635", "get")]
+        if (header.group("level") != "DEBUG" or header.group("component") != "esi.decorators"
+                or header.group("source_line") != "39" or len(record) != 11 or frames != expected_frames
+                or record[1]["text"] != "Traceback (most recent call last):"
+                or record[-1]["text"] != "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+                or len(record[0].get("session_sha256", [])) != 1):
+            raise DeploymentError("Handled callback traceback shape differs")
+        at = _recycle_time(record[0]["at"])
+        session = record[0]["session_sha256"]
+        following = [row for row in web_rows if row.get("session_sha256") == session
+            and at < _recycle_time(row["at"]) <= at + timedelta(hours=4)]
+        immediate = [row for row in following if _recycle_time(row["at"]) - at <= timedelta(seconds=5)]
+        redirected = any("Redirecting " in row["text"] and " to SSO." in row["text"] for row in immediate)
+        principal = record[0]["text"][header.end():].split(" session sha256:", 1)[0].removeprefix("No callback for ")
+        returned = any("Retrieved 2 tokens for " + principal + " session " in row["text"] for row in immediate)
+        choices = [row for row in web_rows if principal + " has selected token " in row["text"]
+                   and at < _recycle_time(row["at"]) <= at + timedelta(seconds=120 if returned else 1)]
+        selected_token = False
+        if len(choices) == 1:
+            choice_at = _recycle_time(choices[0]["at"])
+            selected_token = (any("[esi.decorators:159] Selected token fulfills requirements of view. Returning." in row["text"]
+                for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
+                and any("INFO [allianceauth.authentication.views:172] Changed user " + principal + " main character to " in row["text"]
+                    for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
+                and any(row["path"] == "/dashboard/" and row["status"] == 200
+                    and choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=10) for row in http))
+        complete = [row for row in following if "Got new token from " + principal + " session " in row["text"]
+            and ". Returning to view." in row["text"]]
+        redirect_http = any(row["path"] == "/sso/login" and row["status"] == 302
+            and at < _recycle_time(row["at"]) <= at + timedelta(seconds=1) for row in http)
+        login_complete = False
+        for completion in complete:
+            done = _recycle_time(completion["at"])
+            processed = any("[esi.views:91] Processed callback for " + principal + " session " in row["text"]
+                            and done - timedelta(seconds=2) <= _recycle_time(row["at"]) < done for row in following)
+            callback_http = any(row["path"] == "/sso/callback/" and row["status"] == 302
+                                and abs((_recycle_time(row["at"]) - done).total_seconds()) <= 2 for row in http)
+            dashboard = any(row["path"] == "/dashboard/" and row["status"] == 200
+                            and done < _recycle_time(row["at"]) <= done + timedelta(seconds=120) for row in http)
+            login_complete = login_complete or (processed and callback_http and dashboard
+                and (redirect_http or done - at < timedelta(seconds=120)))
+        # Initial auth and already-authenticated token selection are distinct.
+        # A delayed browser continuation is accepted only for this exact pinned
+        # historical record, with both its immediate normal redirect and its
+        # later same-session token return and successful HTTP completion.
+        if not ((redirected and login_complete) or selected_token):
+            raise DeploymentError("Handled callback successful continuation is incomplete")
+        add(web[0]["source"], record, "recovered warning: exact handled DEBUG CallbackRedirect lookup; "
+            f"original header {record[0]['raw_sha256']} at {record[0]['at']}; successful continuation retained")
+        callbacks += 1
+    if callbacks == 0:
+        raise DeploymentError("No exact handled callback recovery evidence")
+    return records, tuple(warnings)
+
+
+RETAINED_ASSETS_READ_CODE = """
+from datetime import datetime
+import hashlib
+import inspect
+import json
+from allianceauth.authentication.models import CharacterOwnership
+from django.db import connection, transaction
+from esi.models import Token
+from esi.decorators import _check_callback
+from memberaudit.models import Character, CharacterAsset, CharacterUpdateStatus
+
+def verify_retained_assets(identity, expected_status, expected_source):
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION READ ONLY')
+    with transaction.atomic():
+        member = Character.objects.select_related('eve_character').get(pk=identity['memberaudit_character_pk'])
+        link = CharacterOwnership.objects.get(pk=identity['auth_link_pk'], character=member.eve_character,
+                                               user_id=identity['user_id'])
+        token = Token.objects.get(pk=identity['token_pk'], character_id=identity['character_id'], user_id=link.user_id)
+        if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                or member.eve_character.character_name != identity['character_name']
+                or token.character_owner_hash != link.owner_hash
+                or not token.scopes.filter(name='esi-assets.read_assets.v1').exists()
+                or list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+                != identity['token_inventory']):
+            raise ValueError('Retained assets identity or existing token inventory changed')
+        status = CharacterUpdateStatus.objects.get(pk=expected_status['pk'], character=member, section='assets')
+        if (status.is_success is not True or status.has_token_error or status.error_message or not status.content_hash_1
+                or not status.run_started_at or not status.run_finished_at or status.run_finished_at < status.run_started_at
+                or status.run_finished_at < datetime.fromisoformat(expected_status['run_finished_at'].replace('Z','+00:00'))
+                or not status.update_finished_at
+                or status.update_finished_at < datetime.fromisoformat(expected_status['update_finished_at'].replace('Z','+00:00'))):
+            raise ValueError('Retained assets are currently unsuccessful')
+        rows = list(CharacterAsset.objects.filter(character=member).values('pk','item_id','quantity','parent_id',
+                     'eve_type_id','location_id')[:25001])
+        if len(rows) > 25000:
+            raise ValueError('Retained assets exceed bounded verification')
+        ids = [row['item_id'] for row in rows]
+        pks = {row['pk'] for row in rows}
+        if (len(ids) != len(set(ids)) or any(type(row['item_id']) is not int or row['item_id'] <= 0
+                or type(row['quantity']) is not int or row['quantity'] < 0
+                or row['parent_id'] is not None and (row['parent_id'] not in pks or row['parent_id'] == row['pk'])
+                for row in rows)):
+            raise ValueError('Retained assets row relationship is invalid')
+        for field in ('eve_type','location'):
+            expected = {row[field+'_id'] for row in rows if row[field+'_id'] is not None}
+            ordered, found = sorted(expected), set()
+            model = CharacterAsset._meta.get_field(field).remote_field.model
+            for offset in range(0,len(ordered),500):
+                found.update(model.objects.filter(pk__in=ordered[offset:offset+500]).values_list('pk',flat=True))
+            if found != expected:
+                raise ValueError('Retained assets foreign key is missing')
+        if hashlib.sha256(inspect.getsource(_check_callback).encode()).hexdigest() != expected_source:
+            raise ValueError('Installed handled callback source changed')
+    print('BUH_RETAINED_FINDINGS_CURRENT_BEGIN')
+    print(json.dumps({'read_only':True,'assets_successful':True,'assets_relationships_valid':True,
+                      'identity_and_token_inventory_preserved':True,'callback_source_verified':True}))
+    print('BUH_RETAINED_FINDINGS_CURRENT_END')
+"""
+
+
 class DockerHost:
     """Apply a verified release to the existing `/opt/aa-docker` layout."""
 
@@ -818,6 +1130,8 @@ class DockerHost:
         self.blocked_worker_recycles: dict[str, str] = {}
         self.recovered_discord_429_hashes: set[str] = set()
         self.recovered_discord_429_seen: dict[str, int] = {}
+        self.recovered_retained_log_records: dict[tuple[str, str], list[tuple[str, ...]]] = {}
+        self.recovered_retained_log_seen: dict[tuple[str, str, tuple[str, ...]], int] = {}
         self.live_replacement_started = False
         self.original_upstream: Path | None = None
         self.original_upstream_metadata: tuple[int, int, int] | None = None
@@ -1288,8 +1602,9 @@ class DockerHost:
                   "host_observed_at", "containers", "discord_429", "verification_since"}
         if (not isinstance(review, dict)
                 or type(review.get("schema_version")) is not int
-                or review["schema_version"] not in {1, 2}
-                or set(review) != fields | ({"worker_memory_recycles"} if review["schema_version"] == 2 else set())
+                or review["schema_version"] not in {1, 2, 3}
+                or set(review) != fields | ({"worker_memory_recycles"} if review["schema_version"] >= 2 else set())
+                | ({"retained_log_findings"} if review["schema_version"] == 3 else set())
                 or review["attempt_id"] != value["attempt_id"]
                 or review["plan_sha256"] != plan_digest
                 or not isinstance(review["host_evidence_sha256"], str)
@@ -1330,9 +1645,49 @@ class DockerHost:
         self.worker_recycle_policy = review.get("worker_memory_recycles")
         if self.worker_recycle_policy is not None:
             _validate_worker_recycle_policy(self.worker_recycle_policy, review["containers"], self.config.worker_service)
-        elif review["schema_version"] == 2:
+        elif review["schema_version"] >= 2:
             raise DeploymentError("Reviewed worker recycle policy is missing")
+        if review["schema_version"] == 3:
+            proof = review["retained_log_findings"]
+            if (not isinstance(proof, dict)
+                    or set(proof) != {"report_path", "report_sha256", "asset_task_id", "asset_error_at"}
+                    or not isinstance(proof["report_path"], str) or not Path(proof["report_path"]).is_absolute()
+                    or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None
+                    or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", proof.get("asset_task_id", "")) is None):
+                raise DeploymentError("Reviewed retained log evidence is malformed")
+            _recycle_time(proof["asset_error_at"])
         self.log_since = review["verification_since"]
+
+    def _verified_retained_log_findings(self) -> tuple[str, ...]:
+        self.recovered_retained_log_records = {}
+        self.recovered_retained_log_seen = {}
+        review = self.retained_verifier_review
+        if review is None or "retained_log_findings" not in review:
+            return ()
+        proof = review["retained_log_findings"]
+        raw = self._worker_recycle_private_bytes(Path(proof["report_path"]), 2 * 1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != proof["report_sha256"]:
+            raise DeploymentError("Reviewed retained log report digest changed")
+        try:
+            report = json.loads(raw)
+            records, warnings = _prove_retained_findings(report, review, self.config, proof)
+            selected = report["selected_character"]
+            code = (RETAINED_ASSETS_READ_CODE + "\nverify_retained_assets(" + repr(selected["identity"]) + ","
+                    + repr(selected["assets_status"]) + "," + repr(CALLBACK_LOOKUP_SHA256) + ")")
+            current = self._manage_live("shell", "--no-imports", "-c", code,
+                                        context="Read-only current retained assets and handled callback proof")
+            begin, end = "BUH_RETAINED_FINDINGS_CURRENT_BEGIN\n", "\nBUH_RETAINED_FINDINGS_CURRENT_END"
+            if current.count(begin) != 1 or current.count(end) != 1:
+                raise DeploymentError("Current retained log recovery proof is incomplete")
+            result = json.loads(current.split(begin, 1)[1].split(end, 1)[0])
+            expected = {"read_only", "assets_successful", "assets_relationships_valid",
+                        "identity_and_token_inventory_preserved", "callback_source_verified"}
+            if set(result) != expected or any(value is not True for value in result.values()):
+                raise DeploymentError("Current retained log recovery proof failed")
+        except (KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Reviewed retained log recovery evidence is invalid") from error
+        self.recovered_retained_log_records = records
+        return warnings
 
     def _worker_recycle_private_bytes(self, path: Path, maximum: int) -> bytes:
         """Root-owned read only; never execute or edit the installed healthcheck."""
@@ -5702,8 +6057,20 @@ class DockerHost:
                         )
                     )
                 individually_scanned.add(service)
+        recovered_findings = self._verified_retained_log_findings()
+        finding_services = {source.partition("/")[0] for source, _ in self.recovered_retained_log_records}
         for service in service_set:
             if service in individually_scanned:
+                continue
+            if service in finding_services:
+                expected = {row["container_id"] for row in self.retained_verifier_review["containers"]
+                            if row["service"] == service}
+                if set(self._running_service_containers(service, context="Exact retained finding log identities")) != expected:
+                    raise DeploymentError("Retained finding current container identities changed")
+                for container in sorted(expected):
+                    commands.append((f"{service}/{container}",
+                        ["docker", "logs", f"--since={self.log_since}", container],
+                        "Complete exact retained finding container logs"))
                 continue
             commands.append(
                 (
@@ -5729,7 +6096,7 @@ class DockerHost:
                     f"New web-slot log scan for {slot}",
                 )
             )
-        findings: list[str] = list(self._verified_discord_429())
+        findings: list[str] = [*self._verified_discord_429(), *recovered_findings]
         failures: list[str] = []
         scan_complete = True
         truncated = False
@@ -5749,7 +6116,7 @@ class DockerHost:
             lines = self._stream_log_lines(command, deadline=deadline, context=context)
             batches = self._log_batches(
                 lines,
-                owner_scoped=source.partition("/")[0] in individually_scanned,
+                owner_scoped=source.partition("/")[0] in individually_scanned or bool(self.recovered_retained_log_records),
                 deadline=deadline,
             )
             try:
@@ -6089,6 +6456,20 @@ class DockerHost:
             owner_indexes = owner_service_findings.get(source, set())
             invalid_indexes = owner_invalid_indexes.get(source, set())
             source_lines = text.splitlines()
+            recovered_indexes: set[int] = set()
+            starts = [index for index, line in enumerate(source_lines)
+                      if ALLIANCEAUTH_LOG_HEADER_RE.match(line) or CELERY_LOG_HEADER_RE.match(line)]
+            for start, stop in zip(starts, [*starts[1:], len(source_lines)]):
+                hashes = tuple(hashlib.sha256(line.encode()).hexdigest() for line in source_lines[start:stop])
+                key = (source, hashes[0])
+                expected = self.recovered_retained_log_records.get(key, [])
+                if not expected or hashes not in expected:
+                    continue
+                occurrence = (*key, hashes)
+                seen = self.recovered_retained_log_seen.get(occurrence, 0) + 1
+                self.recovered_retained_log_seen[occurrence] = seen
+                if seen <= expected.count(hashes):
+                    recovered_indexes.update(range(start, stop))
             # aiopenapi3 names its error response *schema* "Error" while it
             # rebuilds ESI models. The DEBUG message is emitted twice on a
             # Celery worker, once with the AllianceAuth logger and once through
@@ -6119,14 +6500,14 @@ class DockerHost:
                 ):
                     schema_indexes.add(schema_index + 1)
             for index, raw_line in enumerate(source_lines):
-                if index in schema_indexes:
+                if index in schema_indexes or index in recovered_indexes:
                     continue
                 # Compose can split or reorder Celery's duplicate into a later
                 # bounded batch without its AllianceAuth partner. On the one
                 # configured worker service, this exact DEBUG model-name line
                 # is still benign; every other line remains subject to the
                 # fatal scan, including a following traceback.
-                if _is_esi_error_schema_log(raw_line, worker=source == self.config.worker_service):
+                if _is_esi_error_schema_log(raw_line, worker=source.partition("/")[0] == self.config.worker_service):
                     continue
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))

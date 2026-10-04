@@ -140,3 +140,41 @@ A failure produces one bounded JSON report and stops; do not replay an installer
 or begin another deployment without reviewing its result. Successful recovery
 permits a separate fresh preflight and the already-authorized immutable release
 deployment through the existing guarded workflow.
+
+The final historical-finding review uses schema 3, preserving the same attempt,
+restart baseline, worker recycle policy and Discord proof. Its additional
+`retained_log_findings` selection has exactly `report_path`, `report_sha256`,
+`asset_task_id` and `asset_error_at`. The launcher stages the caller's existing
+report as a bounded normal file, verifies its reviewed digest locally and on the
+host, and amends only the private staged path. It preserves the original
+assessment and report. No production identities are embedded in source.
+
+The asset exception requires the exact selected character's Invalid IDs 404,
+the complete installed asset-name traceback chain, mirrored error, same ESI
+request and exact task on the same retained worker, independently verified
+historical/later payload bytes, and later successful actual asset persistence.
+A fresh database-enforced read checks that character's same Auth/token identity,
+scope/inventory, successful assets status and current row/FK relationships.
+A missing payload, unrelated 404, different frame/task or current failure blocks.
+The provider did not retain the failed name POST body, so candidate item IDs
+cannot be described as individually proven invalid IDs or credential failures.
+
+The callback exception requires the installed caught lookup source digest and
+exact 11-line DEBUG logger/frame/exception shape. Normal immediate SSO redirect
+plus same logged-session successful authentication and successful HTTP
+continuation are required. For the exact pinned historical delayed continuation,
+the bound is four hours and the immediate normal redirect must itself be
+HTTP-proven; no later arbitrary login qualifies. An already-authenticated token
+choice instead requires its existing-token continuation and successful view/HTTP
+completion. The logged session prefix is hashed; proxy client identity alone is
+not treated as a unique login correlation. ERROR/CRITICAL variants, unexpected
+frames, failed HTTP, missing continuation and unknown tracebacks remain blocking.
+
+These exceptions bind every original line hash, full retained container ID and
+image-bound review, original interval and exact occurrence count. The live scan
+reads those complete container streams separately, preserving record boundaries;
+changed/extended records and extra duplicates fail. Original errors remain
+recovered warnings, and their full ordered line digests, selection/report digest
+and later-success evidence are retained in `RETAINED-LOG-FINDINGS.json` before
+supported cleanup. Ordinary deployment and unreviewed retained recovery have no
+such exception.

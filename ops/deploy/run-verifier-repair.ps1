@@ -1,9 +1,9 @@
-
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ReviewedCommit,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$DockerSha256,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$HelperSha256,
     [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9+/=]+$')][string]$AssessmentBase64,
+    [string]$RetainedLogReportPath,
     [ValidateSet('verify','install-and-recover')][string]$Operation='verify',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$SshHost='b-uh'
 )
@@ -23,6 +23,24 @@ New-Item -ItemType Directory -Path $localStage | Out-Null
 $assessmentPath=Join-Path $localStage 'assessment.json'
 [IO.File]::WriteAllBytes($assessmentPath,$assessmentBytes)
 $assessmentSha=(Get-FileHash -Algorithm SHA256 $assessmentPath).Hash.ToLowerInvariant()
+$retainedSha='-'
+$uploadNames=@('docker_host.py','verifier_repair.py','assessment.json')
+if ($assessment.PSObject.Properties.Name -contains 'retained_log_findings') {
+    if (-not $RetainedLogReportPath) { throw 'The reviewed historical log report path is required.' }
+    $reportInfo=Get-Item -LiteralPath $RetainedLogReportPath
+    if ($reportInfo.PSIsContainer -or $reportInfo.Length -gt 2097152 -or
+        ($reportInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Historical log evidence must be a bounded normal file.'
+    }
+    $retainedSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $RetainedLogReportPath).Hash.ToLowerInvariant()
+    if ($retainedSha -notmatch '^[0-9a-f]{64}$' -or $retainedSha -cne $assessment.retained_log_findings.report_sha256) {
+        throw 'Historical log report checksum mismatch; stopping before any remote operation.'
+    }
+    Copy-Item -LiteralPath $RetainedLogReportPath -Destination (Join-Path $localStage 'retained-log-findings.json')
+    $uploadNames+=@('retained-log-findings.json')
+} elseif ($RetainedLogReportPath) {
+    throw 'Historical log evidence is not authorized by this assessment.'
+}
 foreach ($entry in @(
     @{Name='docker_host.py';Hash=$DockerSha256},
     @{Name='verifier_repair.py';Hash=$HelperSha256}
@@ -39,7 +57,7 @@ $uploadOutput=@(ssh -o BatchMode=yes -o ConnectTimeout=20 $SshHost 'umask 077; m
 if ($LASTEXITCODE -ne 0 -or $uploadOutput.Count -ne 1) { throw 'Could not stage verifier source.' }
 $upload=$uploadOutput[0].Trim()
 if ($upload -notmatch '^/tmp/buh-verifier-upload\.[A-Za-z0-9]+$') { throw 'Unexpected upload directory.' }
-foreach ($name in @('docker_host.py','verifier_repair.py','assessment.json')) {
+foreach ($name in $uploadNames) {
     scp -o BatchMode=yes -o ConnectTimeout=20 (Join-Path $localStage $name) ($SshHost + ':' + $upload + '/' + $name)
     if ($LASTEXITCODE -ne 0) { throw 'Verifier source upload failed.' }
 }
@@ -59,21 +77,25 @@ started = False
 operation = "unknown"
 phase = "arguments"
 try:
-    upload, commit, docker_digest, helper_digest, assessment_digest, operation = sys.argv[1:]
+    upload, commit, docker_digest, helper_digest, assessment_digest, operation, retained_digest = sys.argv[1:]
     if (not re.fullmatch(r"/tmp/buh-verifier-upload\.[A-Za-z0-9]+", upload)
             or not re.fullmatch(r"[0-9a-f]{40}", commit)
             or any(not re.fullmatch(r"[0-9a-f]{64}", item)
                    for item in (docker_digest, helper_digest, assessment_digest))
-            or operation not in {"verify", "install-and-recover"}):
+            or operation not in {"verify", "install-and-recover"}
+            or retained_digest != "-" and not re.fullmatch(r"[0-9a-f]{64}", retained_digest)):
         raise ValueError()
     os.umask(0o077)
     phase = "source_staging"
     stage = Path(tempfile.mkdtemp(prefix="buh-verifier-repair-" + commit[:8] + "-", dir="/root"))
-    for name, expected, limit in (
+    inputs = [
         ("docker_host.py", docker_digest, 512*1024),
         ("verifier_repair.py", helper_digest, 64*1024),
         ("assessment.json", assessment_digest, 64*1024),
-    ):
+    ]
+    if retained_digest != "-":
+        inputs.append(("retained-log-findings.json", retained_digest, 2*1024*1024))
+    for name, expected, limit in inputs:
         fd = os.open(Path(upload) / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
@@ -86,6 +108,19 @@ try:
         path.write_bytes(raw)
         path.chmod(0o600)
     assessment = json.loads((stage / "assessment.json").read_bytes())
+    if "retained_log_findings" in assessment:
+        if assessment["retained_log_findings"]["report_sha256"] != retained_digest:
+            raise ValueError()
+        # Preserve the reviewed selection; amend only its private staging path.
+        (stage / "assessment-reviewed.json").write_bytes((stage / "assessment.json").read_bytes())
+        assessment["retained_log_findings"]["report_path"] = str(stage / "retained-log-findings.json")
+        selected = json.dumps(assessment, sort_keys=True).encode()
+        if len(selected) > 64*1024:
+            raise ValueError()
+        (stage / "assessment.json").write_bytes(selected)
+        assessment_digest = hashlib.sha256(selected).hexdigest()
+    elif retained_digest != "-":
+        raise ValueError()
     if (not re.fullmatch(r"/root/buh-retained-recovery-0a3f8c09-[A-Za-z0-9_-]+/reconcile_structures_attempt.py",
                          assessment["bridge_source"])
             or not re.fullmatch(r"/root/buh-structures-pilot-badc74fd-[A-Za-z0-9_-]+", assessment["pilot_directory"])
@@ -131,7 +166,7 @@ except Exception as error:
     raise SystemExit(1)
 '@
 $output=@($rootScript | ssh -o BatchMode=yes -o ConnectTimeout=20 $SshHost (
-    "sudo -n timeout 1560s /usr/bin/python3 -B - $upload $ReviewedCommit $DockerSha256 $HelperSha256 $assessmentSha $Operation"
+    "sudo -n timeout 1560s /usr/bin/python3 -B - $upload $ReviewedCommit $DockerSha256 $HelperSha256 $assessmentSha $Operation $retainedSha"
 ))
 $exitCode=$LASTEXITCODE
 $text=$output -join [Environment]::NewLine

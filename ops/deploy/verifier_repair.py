@@ -235,6 +235,11 @@ def build_review(host, plan, assessment, baseline, prior):
             "verification_since": prior["started_at"]}
     if "worker_memory_recycles" in assessment:
         review.update(schema_version=2, worker_memory_recycles=assessment["worker_memory_recycles"])
+    if "retained_log_findings" in assessment:
+        if "worker_memory_recycles" not in assessment:
+            raise DeploymentError("Retained log proof requires the reviewed restart policy")
+        review.update(schema_version=3, retained_log_findings=assessment["retained_log_findings"])
+    if review["schema_version"] >= 2:
         host._apply_retained_verifier_review(review, plan, assessment["hold_sha256"])
     if plan["flags"]["traffic_switch_started"]:
         verify_previous_slot_routing(host, plan, assessment, rows)
@@ -498,6 +503,16 @@ def main(argv=None):
         if not any("recovered warning: Discord nickname HTTP 429 -> HTTP 204" in warning
                    for warning in report["recovered_log_warnings"]):
             raise DeploymentError("The exact original Discord recovery warning was not retained")
+        if "retained_log_findings" in review:
+            if any(not any(prefix in warning for warning in report["recovered_log_warnings"]) for prefix in (
+                    "recovered warning: exact historical asset-name Invalid IDs 404",
+                    "recovered warning: exact handled DEBUG CallbackRedirect lookup")):
+                raise DeploymentError("Exact historical finding recovery warnings were not retained")
+            report["retained_log_findings"] = {
+                "report_sha256": review["retained_log_findings"]["report_sha256"],
+                "report_path": review["retained_log_findings"]["report_path"],
+                "exact_records": sum(len(rows) for rows in host.recovered_retained_log_records.values()),
+                "current_assets_and_callback_source_verified": True}
         if args.operation == "verify":
             report["scan_complete"] = True
             report["ready_for_single_file_activation"] = True
@@ -525,6 +540,19 @@ def main(argv=None):
                 raise DeploymentError("Original reviewed restart baseline changed")
             _atomic_bytes(current.backup_path / "WORKER-RECYCLES.json",
                           (json.dumps(record, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
+            if "retained_log_findings" in review:
+                findings = {"schema_version": 1, "attempt_id": plan["attempt_id"],
+                    "plan_sha256": assessment["hold_sha256"], "review_sha256": digest(private_read(review_path)),
+                    "proof": review["retained_log_findings"],
+                    "recovered_warnings": current._verified_retained_log_findings(),
+                    "records": [{"source": source, "header_sha256": header,
+                                 "ordered_original_line_sha256": rows}
+                                for (source, header), rows in sorted(current.recovered_retained_log_records.items())]}
+                _atomic_bytes(current.backup_path / "RETAINED-LOG-FINDINGS.json",
+                              (json.dumps(findings, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
+                report["retained_log_findings_before_cleanup"] = {
+                    "report_sha256": findings["proof"]["report_sha256"], "warnings": findings["recovered_warnings"],
+                    "evidence_path": str(current.backup_path / "RETAINED-LOG-FINDINGS.json")}
 
         ScopedReconciliationHost = reconciliation_host(
             module.DockerHost, memberaudit_gate, structures_gate, recycle_evidence_gate)

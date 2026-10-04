@@ -53,7 +53,7 @@ jobs:
           PY
           python -m pip install --require-hashes --only-binary=:all: -r /tmp/buh-verifier-deps.txt
       - run: python -m compileall -q ops/deploy tests/deploy
-      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py ops/deploy/collect_retained_log_findings.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/test_worker_memory_recycles.py tests/deploy/test_retained_log_findings.py tests/deploy/verifier_fixtures.py
+      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py ops/deploy/collect_retained_log_findings.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/test_worker_memory_recycles.py tests/deploy/test_retained_log_findings.py tests/deploy/test_retained_log_recovery.py tests/deploy/verifier_fixtures.py
       - name: Run focused regressions and complete host-independent deployment suite
         env:
           BUH_REQUIRE_DOCKER_HEALTH_REGRESSION: '1'
