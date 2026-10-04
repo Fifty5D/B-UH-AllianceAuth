@@ -12,6 +12,39 @@ counts and start times. It never samples current counts as replacement evidence.
 The live inspector compares all those fields again; an unexpected restart,
 replacement, service swap, unhealthy state, OOM or image change still fails.
 
+The retained `candidate-slot-start-1` plan may already have
+`traffic_switch_started = true`: `_protect_static_collection_traffic` routes
+through previous-version static safety slots before candidate startup. This is
+admitted only while both replacement flags are false and the private reviewed
+assessment includes independent `previous_slot_routing` evidence. The original
+flag and plan bytes remain intact so the supported traffic-first rollback still
+runs. A flag, slot name or readiness label alone cannot establish this case.
+
+That record has exactly these fields:
+
+- `schema_version`: integer `1`.
+- `attempt_id`, `plan_sha256`, `host_evidence_sha256`: the retained attempt,
+  original `hold_sha256`, and independently reviewed host inventory digest from
+  the assessment. Both active and backed-up plan bytes must match that digest.
+- `slots`: the complete previous-slot inventory, in retained plan order. Each row
+  has exactly `name`, `container_id` (full ID), `image_id`, `restart_count` (zero),
+  and `started_at`. Use reviewed evidence; never reset a baseline from the live
+  inspector or reuse another attempt's slot inventory.
+- `targets`, `backup_targets`: exact primary and fallback endpoints from the
+  independent upstream evidence. Only the existing previous-slot/original
+  Gunicorn safety route, its restored Gunicorn/previous-slot route, or its final
+  original Gunicorn route are supported. Candidate, mixed and unknown routes
+  fail, including candidate fallback endpoints.
+- `upstream_sha256`: the SHA-256 of those exact managed upstream bytes.
+
+The helper independently re-reads full slot identities, previous images,
+restart counts and start times; all retained live service identities and runtime
+state; the previous static snapshot; host and container-visible upstream bytes;
+and the parsed production Nginx route and its complete upstream endpoint set.
+Missing, failed or changed reads block the review. It checks the retained plan
+again after these probes and retains the routing-proof digest in its private
+report. This does not authorize an operation or change Discord classification.
+
 The reviewed Discord exception is one complete nickname PATCH request, its
 specific mirrored rate-limit errors, the same member's correlated one-second
 retry, HTTP 204 and nickname completion within a five-second evidence window.

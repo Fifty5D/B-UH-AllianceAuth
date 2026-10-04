@@ -15,7 +15,10 @@ import re
 import stat
 
 from ops.deploy.contracts import DeploymentError, ReceiverConfig
-from ops.deploy.docker_host import _atomic_bytes
+from ops.deploy.docker_host import (
+    NGINX_UPSTREAM_NAME, _atomic_bytes, _parse_nginx_configuration,
+    _verify_nginx_production_route, _walk_nginx_nodes,
+)
 from ops.deploy.receiver import _open_lock, _verify_root_owned_ancestors
 
 BASE_COMMIT = "714a3407b7e84b70110162e22bf61f289773b23b"
@@ -82,6 +85,102 @@ def installed_identity(expected_docker=BASE_DOCKER_SHA256):
             "install_record_sha256": digest(private_read("/etc/buh-platform-v2/INSTALL.json"))}
 
 
+def verify_retained_plan(host, plan, expected_digest):
+    """Bind the loaded object and both retained files to the reviewed bytes."""
+    raw = private_read(host.config.state_dir / "active-recovery.json")
+    if (digest(raw) != expected_digest or json.loads(raw) != plan
+            or digest(private_read(host.backup_path / "RECOVERY.json")) != expected_digest):
+        raise DeploymentError("Retained attempt/plan evidence changed")
+
+
+def verify_retained_container(host, target, row, *, name=None):
+    """Re-read identity and runtime; never establish a baseline from this read."""
+    if (not isinstance(row["container_id"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", row["container_id"]) is None
+            or not isinstance(row["image_id"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", row["image_id"]) is None
+            or type(row["restart_count"]) is not int or not 0 <= row["restart_count"] <= 2**31 - 1
+            or not isinstance(row["started_at"], str)
+            or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", row["started_at"]) is None):
+        raise DeploymentError("Reviewed previous runtime evidence is malformed")
+    actual = host._run(
+        ["docker", "inspect", "--format", "{{.Id}}|{{.Name}}|{{.Image}}|{{.State.Status}}|"
+         "{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.StartedAt}}|"
+         "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", target],
+        context="Retained previous runtime identity verification").strip().split("|")
+    if (len(actual) != 8 or actual[0] != row["container_id"]
+            or name is not None and actual[1] != "/" + name
+            or actual[2:7] != [row["image_id"], "running", "false", str(row["restart_count"]), row["started_at"]]
+            or actual[7] not in {"none", "healthy"}):
+        raise DeploymentError("Retained previous runtime identity/image/restart changed")
+
+
+def verify_previous_slot_routing(host, plan, assessment, rows):
+    """Admit the static-safety switch only with independent, bound host proof."""
+    proof = assessment.get("previous_slot_routing")
+    gunicorn = host.config.gunicorn_service
+    previous = tuple(plan["previous_web_slots"])
+    expected_slots = tuple(f"buh-web-previous-{plan['attempt_id']}-{index+1}"
+                           for index in range(plan["auth_replica_counts"][gunicorn]))
+    if (plan["phase"] != "candidate-slot-start-1" or not previous or previous != expected_slots
+            or tuple(host.previous_web_slots) != previous
+            or not isinstance(proof, dict)
+            or set(proof) != {"schema_version", "attempt_id", "plan_sha256", "host_evidence_sha256",
+                              "slots", "targets", "backup_targets", "upstream_sha256"}
+            or type(proof["schema_version"]) is not int or proof["schema_version"] != 1
+            or proof["attempt_id"] != plan["attempt_id"]
+            or proof["plan_sha256"] != assessment["hold_sha256"]
+            or proof["host_evidence_sha256"] != assessment["host_evidence_sha256"]
+            or not isinstance(proof["slots"], list) or len(proof["slots"]) != len(previous)
+            or not isinstance(proof["targets"], list) or not isinstance(proof["backup_targets"], list)):
+        raise DeploymentError("Reviewed previous-slot routing evidence differs")
+    # These are the existing static-protection / traffic-first rollback route
+    # and the restored original route, including its final no-backup form.
+    # Every selectable endpoint must still have the independently reviewed old image.
+    route = (tuple(proof["targets"]), tuple(proof["backup_targets"]))
+    if route not in ((previous, (gunicorn,)), ((gunicorn,), previous), ((gunicorn,), ())):
+        raise DeploymentError("Retained traffic is not exclusively on a supported previous-version route")
+    identities = {row["container_id"] for row in rows}
+    for name, row in zip(previous, proof["slots"]):
+        if (not isinstance(row, dict)
+                or set(row) != {"name", "container_id", "image_id", "restart_count", "started_at"}
+                or row["name"] != name or not isinstance(row["container_id"], str)
+                or row["container_id"] in identities
+                or row["image_id"] != plan["previous_images"][gunicorn][0]
+                or type(row["restart_count"]) is not int or row["restart_count"] != 0):
+            raise DeploymentError("Reviewed previous slot identity/image differs")
+        verify_retained_container(host, name, row, name=name)
+        identities.add(row["container_id"])
+    required = {**plan["auth_replica_counts"], host.config.database_service: 1,
+                host.config.redis_service: 1, host.config.proxy_service: 1}
+    for role, count in required.items():
+        retained = [row for row in rows if row["service"] == role]
+        if (len(retained) != count
+                or role in plan["previous_images"] and any(
+                    row["image_id"] != plan["previous_images"][role][0] for row in retained)
+                or set(host._running_service_containers(role, context="Retained previous service discovery"))
+                != {row["container_id"] for row in retained}):
+            raise DeploymentError("Retained previous service topology/image changed")
+        for row in retained:
+            verify_retained_container(host, row["container_id"], row)
+    host._verify_previous_static_fallback()
+    expected = host._render_upstream(route[0], backup_targets=route[1])
+    path = host._upstream_path()
+    if (proof["upstream_sha256"] != digest(expected.encode())
+            or not path.is_file() or path.is_symlink() or path.stat().st_size != len(expected.encode())
+            or path.read_bytes() != expected.encode()):
+        raise DeploymentError("Retained previous-version upstream bytes changed")
+    host._verify_proxy_upstream_bytes(expected, context="Reviewed previous-version route")
+    configuration = host._proxy_exec("nginx", "-T", bounded_output=True,
+                                     context="Reviewed previous-version production route discovery")
+    _verify_nginx_production_route(configuration)
+    upstreams = [node for node in _walk_nginx_nodes(_parse_nginx_configuration(configuration))
+                 if node[0] == ("upstream", NGINX_UPSTREAM_NAME)]
+    if upstreams != list(_parse_nginx_configuration(expected)):
+        raise DeploymentError("Nginx does not exclusively select the reviewed previous endpoints")
+    verify_retained_plan(host, plan, assessment["hold_sha256"])
+
+
 def build_review(host, plan, assessment, baseline, prior):
     """Counts come from the reviewed host evidence, never the current inspector."""
     if (assessment["attempt_id"] != plan["attempt_id"]
@@ -91,8 +190,9 @@ def build_review(host, plan, assessment, baseline, prior):
             or prior.get("deployment_attempted") is not False
             or prior.get("before_host", {}).get("hold_sha256") != assessment["hold_sha256"]
             or any(plan["flags"][name] for name in ("workers_replacement_started",
-                                                    "gunicorn_replacement_started", "traffic_switch_started"))):
+                                                    "gunicorn_replacement_started"))):
         raise DeploymentError("Retained pre-replacement attempt identity changed")
+    verify_retained_plan(host, plan, assessment["hold_sha256"])
     required = {*host.config.auth_services, host.config.database_service,
                 host.config.redis_service, host.config.proxy_service}
     retained = {row["id"]: row for row in baseline["containers"]}
@@ -118,6 +218,8 @@ def build_review(host, plan, assessment, baseline, prior):
         seen.add(old["id"])
         rows.append({"container_id": old["id"], "service": role, "image_id": old["image_id"],
                      "restart_count": row["restarts"], "started_at": row["started_at"]})
+    if plan["flags"]["traffic_switch_started"]:
+        verify_previous_slot_routing(host, plan, assessment, rows)
     return {"schema_version": 1, "attempt_id": plan["attempt_id"],
             "plan_sha256": assessment["hold_sha256"],
             "host_evidence_sha256": assessment["host_evidence_sha256"],
@@ -346,6 +448,11 @@ def main(argv=None):
         prior = json.loads(prior_raw)
         report["original_failed_recovery_report_sha256"] = digest(prior_raw)
         review = build_review(host, plan, assessment, baseline, prior)
+        if plan["flags"]["traffic_switch_started"]:
+            report["previous_slot_routing"] = {
+                "verified": True, "attempt_id": plan["attempt_id"], "plan_sha256": assessment["hold_sha256"],
+                "evidence_sha256": digest(json.dumps(assessment["previous_slot_routing"], sort_keys=True).encode()),
+            }
         review_path = args.assessment.parent / "VERIFIER-REVIEW.json"
         _atomic_bytes(review_path, (json.dumps(review, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
         host._load_retained_verifier_review(plan, assessment["hold_sha256"], review_path=review_path)
