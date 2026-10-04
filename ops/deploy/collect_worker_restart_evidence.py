@@ -267,7 +267,10 @@ def collect(expected):
             raise RuntimeError("installed_receiver_identity_changed")
         sys.path.insert(0, "/usr/local/lib/buh-platform-v2")
         from ops.deploy.contracts import ReceiverConfig
-        from ops.deploy.docker_host import DockerHost
+        from ops.deploy.docker_host import (
+            DockerHost, NGINX_UPSTREAM_NAME, _parse_nginx_configuration,
+            _verify_nginx_production_route, _walk_nginx_nodes,
+        )
         from ops.deploy.receiver import _open_lock
         config = ReceiverConfig.load(Path("/etc/buh-platform-v2/receiver.json"))
         lock = _open_lock(config)
@@ -359,6 +362,40 @@ def collect(expected):
             "Historic healthcheck stdout is available only if retained in recent Docker Health.Log entries.",
             "This collector does not infer a cause, accept a restart, or replace any reviewed baseline.",
         ]
+        phase = "retained_previous_slot_route_evidence"
+        slots = [inspect(name) for name in host.previous_web_slots]
+        old_web_image = host.previous_images[config.gunicorn_service][0]
+        if not slots or any(row["image_id"] != old_web_image or row["restart_count"] != 0
+                            or row["status"] != "running" or row["oom_killed"]
+                            or row["state_error_present"] or row["health"] not in {None, "healthy"}
+                            for row in slots):
+            raise RuntimeError("retained_previous_slot_identity_or_health_changed")
+        upstream = private_read(host._upstream_path(), 65536)
+        choices = [(tuple(host.previous_web_slots), (config.gunicorn_service,)),
+                   ((config.gunicorn_service,), tuple(host.previous_web_slots)),
+                   ((config.gunicorn_service,), ())]
+        matching = [(targets, backups) for targets, backups in choices
+                    if host._render_upstream(targets, backup_targets=backups).encode() == upstream]
+        if len(matching) != 1:
+            raise RuntimeError("current_route_is_not_a_supported_previous_version_route")
+        host._verify_proxy_upstream_bytes(upstream.decode(), context="Read-only retained route evidence")
+        configuration = host._proxy_exec("nginx", "-T", bounded_output=True,
+                                         context="Read-only retained effective route evidence")
+        _verify_nginx_production_route(configuration)
+        nodes = [node for node in _walk_nginx_nodes(_parse_nginx_configuration(configuration))
+                 if node[0] == ("upstream", NGINX_UPSTREAM_NAME)]
+        if nodes != list(_parse_nginx_configuration(upstream.decode())):
+            raise RuntimeError("effective_route_differs_from_managed_previous_version_route")
+        targets, backups = matching[0]
+        report["previous_slot_routing"] = {
+            "schema_version": 1, "attempt_id": plan["attempt_id"], "plan_sha256": digest(raw_plan),
+            "host_evidence_sha256": expected["host_evidence_sha256"],
+            "slots": [{"name": name, **{key: row[key] for key in
+                       ("container_id", "image_id", "restart_count", "started_at")}}
+                      for name, row in zip(host.previous_web_slots, slots)],
+            "targets": list(targets), "backup_targets": list(backups), "upstream_sha256": digest(upstream),
+        }
+        report["effective_previous_version_route_verified"] = True
         phase = "evidence_stability"
         fields = ("container_id", "image_id", "service", "restart_count", "started_at", "finished_at",
                   "status", "health", "oom_killed", "exit_code", "state_error_present",
@@ -367,6 +404,9 @@ def collect(expected):
         report["unchanged_during_collection"] = (private_read(config.state_dir / "active-recovery.json") == raw_plan
             and private_read(host.backup_path / "RECOVERY.json") == raw_plan
             and private_read(script_path, 4096) == script
+            and private_read(host._upstream_path(), 65536) == upstream
+            and all(all(after[key] == before[key] for key in fields)
+                    for before, after in zip(slots, [inspect(name) for name in host.previous_web_slots]))
             and all(all(after[key] == before[key] for key in fields)
                     for before, after in zip(current, final_current)))
         if not report["unchanged_during_collection"]:
