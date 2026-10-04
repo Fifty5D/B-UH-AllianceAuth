@@ -186,6 +186,71 @@ def retained_window(connection, name, start, end):
             "categories": categories, "records": retained, "coverage_gaps": gaps}
 
 
+def host_journal_window(start, end):
+    """Include info-level host automation without exporting arbitrary commands."""
+    start_arg = timestamp(start).strftime("%Y-%m-%d %H:%M:%S UTC")
+    end_arg = timestamp(end).strftime("%Y-%m-%d %H:%M:%S UTC")
+    raw = command(["journalctl", "--since", start_arg, "--until", end_arg,
+                   "--no-pager", "--output=json"], 8 * 1024 * 1024)
+    records, total, boots = [], 0, set()
+    for line in raw.splitlines():
+        total += 1
+        if total > MAX_ROWS:
+            raise RuntimeError("bounded_host_journal_incomplete")
+        entry = json.loads(line)
+        message = entry.get("MESSAGE")
+        if not isinstance(message, str):
+            raise RuntimeError("unreadable_host_journal_record")
+        if isinstance(entry.get("_BOOT_ID"), str):
+            boots.add(entry["_BOOT_ID"])
+        unit = str(entry.get("_SYSTEMD_UNIT") or "")
+        identifier = str(entry.get("SYSLOG_IDENTIFIER") or "")
+        if (unit in {"docker.service", "containerd.service", "cron.service", "auditd.service"}
+                or identifier in {"CRON", "sudo", "kernel", "audit"}
+                or re.search(r"buh-|docker-[0-9a-f]{64}\.scope|Docker|Containerd|logrotate|unattended", message)):
+            tags = []
+            for tag, pattern in (
+                    ("docker_or_compose_control", r"\b(?:docker(?:-compose|\s+compose)?\s+(?:restart|stop|kill|up|down|rm)|compose\s+(?:restart|up|down))\b"),
+                    ("signal_or_kill", r"\bSIG(?:TERM|INT|KILL)\b|\bkill(?:all)?\s+-"),
+                    ("daemon_or_host_shutdown", r"\b(?:reboot|shutting down|daemon shutdown|Stopping Docker|Starting Docker|Stopped Docker)\b"),
+                    ("memory_or_oom", r"\b(?:oom|out of memory|killed process|memory pressure)\b"),
+                    ("buh_operation", r"\bbuh-|\brecovery|\bdiagnostic|\bdeployment")):
+                if re.search(pattern, message, re.I):
+                    tags.append(tag)
+            records.append({"at": datetime.fromtimestamp(int(entry["__REALTIME_TIMESTAMP"]) / 1e6,
+                                                         timezone.utc).isoformat(),
+                            "unit": unit[:100], "identifier": identifier[:100],
+                            "pid": str(entry.get("_PID") or ""), "boot_id": entry.get("_BOOT_ID"),
+                            "priority": entry.get("PRIORITY"), "tags": tags,
+                            "message_sha256": digest(message.encode())})
+    return {"rows_scanned": total, "boot_ids": sorted(boots), "records": records,
+            "source_bytes": len(raw)}
+
+
+def host_agent_actions(windows):
+    root = Path("/opt/aa-docker/conf/buh-vps-health/run/actions")
+    result = {"path": str(root), "exists": root.exists(), "matching_actions": []}
+    if not root.exists():
+        return result
+    paths = list(root.glob("*.json"))
+    if len(paths) > 2000:
+        raise RuntimeError("bounded_host_agent_inventory_incomplete")
+    for path in paths:
+        raw = private_read(path, 65536)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise RuntimeError("unreadable_host_agent_action")
+        at = next((value.get(key) for key in ("at", "started_at", "requested_at", "created_at")
+                   if isinstance(value.get(key), str)), None)
+        if at is None:
+            continue
+        point = timestamp(at)
+        if any(timestamp(window["start"]) <= point <= timestamp(window["end"]) for window in windows):
+            result["matching_actions"].append({"at": at, "sha256": digest(raw),
+                                                "bytes": len(raw), "action_requires_review": True})
+    return result
+
+
 def collect(expected):
     report = {"schema_version": 1, "read_only": True, "scan_complete": False,
               "scope": "post-baseline-worker-restart-causality", "recovery_eligible": False,
@@ -276,6 +341,7 @@ def collect(expected):
                                          "load_1m": load} for at, free, available, load in connection.execute(
                 "SELECT at,free_bytes,available_memory_bytes,load_1m FROM resources "
                 "WHERE at >= ? AND at <= ? ORDER BY at LIMIT 10", (window["start"], window["end"]))]
+            window["host_journal"] = host_journal_window(window["start"], window["end"])
             report["restart_windows"].append(window)
         report["host_boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         report["matches_reviewed_host_boot_id"] = report["host_boot_id"] == expected["host_boot_id"]
@@ -287,16 +353,20 @@ def collect(expected):
             raw = command(["systemctl", "show", unit, "--property=" + ",".join(properties)], 8192)
             report["host_daemons"][unit] = {key: value for key, value in
                 (line.split("=", 1) for line in raw.decode().splitlines() if "=" in line) if key in properties}
+        report["host_agent_actions"] = host_agent_actions(report["restart_windows"])
         report["evidence_limits"] = [
             "The existing diagnostic store keeps Docker event actions without exec IDs or exec exit codes.",
             "Historic healthcheck stdout is available only if retained in recent Docker Health.Log entries.",
             "This collector does not infer a cause, accept a restart, or replace any reviewed baseline.",
         ]
         phase = "evidence_stability"
-        fields = ("container_id", "image_id", "service", "restart_count", "started_at", "status", "health", "oom_killed")
+        fields = ("container_id", "image_id", "service", "restart_count", "started_at", "finished_at",
+                  "status", "health", "oom_killed", "exit_code", "state_error_present",
+                  "memory_healthcheck", "restart_policy", "memory_check_mounts")
         final_current = [inspect(live["container_id"]) for live in current]
         report["unchanged_during_collection"] = (private_read(config.state_dir / "active-recovery.json") == raw_plan
             and private_read(host.backup_path / "RECOVERY.json") == raw_plan
+            and private_read(script_path, 4096) == script
             and all(all(after[key] == before[key] for key in fields)
                     for before, after in zip(current, final_current)))
         if not report["unchanged_during_collection"]:
