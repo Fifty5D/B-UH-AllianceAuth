@@ -110,9 +110,13 @@ def verify_retained_container(host, target, row, *, name=None):
         context="Retained previous runtime identity verification").strip().split("|")
     if (len(actual) != 8 or actual[0] != row["container_id"]
             or name is not None and actual[1] != "/" + name
-            or actual[2:7] != [row["image_id"], "running", "false", str(row["restart_count"]), row["started_at"]]
+            or actual[2:5] != [row["image_id"], "running", "false"]
             or actual[7] not in {"none", "healthy"}):
         raise DeploymentError("Retained previous runtime identity/image/restart changed")
+    if actual[5:7] != [str(row["restart_count"]), row["started_at"]]:
+        if not actual[5].isdigit():
+            raise DeploymentError("Retained previous runtime restart count is invalid")
+        host._verify_retained_worker_recycles(row["container_id"], int(actual[5]), actual[6])
 
 
 def verify_previous_slot_routing(host, plan, assessment, rows):
@@ -218,14 +222,18 @@ def build_review(host, plan, assessment, baseline, prior):
         seen.add(old["id"])
         rows.append({"container_id": old["id"], "service": role, "image_id": old["image_id"],
                      "restart_count": row["restarts"], "started_at": row["started_at"]})
-    if plan["flags"]["traffic_switch_started"]:
-        verify_previous_slot_routing(host, plan, assessment, rows)
-    return {"schema_version": 1, "attempt_id": plan["attempt_id"],
+    review = {"schema_version": 1, "attempt_id": plan["attempt_id"],
             "plan_sha256": assessment["hold_sha256"],
             "host_evidence_sha256": assessment["host_evidence_sha256"],
             "host_observed_at": assessment["host_observed_at"],
             "containers": rows, "discord_429": assessment["discord_429"],
             "verification_since": prior["started_at"]}
+    if "worker_memory_recycles" in assessment:
+        review.update(schema_version=2, worker_memory_recycles=assessment["worker_memory_recycles"])
+        host._apply_retained_verifier_review(review, plan, assessment["hold_sha256"])
+    if plan["flags"]["traffic_switch_started"]:
+        verify_previous_slot_routing(host, plan, assessment, rows)
+    return review
 
 
 def memberaudit_refs(completed, targets):
@@ -348,6 +356,8 @@ def all_checks(host):
                 warnings.extend(value)
         except Exception as error:
             row.update(error_type=type(error).__name__, error_sha256=digest(str(error).encode()))
+            if isinstance(error, DeploymentError):
+                row["guard_reason"] = str(error)[:200]
         results.append(row)
     return results, warnings
 
@@ -392,13 +402,15 @@ def install_single_file(host, candidate, source_hash, review_path, commit):
 
 
 
-def reconciliation_host(BaseHost, memberaudit_gate, structures_gate):
+def reconciliation_host(BaseHost, memberaudit_gate, structures_gate, recycle_evidence_gate=None):
     """Add preservation reads inside the supported pre-cleanup verification."""
     class ScopedReconciliationHost(BaseHost):
         def _verify_restored(self, bundle, replaced_services):
             super()._verify_restored(bundle, replaced_services)
             memberaudit_gate(self)
             structures_gate(self)
+            if recycle_evidence_gate is not None:
+                recycle_evidence_gate(self)
     return ScopedReconciliationHost
 
 
@@ -472,6 +484,10 @@ def main(argv=None):
         report["retained_database_backup"] = bridge.verify_backup(host, pilot)
         phase = "all_read_only_verifier_checks"
         report["pre_install_checks"], report["recovered_log_warnings"] = all_checks(host)
+        report["proven_worker_recycles"] = host.accepted_worker_recycles
+        report["blocked_worker_recycles"] = host.blocked_worker_recycles
+        report["reviewed_restart_baseline_unchanged"] = host.restart_baselines == {
+            row["container_id"]: row["restart_count"] for row in review["containers"]}
         if not report["pre_install_checks"] or any(not row["passed"] for row in report["pre_install_checks"]):
             raise DeploymentError("Current verification checks failed; no tooling activation or cleanup")
         if not any("recovered warning: Discord nickname HTTP 429 -> HTTP 204" in warning
@@ -493,8 +509,20 @@ def main(argv=None):
             report["owners_before_cleanup"] = bridge.snapshot(current, pilot, owner_source, target, roster)
             bridge.require_healthy_owners(report["owners_before_cleanup"], roster)
 
+        def recycle_evidence_gate(current):
+            report["proven_worker_recycles_before_cleanup"] = current.accepted_worker_recycles
+            record = {"schema_version": 1, "attempt_id": plan["attempt_id"],
+                      "plan_sha256": assessment["hold_sha256"], "review_sha256": digest(private_read(review_path)),
+                      "reviewed_baseline_unchanged": current.restart_baselines == {
+                          row["container_id"]: row["restart_count"] for row in review["containers"]},
+                      "proven_worker_recycles": current.accepted_worker_recycles}
+            if record["reviewed_baseline_unchanged"] is not True:
+                raise DeploymentError("Original reviewed restart baseline changed")
+            _atomic_bytes(current.backup_path / "WORKER-RECYCLES.json",
+                          (json.dumps(record, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
+
         ScopedReconciliationHost = reconciliation_host(
-            module.DockerHost, memberaudit_gate, structures_gate)
+            module.DockerHost, memberaudit_gate, structures_gate, recycle_evidence_gate)
         report["recovery"] = bridge.reconcile(config, ScopedReconciliationHost, pilot, owner_source,
                                               assessment["attempt_id"], assessment["hold_sha256"], "Fifty5D", True)
         if report["recovery"].get("scan_complete") is not True:

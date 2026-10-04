@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
@@ -661,6 +661,124 @@ def _atomic_text(
     _atomic_bytes(path, text.encode("utf-8"), mode, owner=owner)
 
 
+# This is the already-installed and independently reviewed script, not a new
+# healthcheck or an adjustable memory policy. Only legacy retained recovery may
+# opt into proving its graceful recycles. Normal deployment checks stay strict.
+WORKER_MEMORY_SCRIPT_SHA256 = "ca060b5f6e55108d3c4a82ea97eb521e02515f98bcba613d3bb1da23423c3438"
+WORKER_MEMORY_SCRIPT = Path("/opt/aa-docker/conf/memory_check.sh")
+WORKER_RESTART_STORE = Path("/var/lib/buh-diagnostics/history.sqlite3")
+WORKER_MEMORY_CHECK = {"Test": ["CMD", "/memory_check.sh", "500000000"],
+                       "Interval": 60000000000, "Timeout": 10000000000,
+                       "StartPeriod": 300000000000, "Retries": 3}
+WORKER_RESTART_RECORD = re.compile(
+    r'msg="restarting container" container=([0-9a-f]{64}) exitCode=(\d+) '
+    r'exitedAt="([^"]+)" manualRestart=(true|false) restartCount=(\d+) '
+    r'restartPolicy="\{([^}]*)\}"')
+WORKER_RECYCLE_INSPECT = (
+    '[{{json .Id}},{{json .Name}},{{json .Image}},{{json .RestartCount}},'
+    '{{json .State}},{{json .Config.Labels}},{{json (index .Config "Healthcheck")}},'
+    '{{json .HostConfig.RestartPolicy}},{{json .Mounts}}]')
+
+
+def _recycle_time(value):
+    try:
+        point = datetime.fromisoformat(value.replace(" +0000 UTC", "Z").replace(" ", "T", 1)
+                                       .replace("Z", "+00:00"))
+        if point.utcoffset() != timedelta(0):
+            raise ValueError()
+        return point
+    except (AttributeError, TypeError, ValueError) as error:
+        raise DeploymentError("Worker recycle timestamp is invalid") from error
+
+
+def _validate_worker_recycle_policy(policy, rows, worker_service):
+    required = {"schema_version", "reviewed_evidence_sha256", "host_boot_id",
+                "diagnostics_store_id", "daemons", "workers", "script_sha256"}
+    if (not isinstance(policy, dict) or set(policy) != required
+            or type(policy["schema_version"]) is not int or policy["schema_version"] != 1
+            or policy["script_sha256"] != WORKER_MEMORY_SCRIPT_SHA256
+            or not isinstance(policy["reviewed_evidence_sha256"], str)
+            or SHA256_RE.fullmatch(policy["reviewed_evidence_sha256"]) is None
+            or any(not isinstance(policy[key], str) or re.fullmatch(r"[0-9a-f]{32}", policy[key]) is None
+                   for key in ("host_boot_id", "diagnostics_store_id"))
+            or not isinstance(policy["workers"], dict) or not policy["workers"]
+            or not isinstance(policy["daemons"], dict)
+            or set(policy["daemons"]) != {"docker.service", "containerd.service"}):
+        raise DeploymentError("Reviewed worker recycle policy is malformed")
+    expected = {row["container_id"] for row in rows if row["service"] == worker_service}
+    if (set(policy["workers"]) != expected
+            or any(not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", name) is None
+                   for name in policy["workers"].values())
+            or len(set(policy["workers"].values())) != len(expected)):
+        raise DeploymentError("Worker recycle policy differs from retained worker identities")
+    for daemon in policy["daemons"].values():
+        if (not isinstance(daemon, dict) or set(daemon) != {"MainPID", "ExecMainStartTimestampMonotonic"}
+                or any(not isinstance(value, str) or not value.isdigit() or int(value) <= 0
+                       for value in daemon.values())):
+            raise DeploymentError("Worker recycle daemon baseline is malformed")
+
+
+def _prove_worker_recycle(event, events, application, journal, *, container, name, observed):
+    """Prove one complete causal chain; a warm exit or a count alone is insufficient."""
+    exit_at, restart_at = _recycle_time(event["exited_at"]), _recycle_time(event["at"])
+    if (event["container_id"] != container or event["manual_restart"] is not False
+            or type(event["exit_code"]) is not int or event["exit_code"] != 0
+            or event["restart_policy"] != "always 0" or exit_at <= _recycle_time(observed)
+            or not 0 <= (restart_at - exit_at).total_seconds() <= 2):
+        raise DeploymentError("Worker exit was not a proven automatic graceful recycle")
+    allowed = {"exec_create: /memory_check.sh 500000000", "exec_start: /memory_check.sh 500000000",
+               "exec_die", "health_status: unhealthy", "health_status: healthy", "die", "start"}
+    if any(row["service"] != name or row["message"] not in allowed for row in events):
+        raise DeploymentError("Worker recycle has an unexpected/manual Docker operation")
+    before = [row for row in events if _recycle_time(row["at"]) <= exit_at]
+    executions = [row for row in before if row["message"] == "exec_start: /memory_check.sh 500000000"]
+    if len(executions) < 4:
+        raise DeploymentError("Worker recycle lacks four configured memory check executions")
+    checks = executions[-4:]
+    points = [_recycle_time(row["at"]) for row in checks]
+    if (any(not 59 <= (right - left).total_seconds() <= 62 for left, right in zip(points, points[1:]))
+            or not 0 < (exit_at - points[-1]).total_seconds() <= 30):
+        raise DeploymentError("Worker recycle memory check sequence is incomplete")
+    unhealthy = [row for row in before if row["message"] == "health_status: unhealthy"
+                 and 0 <= (_recycle_time(row["at"]) - points[-2]).total_seconds() <= 2]
+    warm = [row for row in application if row.get("kind") == "warm"]
+    if (len(unhealthy) != 1 or len(warm) != 1
+            or not 0 <= (_recycle_time(warm[0]["at"]) - points[-1]).total_seconds() <= 0.5
+            or any(row.get("kind") != "warm" for row in application)):
+        raise DeploymentError("Worker recycle lacks the threshold/SIGTERM/warm-shutdown proof")
+    # An unrelated fatal exception, OOM, host restart, or explicit control action
+    # remains a blocker. These records are never put on the health log allowlist.
+    control = re.compile(r"\b(?:SIGKILL|SIGINT|SIGTERM|out of memory|killed process|oom-kill|"
+                         r"reboot|daemon shutdown|shutting down|Stopping Docker|Starting Docker|Stopped Docker)\b|"
+                         r"\b(?:docker(?:-compose|\s+compose)?\s+(?:restart|stop|kill|up|down|rm)|"
+                         r"compose\s+(?:restart|up|down)|kill(?:all)?\s+-)", re.I)
+    if any(control.search(row["message"]) for row in journal):
+        raise DeploymentError("Worker recycle has conflicting host/control evidence")
+    dies = [row for row in events if row["message"] == "die"
+            and 0 <= (_recycle_time(row["at"]) - exit_at).total_seconds() <= 2]
+    starts = [row for row in events if row["message"] == "start"
+              and 0 <= (_recycle_time(row["at"]) - exit_at).total_seconds() <= 3]
+    healthy = [row for row in events if row["message"] == "health_status: healthy"
+               and 0 < (_recycle_time(row["at"]) - exit_at).total_seconds() <= 30]
+    if len(dies) != 1 or len(starts) != 1 or len(healthy) != 1:
+        raise DeploymentError("Worker recycle lacks automatic restart/current health evidence")
+    start_at, healthy_at = _recycle_time(starts[0]["at"]), _recycle_time(healthy[0]["at"])
+    if not exit_at < start_at < healthy_at:
+        raise DeploymentError("Worker recycle lifecycle ordering is invalid")
+    # Preserve the original warning/evidence without retaining arbitrary payloads
+    # or auth credentials from application/host logs.
+    return {"container_id": container, "restart_count": event["restart_count"],
+            "exit_code": 0, "manual_restart": False, "exited_at": event["exited_at"],
+            "started_event_at": starts[0]["at"], "healthy_at": healthy[0]["at"],
+            "warm_shutdown_at": warm[0]["at"], "memory_check_at": checks[-1]["at"],
+            "threshold_evidence": "reviewed script branch plus third-failure Docker health transition",
+            "restart_record_sha256": event["message_sha256"],
+            "evidence_sha256": hashlib.sha256(canonical_json_bytes(
+                {"event": event, "events": events, "application": application,
+                 "journal": [{"at": row["at"], "sha256": hashlib.sha256(row["message"].encode()).hexdigest()}
+                             for row in journal]})).hexdigest()}
+
+
 class DockerHost:
     """Apply a verified release to the existing `/opt/aa-docker` layout."""
 
@@ -680,6 +798,9 @@ class DockerHost:
         self.retained_restart_images: dict[str, str] = {}
         self.retained_restart_started_at: dict[str, str] = {}
         self.retained_verifier_review: dict | None = None
+        self.worker_recycle_policy: dict | None = None
+        self.accepted_worker_recycles: dict[str, list[dict]] = {}
+        self.blocked_worker_recycles: dict[str, str] = {}
         self.recovered_discord_429_hashes: set[str] = set()
         self.recovered_discord_429_seen: dict[str, int] = {}
         self.live_replacement_started = False
@@ -1142,11 +1263,19 @@ class DockerHost:
             review = json.loads(path.read_text(encoding="ascii"))
         except (OSError, ValueError) as error:
             raise DeploymentError("Retained verifier review is unreadable") from error
+        self._apply_retained_verifier_review(review, value, plan_digest)
+
+    def _apply_retained_verifier_review(self, review, value, plan_digest) -> None:
+        """Validate the private reviewed document before any exception is usable."""
+        if self.retained_verifier_review != review:
+            self.accepted_worker_recycles = {}
+        fields = {"schema_version", "attempt_id", "plan_sha256", "host_evidence_sha256",
+                  "host_observed_at", "containers", "discord_429", "verification_since"}
         if (not isinstance(review, dict)
-                or set(review) != {"schema_version", "attempt_id", "plan_sha256",
-                                  "host_evidence_sha256", "host_observed_at", "containers",
-                                  "discord_429", "verification_since"}
-                or review["schema_version"] != 1 or review["attempt_id"] != value["attempt_id"]
+                or type(review.get("schema_version")) is not int
+                or review["schema_version"] not in {1, 2}
+                or set(review) != fields | ({"worker_memory_recycles"} if review["schema_version"] == 2 else set())
+                or review["attempt_id"] != value["attempt_id"]
                 or review["plan_sha256"] != plan_digest
                 or not isinstance(review["host_evidence_sha256"], str)
                 or SHA256_RE.fullmatch(review["host_evidence_sha256"]) is None
@@ -1183,7 +1312,227 @@ class DockerHost:
         self.retained_restart_images = images
         self.retained_restart_started_at = started
         self.retained_verifier_review = review
+        self.worker_recycle_policy = review.get("worker_memory_recycles")
+        if self.worker_recycle_policy is not None:
+            _validate_worker_recycle_policy(self.worker_recycle_policy, review["containers"], self.config.worker_service)
+        elif review["schema_version"] == 2:
+            raise DeploymentError("Reviewed worker recycle policy is missing")
         self.log_since = review["verification_since"]
+
+    def _worker_recycle_private_bytes(self, path: Path, maximum: int) -> bytes:
+        """Root-owned read only; never execute or edit the installed healthcheck."""
+        if not path.is_absolute() or ".." in path.parts:
+            raise DeploymentError("Worker recycle evidence path is invalid")
+        for parent in reversed(path.parents):
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or parent.is_symlink()
+                    or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+                raise DeploymentError("Worker recycle evidence ancestor is unsafe")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                    or stat.S_IMODE(before.st_mode) & 0o022 or before.st_size > maximum):
+                raise DeploymentError("Worker recycle evidence is unsafe")
+            raw = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            if (len(raw) != before.st_size or (before.st_ino, before.st_mtime_ns, before.st_size)
+                    != (after.st_ino, after.st_mtime_ns, after.st_size)):
+                raise DeploymentError("Worker recycle evidence changed during read")
+            return raw
+
+    def _worker_recycle_journal(self, since, until, *, daemons_only=False):
+        arguments = ["journalctl", "--since", _recycle_time(since).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                     "--until", _recycle_time(until).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                     "--no-pager", "--output=json"]
+        if daemons_only:
+            arguments.extend(("-u", "docker.service", "-u", "containerd.service"))
+        stream = self._stream_log_lines(arguments, deadline=time.monotonic() + self.config.command_timeout_seconds,
+                                        context="Complete retained worker recycle journal")
+        rows, consumed = [], 0
+        for line in stream:
+            consumed += len(line.encode())
+            if len(rows) >= 30000 or consumed > 32 * 1024 * 1024:
+                raise DeploymentError("Worker recycle journal interval exceeds safe bounds")
+            try:
+                record = json.loads(line)
+                message, boot = record["MESSAGE"], record["_BOOT_ID"]
+                if not isinstance(message, str) or boot != self.worker_recycle_policy["host_boot_id"]:
+                    raise ValueError()
+                at = datetime.fromtimestamp(int(record["__REALTIME_TIMESTAMP"]) / 1e6, timezone.utc).isoformat()
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeploymentError("Worker recycle journal is incomplete or host identity changed") from error
+            rows.append({"at": at, "message": message})
+        return rows
+
+    def _worker_recycle_runtime(self, container):
+        try:
+            raw = self._run(["docker", "inspect", "--format", WORKER_RECYCLE_INSPECT, container],
+                            bounded_output=True, context="Worker recycle immutable runtime identity")
+            identity, name, image, count, state, labels, check, policy, mounts = json.loads(raw)
+            expected = self.worker_recycle_policy
+            if (identity != container or name != "/" + expected["workers"].get(container, "")
+                    or image != self.retained_restart_images[container]
+                    or type(count) is not int or not 0 <= count <= 2**31 - 1
+                    or not isinstance(state, dict) or state.get("Status") != "running"
+                    or state.get("OOMKilled") is not False or type(state.get("ExitCode")) is not int
+                    or state["ExitCode"] != 0 or state.get("Error")
+                    or not isinstance(state.get("Health"), dict) or state["Health"].get("Status") != "healthy"
+                    or not isinstance(labels, dict) or labels.get("com.docker.compose.service") != self.config.worker_service
+                    or not isinstance(check, dict)
+                    or {key: check.get(key) for key in WORKER_MEMORY_CHECK} != WORKER_MEMORY_CHECK
+                    or policy != {"Name": "always", "MaximumRetryCount": 0}
+                    or not isinstance(mounts, list)
+                    or [{key: row.get(key) for key in ("Source", "Destination", "RW")} for row in mounts
+                        if row.get("Destination") == "/memory_check.sh"]
+                    != [{"Source": str(WORKER_MEMORY_SCRIPT), "Destination": "/memory_check.sh", "RW": True}]):
+                raise ValueError()
+            _recycle_time(state["StartedAt"])
+            _recycle_time(state["FinishedAt"])
+            return {"container_id": identity, "image_id": image, "restart_count": count,
+                    "started_at": state["StartedAt"], "finished_at": state["FinishedAt"]}
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Worker recycle runtime identity/image/health/configuration changed") from error
+
+    def _worker_recycle_store(self, name, start, end):
+        """Read only the indexed lifecycle rows, not the entire archive/database."""
+        path = WORKER_RESTART_STORE
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise DeploymentError("Worker recycle diagnostic store is unsafe")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            meta = dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('store_id','source:docker-event:last_success')"))
+            if (meta.get("store_id") != self.worker_recycle_policy["diagnostics_store_id"]
+                    or _recycle_time(meta.get("source:docker-event:last_success")) < _recycle_time(end)):
+                raise DeploymentError("Worker recycle Docker event capture is missing or has not caught up")
+            gaps = list(db.execute("SELECT source,reason FROM gaps WHERE at>=? AND at<=?", (start, end)))
+            if any(source == "docker-event" for source, _ in gaps):
+                raise DeploymentError("Worker recycle Docker event evidence has a coverage gap")
+            cursor = db.execute("SELECT at,service,message FROM logs WHERE service=? AND source='docker-event' "
+                                "AND at>=? AND at<=? ORDER BY at,id LIMIT 2001", (name, start, end))
+            events = []
+            import zlib
+            for at, service, blob in cursor:
+                if len(events) >= 2000:
+                    raise DeploymentError("Worker recycle Docker event interval exceeds safe bounds")
+                decoder = zlib.decompressobj()
+                raw = decoder.decompress(blob, 4097)
+                if len(raw) > 4096 or not decoder.eof:
+                    raise DeploymentError("Worker recycle Docker event is unreadable")
+                events.append({"at": at, "service": service, "message": raw.decode("utf-8")})
+            after = path.lstat()
+            if (info.st_ino, info.st_dev) != (after.st_ino, after.st_dev):
+                raise DeploymentError("Worker recycle diagnostic store identity changed")
+            return events
+
+    def _worker_recycle_application(self, container, start, end):
+        rows, size, count = [], 0, 0
+        for line in self._stream_log_lines(
+                ["docker", "logs", "--timestamps", f"--since={start}", f"--until={end}", container],
+                deadline=time.monotonic() + self.config.command_timeout_seconds,
+                context="Complete worker recycle application interval"):
+            count += 1
+            size += len(line.encode())
+            if count > 100000 or size > 64 * 1024 * 1024:
+                raise DeploymentError("Worker recycle application interval exceeds safe bounds")
+            at, separator, message = line.partition(" ")
+            if not separator:
+                raise DeploymentError("Worker recycle application log has no Docker timestamp")
+            _recycle_time(at)
+            if message == "worker: Warm shutdown (MainProcess)":
+                rows.append({"at": at, "kind": "warm", "sha256": hashlib.sha256(message.encode()).hexdigest()})
+            elif re.search(r"\b(?:SIGTERM|SIGINT|SIGKILL|CRITICAL|FATAL|ERROR)\b|^Traceback|Cold shutdown|"
+                           r"Connection (?:lost|refused)|Cannot connect|broker.*disconnect", message, re.I):
+                # A distinct failure in this narrow shutdown interval needs its
+                # own investigation; do not silently call it a memory recycle.
+                rows.append({"at": at, "kind": "conflicting", "sha256": hashlib.sha256(message.encode()).hexdigest()})
+        return rows
+
+    def _worker_recycle_actions(self, start, end):
+        directory = Path("/opt/aa-docker/conf/buh-vps-health/run/actions")
+        if not directory.exists():
+            return
+        paths = list(directory.glob("*.json"))
+        if len(paths) > 2000:
+            raise DeploymentError("Worker recycle host action inventory exceeds safe bounds")
+        for path in paths:
+            value = json.loads(self._worker_recycle_private_bytes(path, 65536))
+            at = next((value.get(key) for key in ("accepted_at", "at", "started_at", "requested_at", "created_at")
+                       if isinstance(value.get(key), str)), None)
+            if at is None:
+                raise DeploymentError("Worker recycle host action has no verifiable time boundary")
+            finished = value.get("finished_at") or datetime.now(timezone.utc).isoformat()
+            if _recycle_time(at) <= _recycle_time(end) and _recycle_time(finished) >= _recycle_time(start):
+                raise DeploymentError("Worker recycle overlaps a host-agent control action")
+
+    def _verify_retained_worker_recycles(self, container, count, started_at):
+        """Keep the reviewed baseline fixed; prove every later restart independently."""
+        policy = self.worker_recycle_policy
+        if (policy is None or container not in policy["workers"]
+                or self.restart_baseline_services.get(container) != self.config.worker_service
+                or type(count) is not int or not 0 < count - self.restart_baselines.get(container, count) <= 20):
+            raise DeploymentError("Unreviewed worker restart remains blocking")
+        current = self._worker_recycle_runtime(container)
+        if (current["restart_count"], current["started_at"]) != (count, started_at):
+            raise DeploymentError("Worker restarted during recycle verification")
+        script = self._worker_recycle_private_bytes(WORKER_MEMORY_SCRIPT, 4096)
+        if hashlib.sha256(script).hexdigest() != policy["script_sha256"]:
+            raise DeploymentError("Installed worker memory healthcheck changed")
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
+        if boot != policy["host_boot_id"]:
+            raise DeploymentError("Host reboot invalidated worker recycle evidence")
+        for unit, baseline in policy["daemons"].items():
+            raw = self._run(["systemctl", "show", unit, "--property=MainPID,ExecMainStartTimestampMonotonic,ActiveState,SubState"],
+                            bounded_output=True, context="Worker recycle daemon continuity")
+            daemon = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+            if any(daemon.get(key) != value for key, value in baseline.items()) or (
+                    daemon.get("ActiveState"), daemon.get("SubState")) != ("active", "running"):
+                raise DeploymentError("Docker/containerd restart invalidated worker recycle evidence")
+        previous = self.accepted_worker_recycles.get(container, [])
+        if (previous and previous[-1]["restart_count"] == count
+                and _recycle_time(current["finished_at"]) == _recycle_time(previous[-1]["exited_at"])
+                and 0 <= (_recycle_time(previous[-1]["started_event_at"]) - _recycle_time(started_at)).total_seconds() <= 2
+                and self._worker_recycle_runtime(container) == current):
+            return tuple(previous)
+        observed = self.retained_verifier_review["host_observed_at"]
+        now = datetime.now(timezone.utc).isoformat()
+        events = []
+        for row in self._worker_recycle_journal(observed, now, daemons_only=True):
+            if 'msg="restarting container"' not in row["message"] or container not in row["message"]:
+                continue
+            match = WORKER_RESTART_RECORD.search(row["message"])
+            if match is None:
+                raise DeploymentError("Unknown Docker restart record remains blocking")
+            events.append({"container_id": match[1], "exit_code": int(match[2]), "exited_at": match[3],
+                           "manual_restart": match[4] == "true", "restart_count": int(match[5]),
+                           "restart_policy": match[6], "at": row["at"],
+                           "message_sha256": hashlib.sha256(row["message"].encode()).hexdigest()})
+        required = list(range(self.restart_baselines[container] + 1, count + 1))
+        if [row["restart_count"] for row in events] != required:
+            raise DeploymentError("Not every additional worker restart has retained causal evidence")
+        accepted = []
+        for event in events:
+            exit_at = _recycle_time(event["exited_at"])
+            start, end = ((exit_at + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                          for offset in (-270, 45))
+            records = self._worker_recycle_store(policy["workers"][container], start, end)
+            journal = self._worker_recycle_journal(start, end)
+            application = self._worker_recycle_application(container, start, end)
+            self._worker_recycle_actions(start, end)
+            proof = _prove_worker_recycle(event, records, application, journal, container=container,
+                                         name=policy["workers"][container], observed=observed)
+            proof["image_id"] = current["image_id"]
+            accepted.append(proof)
+        last_start = _recycle_time(accepted[-1]["started_event_at"])
+        if (not 0 <= (last_start - _recycle_time(started_at)).total_seconds() <= 2
+                or _recycle_time(current["finished_at"]) != _recycle_time(events[-1]["exited_at"])
+                or self._worker_recycle_runtime(container) != current):
+            raise DeploymentError("Worker current state does not match the last proven recycle")
+        self.accepted_worker_recycles[container] = accepted
+        return tuple(accepted)
 
     def _verified_discord_429(self) -> tuple[str, ...]:
         """Re-read the original bounded request, retaining its recovered warning."""
@@ -4629,15 +4978,17 @@ class DockerHost:
                         and set(ids) != retained):
                     return False
                 for container in ids:
+                    runtime_started = None
                     if container in self.retained_restart_images:
                         image = self._run(
                             ["docker", "inspect", "--format",
                              "{{.Image}}|{{.State.StartedAt}}|{{.State.OOMKilled}}", container],
                             context=f"Retained restart image identity for {service}").strip()
-                        expected = (f"{self.retained_restart_images[container]}|"
-                                    f"{self.retained_restart_started_at[container]}|false")
-                        if image != expected:
+                        image_parts = image.split("|")
+                        if (len(image_parts) != 3 or image_parts[0] != self.retained_restart_images[container]
+                                or image_parts[2] != "false"):
                             return False
+                        runtime_started = image_parts[1]
                     state = self._run(
                         [
                             "docker",
@@ -4657,19 +5008,24 @@ class DockerHost:
                         or parts[0] != "running"
                         or restart_count is None
                         or parts[2] not in {"none", "healthy"}
+                        or (self.worker_recycle_policy is not None
+                            and container in self.worker_recycle_policy["workers"] and parts[2] != "healthy")
                         or (
                             service in zero_restart_services
                             and restart_count != 0
                         )
-                        or (
-                            service not in zero_restart_services
-                            and self.restart_baselines.get(container)
-                            != restart_count
-                        )
                     ):
                         return False
+                    if service not in zero_restart_services and (
+                            self.restart_baselines.get(container) != restart_count
+                            or runtime_started is not None
+                            and runtime_started != self.retained_restart_started_at[container]):
+                        self._verify_retained_worker_recycles(container, restart_count, runtime_started)
             return True
-        except DeploymentError:
+        except (DeploymentError, OSError, sqlite3.Error) as error:
+            if self.worker_recycle_policy is not None:
+                self.blocked_worker_recycles[locals().get("container", "discovery")] = (
+                    str(error)[:200] if isinstance(error, DeploymentError) else type(error).__name__)
             return False
 
     def replace_workers(self, bundle: ValidatedBundle) -> None:

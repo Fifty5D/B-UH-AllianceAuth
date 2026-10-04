@@ -12,6 +12,28 @@ counts and start times. It never samples current counts as replacement evidence.
 The live inspector compares all those fields again; an unexpected restart,
 replacement, service swap, unhealthy state, OOM or image change still fails.
 
+After the installed memory healthcheck and actual recycle causes have been
+reviewed, schema 2 adds `worker_memory_recycles` to this private review. It binds
+the original reviewed evidence digest, boot identity, Docker/containerd process
+start identities, diagnostic store identity, exact general-worker IDs/names and
+the independently verified script digest. Original counts and start times are
+retained. Non-worker services, replacement workers and normal deployments retain
+strict restart rules.
+
+For every additional worker restart, the verifier reads the complete retained
+Docker journal and requires consecutive restart counts from that original
+baseline. Each event independently needs four installed memory-check executions,
+the third failure's unhealthy transition, the next check followed immediately by
+Celery warm shutdown, exit 0, automatic restart with `manualRestart=false`, the
+same container/image and a later healthy transition. It reads complete bounded
+application and host journal windows as well as indexed diagnostic Docker events.
+Missing events, capture lag/gaps, a changed script/configuration/daemon/boot,
+manual control, host-agent actions, crashes, OOM, fatal application errors and
+unexplained restarts block recovery. A subsequent independently proven recycle
+can pass without changing the original reviewed baseline. Every accepted event
+keeps its count, timestamps and source hashes in the private recovery report and
+`WORKER-RECYCLES.json`; it is not erased or put on a general log allowlist.
+
 Docker health metadata is optional on containers without a Docker healthcheck.
 The Go templates use `index .State "Health"` instead of dereferencing a missing
 map key. Absence remains `none`/`null`; a present unhealthy or starting state
