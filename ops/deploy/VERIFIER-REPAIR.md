@@ -12,6 +12,22 @@ counts and start times. It never samples current counts as replacement evidence.
 The live inspector compares all those fields again; an unexpected restart,
 replacement, service swap, unhealthy state, OOM or image change still fails.
 
+Docker health metadata is optional on containers without a Docker healthcheck.
+The Go templates use `index .State "Health"` instead of dereferencing a missing
+map key. Absence remains `none`/`null`; a present unhealthy or starting state
+remains distinct. The read-only worker-restart collector retains normal runtime,
+identity, image, count, OOM, exit and time evidence and rejects malformed metadata.
+Hosted regressions reproduce the original failure against real Docker containers,
+then verify absent, healthy and unhealthy cases through the actual templates.
+
+`collect_worker_restart_evidence.py` reads the existing retained plan and private
+diagnostic store without refreshing tokens, running healthcheck scripts or
+changing application, recovery or deployment state. It captures the installed
+memory-check script identity and bounded causal windows for post-baseline worker
+restarts. It reports evidence for review, never replaces a baseline or grants
+recovery eligibility. Unknown identity, unhealthy state, new changes during the
+read, missing data, oversized windows and non-worker restarts remain blocking.
+
 The retained `candidate-slot-start-1` plan may already have
 `traffic_switch_started = true`: `_protect_static_collection_traffic` routes
 through previous-version static safety slots before candidate startup. This is

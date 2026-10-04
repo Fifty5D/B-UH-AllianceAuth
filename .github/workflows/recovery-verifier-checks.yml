@@ -8,6 +8,7 @@ on:
       - ops/deploy/docker_host.py
       - ops/deploy/verifier_repair.py
       - ops/deploy/run-verifier-repair.ps1
+      - ops/deploy/collect_worker_restart_evidence.py
       - tests/deploy/**
       - .github/workflows/recovery-verifier-checks.yml
 permissions:
@@ -50,8 +51,10 @@ jobs:
           PY
           python -m pip install --require-hashes --only-binary=:all: -r /tmp/buh-verifier-deps.txt
       - run: python -m compileall -q ops/deploy tests/deploy
-      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/verifier_fixtures.py
+      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/verifier_fixtures.py
       - name: Run focused regressions and complete host-independent deployment suite
+        env:
+          BUH_REQUIRE_DOCKER_HEALTH_REGRESSION: '1'
         run: python -m unittest discover -s tests/deploy -t . -p 'test_*.py' -v
       - name: Parse the owner launcher without executing it
         shell: pwsh

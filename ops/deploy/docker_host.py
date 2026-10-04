@@ -4644,7 +4644,7 @@ class DockerHost:
                             "inspect",
                             "--format",
                             "{{.State.Status}}|{{.RestartCount}}|"
-                            "{{if .State.Health}}{{.State.Health.Status}}"
+                            '{{with index .State "Health"}}{{.Status}}'
                             "{{else}}none{{end}}",
                             container,
                         ],

@@ -106,7 +106,7 @@ def verify_retained_container(host, target, row, *, name=None):
     actual = host._run(
         ["docker", "inspect", "--format", "{{.Id}}|{{.Name}}|{{.Image}}|{{.State.Status}}|"
          "{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.StartedAt}}|"
-         "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", target],
+         '{{with index .State "Health"}}{{.Status}}{{else}}none{{end}}', target],
         context="Retained previous runtime identity verification").strip().split("|")
     if (len(actual) != 8 or actual[0] != row["container_id"]
             or name is not None and actual[1] != "/" + name
