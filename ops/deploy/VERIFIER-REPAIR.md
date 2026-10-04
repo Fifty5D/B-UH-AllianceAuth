@@ -64,6 +64,12 @@ markers, tracebacks and permission errors in metadata values or payloads still
 block; SIGTERM from another operation, cold shutdown and broker failures still
 block independently. This does not extend the global log allowlist.
 
+Failed verification reports retain bounded redacted error details with both the
+beginning and terminal cause, failure frame identifiers, exact classified log
+findings and scan-completeness flags. A long Django startup preamble cannot hide
+the actual failure, and a bounded or incomplete log scan cannot appear clean.
+This reporting change has no effect on any gate or recovery decision.
+
 Docker health metadata is optional on containers without a Docker healthcheck.
 The Go templates use `index .State "Health"` instead of dereferencing a missing
 map key. Absence remains `none`/`null`; a present unhealthy or starting state

@@ -10,7 +10,7 @@ from unittest import mock
 
 from ops.deploy import verifier_repair as repair
 from ops.deploy.contracts import DeploymentError
-from ops.deploy.docker_host import DockerHost
+from ops.deploy.docker_host import DockerHost, LogScanError
 from tests.deploy.test_docker_host import simulated_root_owned_lstat
 from tests.deploy.test_verifier_corrections import retained_host
 from tests.deploy.verifier_fixtures import nickname_case
@@ -390,6 +390,39 @@ class VerifierActivationTests(unittest.TestCase):
         for path in ("relative.json", "/root/../tmp/assessment.json"):
             with self.subTest(path=path), self.assertRaises(DeploymentError):
                 self.real_private(path)
+
+
+class FailureEvidenceTests(unittest.TestCase):
+    def test_long_command_failure_retains_the_terminal_cause_without_credentials(self):
+        secret = "synthetic-secret-not-for-output"
+        error = DeploymentError("command failed\n" + "initialization\n" * 1400
+                                + "access_token=" + secret + "\nRuntimeError: completed section changed")
+        evidence = repair.failure_evidence(error)
+        self.assertTrue(evidence["error_details_truncated"])
+        self.assertIn("RuntimeError: completed section changed", evidence["error_details"])
+        self.assertNotIn(secret, json.dumps(evidence))
+        self.assertLess(len(evidence["error_details"]), 16410)
+
+    def test_log_findings_remain_blocking_and_report_scan_completeness(self):
+        error = LogScanError(["ERROR example worker failure"], complete=False)
+        evidence = repair.failure_evidence(error)
+        self.assertFalse(evidence["log_scan_complete"])
+        self.assertEqual(evidence["findings"], ["ERROR example worker failure"])
+        self.assertFalse(evidence["findings_truncated"])
+
+    def test_every_check_keeps_independent_failure_details_and_continues_reading(self):
+        def failure():
+            raise DeploymentError("initialization\n" * 100 + "RuntimeError: exact terminal cause")
+
+        healthy = mock.Mock(return_value=True)
+        host = SimpleNamespace(restored_health_checks=lambda *_: [("first", failure), ("second", healthy)])
+        checks, warnings = repair.all_checks(host)
+        self.assertFalse(checks[0]["passed"])
+        self.assertTrue(checks[1]["passed"])
+        self.assertIn("RuntimeError: exact terminal cause", checks[0]["error_details"])
+        self.assertEqual(checks[0]["failure_sites"][-1]["function"], "failure")
+        self.assertEqual(warnings, [])
+        healthy.assert_called_once()
 
 
 class CompletedMemberAuditReferenceTests(unittest.TestCase):

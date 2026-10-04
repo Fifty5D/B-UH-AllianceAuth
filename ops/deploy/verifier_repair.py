@@ -13,8 +13,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import traceback
 
-from ops.deploy.contracts import DeploymentError, ReceiverConfig
+from ops.deploy.contracts import DeploymentError, ReceiverConfig, redact_sensitive_text
 from ops.deploy.docker_host import (
     NGINX_UPSTREAM_NAME, _atomic_bytes, _parse_nginx_configuration,
     _verify_nginx_production_route, _walk_nginx_nodes,
@@ -355,6 +356,26 @@ def verify_memberaudit(host, refs, excluded, completed):
     return result
 
 
+def failure_evidence(error):
+    """Retain bounded redacted failure details, including the terminal cause."""
+    row = {"error_type": type(error).__name__, "error_sha256": digest(str(error).encode())}
+    if isinstance(error, DeploymentError):
+        text = redact_sensitive_text(str(error))
+        row["guard_reason"] = text[:200]
+        row["error_details_truncated"] = len(text) > 16384
+        row["error_details"] = text if len(text) <= 16384 else text[:8192] + "\n<bounded omission>\n" + text[-8192:]
+    row["failure_sites"] = [
+        {"component": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+        for frame in traceback.extract_tb(error.__traceback__)[-8:]
+    ]
+    findings = getattr(error, "findings", None)
+    if isinstance(findings, (tuple, list)) and type(getattr(error, "scan_complete", None)) is bool:
+        row["findings"] = [redact_sensitive_text(str(item))[:500] for item in findings[:32]]
+        row["log_scan_complete"] = error.scan_complete
+        row["findings_truncated"] = bool(getattr(error, "findings_truncated", False)) or len(findings) > 32
+    return row
+
+
 def all_checks(host):
     results, warnings = [], []
     for name, action in host.restored_health_checks(None, set()):
@@ -365,9 +386,7 @@ def all_checks(host):
             if name == "retained-interval-logs":
                 warnings.extend(value)
         except Exception as error:
-            row.update(error_type=type(error).__name__, error_sha256=digest(str(error).encode()))
-            if isinstance(error, DeploymentError):
-                row["guard_reason"] = str(error)[:200]
+            row.update(failure_evidence(error))
         results.append(row)
     return results, warnings
 
@@ -570,10 +589,7 @@ def main(argv=None):
         report["immutable_release_changed"] = False
     except Exception as error:
         report["failure_phase"] = phase
-        report["error_type"] = type(error).__name__
-        report["error_sha256"] = digest(str(error).encode())
-        if isinstance(error, DeploymentError):
-            report["guard_reason"] = str(error)[:200]
+        report.update(failure_evidence(error))
         if host is not None:
             report["proven_worker_recycles"] = host.accepted_worker_recycles
             report["blocked_worker_recycles"] = host.blocked_worker_recycles
