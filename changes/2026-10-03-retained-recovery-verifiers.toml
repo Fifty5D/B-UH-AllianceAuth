@@ -1,3 +1,3 @@
 app = "platform"
 kind = "fix"
-summary = "Prove every retained-worker memory recycle without rebasing restart counts; preserve strict identity, health, routing and correlated Discord recovery evidence, and classify only digest-bound historical asset-name and caught callback findings with later/current success."
+summary = "Prove every retained-worker memory recycle without rebasing restart counts, including bounded graceful task draining and consistent severity-token parsing; preserve strict identity, health, routing and correlated Discord recovery evidence, and classify only digest-bound historical asset-name and caught callback findings with later/current success."

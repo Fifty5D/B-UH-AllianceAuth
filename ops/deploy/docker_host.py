@@ -670,6 +670,10 @@ WORKER_RESTART_STORE = Path("/var/lib/buh-diagnostics/history.sqlite3")
 WORKER_MEMORY_CHECK = {"Test": ["CMD", "/memory_check.sh", "500000000"],
                        "Interval": 60000000000, "Timeout": 10000000000,
                        "StartPeriod": 300000000000, "Retries": 3}
+# Warm shutdown drains in-flight work. The installed check signals immediately;
+# a clean exit may take the rest of one check interval rather than 30 seconds.
+# A longer drain still blocks, as do missing threshold/signal/lifecycle evidence.
+WORKER_RECYCLE_MAX_DRAIN_SECONDS = WORKER_MEMORY_CHECK["Interval"] / 1_000_000_000
 WORKER_RESTART_RECORD = re.compile(
     r'msg="restarting container" container=([0-9a-f]{64}) exitCode=(\d+) '
     r'exitedAt="([^"]+)" manualRestart=(true|false) restartCount=(\d+) '
@@ -748,7 +752,7 @@ def _prove_worker_recycle(event, events, application, journal, *, container, nam
     checks = executions[-4:]
     points = [_recycle_time(row["at"]) for row in checks]
     if (any(not 59 <= (right - left).total_seconds() <= 62 for left, right in zip(points, points[1:]))
-            or not 0 < (exit_at - points[-1]).total_seconds() <= 30):
+            or not 0 < (exit_at - points[-1]).total_seconds() <= WORKER_RECYCLE_MAX_DRAIN_SECONDS):
         raise DeploymentError("Worker recycle memory check sequence is incomplete")
     unhealthy = [row for row in before if row["message"] == "health_status: unhealthy"
                  and 0 <= (_recycle_time(row["at"]) - points[-2]).total_seconds() <= 2]
@@ -783,6 +787,8 @@ def _prove_worker_recycle(event, events, application, journal, *, container, nam
             "exit_code": 0, "manual_restart": False, "exited_at": event["exited_at"],
             "started_event_at": starts[0]["at"], "healthy_at": healthy[0]["at"],
             "warm_shutdown_at": warm[0]["at"], "memory_check_at": checks[-1]["at"],
+            "graceful_drain_seconds": (exit_at - _recycle_time(warm[0]["at"])).total_seconds(),
+            "maximum_drain_seconds": WORKER_RECYCLE_MAX_DRAIN_SECONDS,
              "threshold_evidence": "reviewed script branch plus third-failure Docker health transition",
              "schema_model_log_count": len(schema_logs), "schema_model_log_samples": schema_logs[:16],
              "schema_model_log_samples_truncated": len(schema_logs) > 16,
@@ -1819,10 +1825,14 @@ class DockerHost:
                 # health-log gate, and retain its evidence in the recycle proof.
                 rows.append({"at": at, "kind": "schema_model_listing",
                              "sha256": hashlib.sha256(message.encode()).hexdigest()})
-            elif re.search(r"\b(?:SIGTERM|SIGINT|SIGKILL|CRITICAL|FATAL|ERROR)\b|^Traceback|Cold shutdown|"
-                           r"Connection (?:lost|refused)|Cannot connect|broker.*disconnect", message, re.I):
+            elif FATAL_LOG_RE.search(message) or re.search(
+                    r"\b(?:SIGTERM|SIGINT|SIGKILL|FATAL)\b|Cold shutdown|"
+                    r"Connection (?:lost|refused)|Cannot connect|broker.*disconnect", message, re.I):
                 # A distinct failure in this narrow shutdown interval needs its
                 # own investigation; do not silently call it a memory recycle.
+                # Use the health gate's existing severity-token rule: metadata
+                # names such as X-Esi-Error-Limit are not severity words. Actual
+                # ERROR/traceback/permission failures anywhere still conflict.
                 rows.append({"at": at, "kind": "conflicting", "sha256": hashlib.sha256(message.encode()).hexdigest()})
         return rows
 

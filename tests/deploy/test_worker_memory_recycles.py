@@ -61,6 +61,36 @@ class CausalProofTests(unittest.TestCase):
         self.assertIn("third-failure", proof["threshold_evidence"])
         self.assertEqual(len(proof["evidence_sha256"]), 64)
 
+    def draining_case(self, seconds):
+        case = copy.deepcopy(causal_case())
+        offset = timedelta(seconds=seconds - 2)
+        case[0]["exited_at"] = stamp(adapter._recycle_time(case[0]["exited_at"]) + offset)
+        case[0]["at"] = stamp(adapter._recycle_time(case[0]["at"]) + offset)
+        for row in case[1]:
+            if row["message"] in {"die", "start", "health_status: healthy"}:
+                row["at"] = stamp(adapter._recycle_time(row["at"]) + offset)
+        return case
+
+    def test_proven_warm_shutdown_may_drain_work_for_more_than_thirty_seconds(self):
+        proof = self.prove(self.draining_case(34.94))
+        self.assertAlmostEqual(proof["graceful_drain_seconds"], 34.908)
+        self.assertEqual(proof["maximum_drain_seconds"], 60)
+        self.assertEqual(proof["exit_code"], 0)
+        self.assertEqual(proof["restart_count"], 9)
+        self.assertEqual(proof["memory_check_at"], "2026-10-03T23:12:46.001000Z")
+
+    def test_long_drain_does_not_replace_missing_shutdown_proof_or_allow_another_signal(self):
+        case = self.draining_case(34.94)
+        case[2].clear()
+        with self.assertRaises(DeploymentError):
+            self.prove(case)
+        case = self.draining_case(34.94)
+        case[1].append({"at": case[0]["at"], "service": NAME, "message": "kill"})
+        with self.assertRaises(DeploymentError):
+            self.prove(case)
+        with self.assertRaisesRegex(DeploymentError, "memory check sequence"):
+            self.prove(self.draining_case(61))
+
     def test_warm_exit_alone_missing_threshold_manual_crash_and_near_misses_block(self):
         mutations = []
         for key, value in (("container_id", "f" * 64), ("exit_code", 1), ("exit_code", True),
@@ -169,6 +199,42 @@ class SchemaListingRecycleTests(unittest.TestCase):
         self.assertEqual(proof["schema_model_log_count"], 24)
         self.assertEqual(len(proof["schema_model_log_samples"]), 16)
         self.assertTrue(proof["schema_model_log_samples_truncated"])
+
+    def test_successful_esi_metadata_uses_the_existing_health_gate_severity_rule(self):
+        headers = "{'X-Esi-Error-Limit-Remain': '100', 'X-Esi-Error-Limit-Reset': '60'}"
+        metadata = [
+            "[03/Oct/2026 23:12:46] DEBUG [memberaudit.core.esi_status:181] "
+            "esi status response: 200 " + headers + ' {"routes":[{"status":"OK"}]}',
+            "[2026-10-03 23:12:46,035: DEBUG/MainProcess] esi status response: 200 " + headers,
+        ]
+        application = self.application([self.warm, *metadata])
+        self.assertEqual([row["kind"] for row in application], ["warm"])
+        self.assertEqual(self.prove(application)["exit_code"], 0)
+        self.assertEqual(self.classify(metadata), ())
+
+    def test_metadata_names_do_not_hide_real_severity_values_tracebacks_or_permission_failures(self):
+        prefix = "[03/Oct/2026 23:12:46] DEBUG [memberaudit.core.esi_status:181] "
+        cases = [
+            prefix.replace("DEBUG", "ERROR") + "esi status response: 200 {'X-Esi-Error-Limit-Remain': '100'}",
+            prefix + "esi status response: 200 {'X-Esi-Error-Limit-Remain': 'ERROR'}",
+            prefix + 'esi status response: 200 {"message":"ERROR: upstream rejected request"}',
+            prefix + "esi status response: 200 Traceback (most recent call last):",
+            prefix + "esi status response: 200 403 Forbidden",
+            prefix + "esi status response: 200 Missing Permissions",
+            prefix + "esi status response: 200 error code: 50013",
+            "worker: Cold shutdown (MainProcess)",
+            "SIGTERM received from another operation",
+            "Connection lost to broker",
+        ]
+        for message in cases:
+            with self.subTest(message=message):
+                application = self.application([self.warm, message])
+                self.assertEqual(application[-1]["kind"], "conflicting")
+                with self.assertRaises(DeploymentError):
+                    self.prove(application)
+                if message not in cases[-3:]:
+                    with self.assertRaises(DeploymentError):
+                        self.classify([message])
 
 
 class RuntimeRecycleTests(unittest.TestCase):

@@ -52,6 +52,18 @@ can pass without changing the original reviewed baseline. Every accepted event
 keeps its count, timestamps and source hashes in the private recovery report and
 `WORKER-RECYCLES.json`; it is not erased or put on a general log allowlist.
 
+The threshold check must still cause warm shutdown within half a second. That
+shutdown may drain in-flight work for at most the installed 60-second check
+interval; the former 30-second exit bound incorrectly rejected a proved clean
+drain lasting about 35 seconds. The proof retains the measured drain duration.
+Threshold, exit-0, automatic restart, identity/image and subsequent healthy
+evidence remain mandatory; a longer drain or an additional control signal fails.
+Recycle application logs use the health gate's existing severity-token rule so
+`X-Esi-Error-Limit` metadata names cannot invent an ERROR record. Real severity
+markers, tracebacks and permission errors in metadata values or payloads still
+block; SIGTERM from another operation, cold shutdown and broker failures still
+block independently. This does not extend the global log allowlist.
+
 Docker health metadata is optional on containers without a Docker healthcheck.
 The Go templates use `index .State "Health"` instead of dereferencing a missing
 map key. Absence remains `none`/`null`; a present unhealthy or starting state
