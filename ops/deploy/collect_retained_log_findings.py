@@ -469,8 +469,9 @@ def run(target):
         # The prior reviewed boundary is reused; no moving restart baseline and
         # no activation of the staged verifier occurs in this diagnostic.
         phase = 'read_only_current_application_evidence'
-        target, roster = pilot.select_pilot(baseline, 'Fifty5D'), pilot.snapshot_targets(baseline)
-        report['structures'] = bridge.snapshot(host, pilot, owner_source, target, roster)
+        structures_target = pilot.select_pilot(baseline, 'Fifty5D')
+        roster = pilot.snapshot_targets(baseline)
+        report['structures'] = bridge.snapshot(host, pilot, owner_source, structures_target, roster)
         bridge.require_healthy_owners(report['structures'], roster)
         selection = helper.load_source(Path(assessment['memberaudit_directory']) / 'memberaudit_selection.py',
             helper.SELECTION_SHA256, 'buh_readonly_log_selection')
@@ -537,7 +538,11 @@ def run(target):
         report['scan_complete'] = report['selected_character'].get('scan_complete') is True
     except Exception as error:
         report['failure_phase'] = phase
-        report['errors'].append({'error_type': type(error).__name__, 'error_sha256': sha(str(error).encode())})
+        import traceback
+        sites = [{'file': Path(row.filename).name, 'function': row.name, 'line': row.lineno}
+                 for row in traceback.extract_tb(error.__traceback__)[-8:]]
+        report['errors'].append({'error_type': type(error).__name__, 'error_sha256': sha(str(error).encode()),
+                                 'failure_sites': sites})
         if helper is not None and isinstance(error, helper.DeploymentError):
             report['guard_reason'] = str(error)[:200]
     finally:

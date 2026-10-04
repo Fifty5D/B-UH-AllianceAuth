@@ -15,6 +15,12 @@ excluded 12/61 state, Structures and retained recovery resources. Database reads
 use `SET TRANSACTION READ ONLY`. Token refresh and update/recovery/installation
 operations are absent. Report or evidence bounds cannot grant recovery
 eligibility. The diagnostic does not classify either finding as recovered.
+The Structures snapshot uses its own selection and cannot replace the caller's
+selected assets character. Orchestration regressions exercise the database,
+worker-log, diagnostic-copy and HTTP collection through both preservation checks;
+incomplete asset evidence stays incomplete while the independent reads continue.
+Unexpected collector failures include bounded filename/function/line metadata
+without exception messages or credentials.
 
 New durable plans retain restart counts and their exact service/container
 mapping. Old plans fail closed unless a root-private `VERIFIER-REVIEW.json`
