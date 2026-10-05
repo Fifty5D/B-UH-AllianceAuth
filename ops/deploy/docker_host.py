@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+from collections import Counter
 import gzip
 import hashlib
+import io
 import json
 import os
 import queue as thread_queue
@@ -21,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
@@ -164,19 +167,1354 @@ MAX_RETAINED_LOG_FINDING_CHARS = 200
 class LogScanError(DeploymentError):
     """Bounded findings from every readable stream, never a health approval."""
 
-    def __init__(self, findings, *, complete=True, truncated=False):
+    def __init__(self, findings, *, complete=True, truncated=False, analysis=None):
         unique = tuple(dict.fromkeys(
             _safe_report_text(str(item), 500) for item in findings
         ))
         self.findings = unique[:MAX_RETAINED_LOG_FINDINGS]
         self.scan_complete = complete
         self.findings_truncated = truncated or len(unique) > MAX_RETAINED_LOG_FINDINGS
+        self.analysis = analysis
         super().__init__(
             "New fatal AllianceAuth log pattern was detected: "
             + "\n".join(self.findings)
             + ("\nLog collection incomplete; preserve recovery resources." if not complete else "")
             + ("\nAdditional findings exceed the report bound." if self.findings_truncated else "")
         )
+
+
+"""Reusable contracts, embedded in the single-file receiver installation."""
+
+# A family name selects a native persistence contract, never an incident or owner.
+SEMANTIC_OWNER_TASKS = {
+    "moonmining.tasks.update_refineries_from_esi_for_owner": ("moonmining", "last_update_at"),
+    "moonmining.tasks.fetch_notifications_from_esi_for_owner": ("moonmining", "last_update_at"),
+    "moonmining.tasks.update_extractions_for_owner": ("moonmining", "last_update_at"),
+    "structures.tasks.fetch_notification_for_owner": ("structures", "notifications_last_update_at"),
+}
+SEMANTIC_HARD_FAILURE = re.compile(
+    r"\b(?:invalid_grant|invalid_client|invalid_scope|invalid_token|unauthorized_client|"
+    r"TokenInvalidError|InvalidTokenError|MissingScopes|MissingScope|PermissionError|"
+    r"NotRefreshableTokenError|MemoryError|50013)\b|Missing Permissions|permission denied|"
+    r"\b(?:401 Unauthorized|403 Forbidden)\b|"
+    r"\b(?:status(?:_code)?|status code|error code|HTTP(?:Client)?Error)\s*[:=<( ]+"
+    r"(?:401|403)\b|\b(?:401|403) Client Error\b|"
+    r"\b(?:invalid|revoked) (?:credential|refresh token|access token)\b",
+    re.IGNORECASE,
+)
+SEMANTIC_CANDIDATE = re.compile(
+    r"\b(?:HTTP(?:Server)?Error|InvalidTokenError|TokenError|MissingScopes|"
+    r"AuthenticationError|AuthorizationError|ConnectionError|TimeoutError)\b|"
+    r"\bHTTP/[0-9.]+[\" ]+\s*[45]\d\d\b|"
+    r"\b(?:status_code|status code|error code)\s*[:= ]\s*[45]\d\d\b|"
+    r"\b(?:invalid|revoked|expired)\s+(?:credential|refresh token|access token)\b",
+    re.IGNORECASE,
+)
+
+
+def _semantic_stamp(value):
+    if not isinstance(value, str):
+        raise DeploymentError("Recovery evidence timestamp is missing")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise DeploymentError("Recovery evidence timestamp is malformed") from error
+    if result.utcoffset() is None:
+        raise DeploymentError("Recovery evidence timestamp lacks a timezone")
+    return result
+
+
+def _semantic_source(sources, name):
+    """Inspect digest-bound installed source, without importing or executing it."""
+    item = sources.get(name)
+    if (not isinstance(item, dict) or set(item) != {"text", "sha256", "filename"}
+            or not isinstance(item["text"], str) or len(item["text"].encode()) > 256 * 1024
+            or SHA256_RE.fullmatch(item.get("sha256", "")) is None
+            or hashlib.sha256(item["text"].encode()).hexdigest() != item["sha256"]
+            or not isinstance(item["filename"], str)):
+        raise DeploymentError("Installed recovery source proof is malformed")
+    try:
+        return ast.parse(item["text"]), item
+    except (SyntaxError, ValueError, RecursionError) as error:
+        raise DeploymentError("Installed recovery source proof cannot be parsed") from error
+
+
+def _semantic_server_raise(sources, exception="HTTPServerError"):
+    tree, item = _semantic_source(sources, "esi.openapi_clients")
+    aliases = {alias.asname or alias.name for node in ast.walk(tree)
+               if isinstance(node, ast.ImportFrom) and node.module == "aiopenapi3.errors"
+               for alias in node.names if alias.name == exception}
+    native = {alias.asname or alias.name for node in ast.walk(tree)
+              if isinstance(node, ast.ImportFrom) and (node.module == "esi.exceptions"
+                                                       or node.module == "exceptions" and node.level == 1)
+              for alias in node.names if alias.name == exception}
+    raises = set()
+    for handler in ast.walk(tree):
+        if (not isinstance(handler, ast.ExceptHandler) or not isinstance(handler.type, ast.Name)
+                or handler.type.id not in aliases or not handler.name):
+            continue
+        for node in ast.walk(handler):
+            call = node.exc if isinstance(node, ast.Raise) else None
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in native
+                    and {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
+                    == {key: handler.name + "." + key for key in ("status_code", "headers", "data")}):
+                raises.add(node.lineno)
+    if not raises:
+        raise DeploymentError("Installed ESI source does not prove the server-error route")
+    return item["filename"], raises
+
+
+def _semantic_native_clocks(sources):
+    """A clock counts only when the installed native path persists after success."""
+    tree, _ = _semantic_source(sources, "moonmining.tasks")
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    update = functions.get("update_owner")
+    final = functions.get("mark_successful_update_for_owner")
+    expected = [name.rsplit(".", 1)[1] for name in SEMANTIC_OWNER_TASKS if name.startswith("moonmining.")]
+    expected.append("mark_successful_update_for_owner")
+    chains = []
+    if update is not None:
+        for node in ast.walk(update):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "chain":
+                parts = []
+                for part in node.args:
+                    if (isinstance(part, ast.Call) and isinstance(part.func, ast.Attribute)
+                            and part.func.attr == "si" and isinstance(part.func.value, ast.Name)
+                            and [ast.unparse(arg) for arg in part.args] == ["owner_pk"]):
+                        parts.append(part.func.value.id)
+                chains.append(parts)
+    final_ok = final is not None and any(
+        isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and node.value.value is True
+        and any(isinstance(target, ast.Attribute) and target.attr == "last_update_ok" for target in node.targets)
+        for node in ast.walk(final)
+    ) and any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "save" for node in ast.walk(final))
+    if chains != [expected] or not final_ok:
+        raise DeploymentError("Installed Moon Mining full-chain success contract differs")
+    tree, _ = _semantic_source(sources, "structures.models.owners")
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    function = functions.get("fetch_notifications_esi")
+    if function is None or any(isinstance(node, ast.ExceptHandler) for node in ast.walk(function)):
+        raise DeploymentError("Installed Structures notification success contract differs")
+    fetched = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "_fetch_notifications_from_esi"]
+    stored = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute) and node.func.attr == "_store_notifications"]
+    clocks = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Attribute) and target.attr == "notifications_last_update_at"
+                      for target in node.targets)]
+    saves = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "save"
+             and any(keyword.arg == "update_fields" and ast.literal_eval(keyword.value)
+                     == ["notifications_last_update_at"] for keyword in node.keywords)]
+    if not (len(fetched) == len(stored) == len(clocks) == len(saves) == 1
+            and fetched[0] < stored[0] < clocks[0] < saves[0]):
+        raise DeploymentError("Installed Structures persisted notification clock differs")
+
+
+def _semantic_record_body(record):
+    rows = record.get("rows")
+    if (record.get("record_complete") is not True or not isinstance(rows, list) or not rows
+            or len(rows) > MAX_OWNER_RECORD_LINES
+            or any(not isinstance(row, dict) or not isinstance(row.get("text"), str) for row in rows)
+            or sum(len(row["text"].encode()) for row in rows) > MAX_OWNER_INCIDENT_BYTES):
+        raise DeploymentError("Recovery log record is incomplete or exceeds its bound")
+    _semantic_stamp(record.get("first_at"))
+    return "\n".join(row["text"] for row in rows)
+
+
+def _semantic_operation_key(operation):
+    """No guessed identity, nullable operand or different-operation substitution."""
+    fields = ("provider", "subsystem", "family", "identity")
+    if (not isinstance(operation, dict) or set(operation) != set(fields)
+            or any(not isinstance(operation[key], str) or not operation[key] for key in fields)):
+        raise DeploymentError("Recovery operation identity is incomplete")
+    return tuple(operation[key] for key in fields)
+
+
+class SemanticRecoveryLedger:
+    """Count every decision before applying any display cap.
+
+    Evidence adapters supply complete original records and native persistence
+    facts. A hash selects evidence; it never changes a contract's semantics.
+    Ordinary logs remain strict until a complete recovery contract proves them.
+    """
+
+    def __init__(self, *, complete_scan=True, analysis_complete=True, display_limit=32):
+        self.complete_scan = complete_scan is True
+        self.analysis_complete = analysis_complete is True
+        self.counts = Counter()
+        self.families = {}
+        self.examples = []
+        self.display_limit = display_limit
+        self.findings = []
+
+    def add(self, family, decision, *, evidence_id, reason=None):
+        if decision not in {"non_failure", "handled", "recovered", "observation", "unresolved", "unknown"}:
+            raise DeploymentError("Recovery decision is not recognized")
+        self.counts[decision] += 1
+        self.families.setdefault(family, Counter())[decision] += 1
+        if len(self.examples) < self.display_limit:
+            self.examples.append({"family": family, "decision": decision, "evidence_id": evidence_id,
+                                  "reason": _safe_report_text(reason or "", 200)})
+        if decision in {"unresolved", "unknown"} and len(self.findings) < self.display_limit:
+            self.findings.append(f"{family}: {evidence_id}: {reason or decision}")
+
+    def summary(self):
+        total = sum(self.counts.values())
+        return {"complete_scan": self.complete_scan, "analysis_complete": self.analysis_complete,
+                "total_candidate_findings": total,
+                **{key + "_count": self.counts[key] for key in
+                   ("recovered", "unresolved", "unknown", "handled", "non_failure", "observation")},
+                "counts_by_semantic_family": {family: {"total": sum(count.values()), **dict(count)}
+                                              for family, count in sorted(self.families.items())},
+                "examples_truncated": total > len(self.examples), "examples": self.examples}
+
+    def require_complete_recovery(self):
+        if (not self.complete_scan or not self.analysis_complete
+                or self.counts["unresolved"] or self.counts["unknown"]):
+            raise LogScanError(self.findings or ["Recovery analysis is incomplete"],
+                               complete=self.complete_scan,
+                               truncated=sum(self.counts[key] for key in ("unresolved", "unknown"))
+                               > len(self.findings), analysis=self.summary())
+
+
+def _semantic_current_success(failure, success, current):
+    """Same native operation, successful persisted run, no subsequent failure."""
+    key = _semantic_operation_key(failure["operation"])
+    if key != _semantic_operation_key(success.get("operation")) or key != _semantic_operation_key(current.get("operation")):
+        return False
+    at = _semantic_stamp(failure["at"])
+    succeeded = _semantic_stamp(success.get("finished_at"))
+    observed = _semantic_stamp(current.get("observed_at"))
+    if not at < succeeded <= observed:
+        return False
+    if (success.get("persisted") is not True or current.get("healthy") is not True
+            or current.get("identity_preserved") is not True or current.get("credentials_valid") is not True):
+        return False
+    newest_failure = current.get("latest_failure_at")
+    if newest_failure is not None and _semantic_stamp(newest_failure) >= succeeded:
+        return False
+    return True
+
+
+def _semantic_provider_event(record, sources):
+    body = _semantic_record_body(record)
+    if SEMANTIC_HARD_FAILURE.search(body):
+        return None
+    task = re.search(r"Task ([A-Za-z0-9_.]+)\[([0-9a-f-]{36})\] raised unexpected: HTTPError\(\)$",
+                     record["rows"][0]["text"])
+    if task is None or task[1] not in SEMANTIC_OWNER_TASKS:
+        return None
+    if (body.count("Traceback (most recent call last):") != 1
+            or record["rows"][-1]["text"] != "aiopenapi3.errors.HTTPError"):
+        return None
+    filename, raises = _semantic_server_raise(sources)
+    frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+    if (not frames or frames[-1][0] != filename or int(frames[-1][1]) not in raises
+            or frames[-1][2] != "result" or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
+        return None
+    app, function = task[1].split(".tasks.")
+    if not any(path.endswith("/" + app + "/tasks.py") and name == function for path, _, name in frames):
+        return None
+    return {"task": task[1], "task_id": task[2], "source": record["source"],
+            "at": record["first_at"], "subsystem": SEMANTIC_OWNER_TASKS[task[1]][0]}
+
+
+def prove_systemic_provider_recovery(records, sources, inventory_before, inventory_current, *, complete):
+    """Unknown operands need positive systemic proof, not a healthy unrelated owner.
+
+    At least three independent tasks, two workers, two native task families and
+    two applications must overlap within one minute. Capture copies do not count
+    as independent tasks or workers. Every originally configured owner must be
+    present with unchanged stable bindings, a later native completion and valid
+    current credentials. An isolated/newer/current failure cannot use this rule.
+    """
+    if complete is not True or not records:
+        return False
+    _semantic_native_clocks(sources)
+    events = [_semantic_provider_event(record, sources) for record in records]
+    if any(event is None for event in events):
+        return False
+    distinct = {}
+    for event in events:
+        old = distinct.get(event["task_id"])
+        if old is not None and old != event:
+            return False
+        distinct[event["task_id"]] = event
+    events = list(distinct.values())
+    clocks = [_semantic_stamp(event["at"]) for event in events]
+    if (len(events) < 3 or len({event["source"] for event in events}) < 2
+            or len({event["task"] for event in events}) < 2
+            or len({event["subsystem"] for event in events}) < 2
+            or (max(clocks) - min(clocks)).total_seconds() > 60):
+        return False
+    if not isinstance(inventory_before, list) or not isinstance(inventory_current, list):
+        return False
+    def identity(row):
+        fields = ("subsystem", "owner_pk", "corporation_id", "character_id", "auth_link_pk", "token_pk")
+        if not isinstance(row, dict) or any(row.get(key) is None for key in fields):
+            raise DeploymentError("Provider recovery owner inventory is incomplete")
+        if row["subsystem"] not in {"moonmining", "structures"} or any(
+                type(row[key]) is not int or row[key] <= 0 for key in fields[1:]):
+            raise DeploymentError("Provider recovery owner identity is malformed")
+        return tuple(row[key] for key in fields)
+    before = [identity(row) for row in inventory_before]
+    current = [identity(row) for row in inventory_current]
+    if (not before or len(before) != len(set(before)) or len(current) != len(set(current))
+            or set(before) != set(current)
+            or {row["subsystem"] for row in inventory_before} != {event["subsystem"] for event in events}):
+        return False
+    for row in inventory_current:
+        if any(row.get(key) is not True for key in ("healthy", "credentials_valid", "native_success")):
+            return False
+        completed = _semantic_stamp(row.get("finished_at"))
+        if not max(clocks) < completed <= _semantic_stamp(row.get("observed_at")):
+            return False
+        if row.get("latest_failure_at") is not None and _semantic_stamp(row["latest_failure_at"]) >= completed:
+            return False
+    return True
+
+
+def prove_semantic_recovery(case, sources):
+    """A shared evidence vocabulary for stable, reusable recovery contracts."""
+    try:
+        if not isinstance(case, dict) or case.get("complete") is not True:
+            return False
+        body = _semantic_record_body(case["record"])
+        if SEMANTIC_HARD_FAILURE.search(body):
+            return False
+        kind, failure = case["contract"], case["failure"]
+        if failure["at"] != case["record"]["first_at"]:
+            return False
+        if not _semantic_current_success(failure, case["success"], case["current"]):
+            return False
+        if kind == "owner_transient":
+            event = _semantic_provider_event(case["record"], sources)
+            return (event is not None and case.get("owner_operand_source") in {"task_args", "structured_task_log"}
+                    and type(case.get("owner_pk")) is int
+                    and failure["operation"]["provider"] == "esi"
+                    and failure["operation"]["family"] == event["task"]
+                    and failure["operation"]["subsystem"] == event["subsystem"]
+                    and failure["operation"]["identity"] == str(case["owner_pk"])
+                    and case.get("operand_task_id") == event["task_id"]
+                    and case.get("operand_source") == event["source"])
+        if kind == "memberaudit_transient":
+            # TokenDoesNotExist alone proves neither transience nor identity.
+            # A complete same-token refresh incident must explain the sticky flag.
+            return (case.get("section") in {"location", "assets", "online_status", "ship", "skill_queue", "wallet_balance"}
+                    and case.get("transient_exception") == "IncompleteResponseError"
+                    and type(case.get("token_pk")) is int
+                    and case.get("failed_refresh_token_pk") == case["token_pk"]
+                    and case.get("later_refresh_token_pk") == case["token_pk"]
+                    and case.get("character_pk") == case.get("persisted_character_pk")
+                    and type(case.get("character_pk")) is int and case["character_pk"] > 0
+                    and case.get("section") == case.get("persisted_section")
+                    and case["current"].get("has_token_error") is False
+                    and case["current"].get("error_length") == 0
+                    and case["current"].get("is_success") is True
+                    and case.get("required_scopes") == case.get("validated_required_scopes")
+                    and isinstance(case.get("required_scopes"), list) and bool(case["required_scopes"])
+                    and failure["operation"]["identity"] == str(case["character_pk"])
+                    and failure["operation"]["family"] == case["section"]
+                    and re.search(r"\(ID:" + str(case["character_pk"]) + r"\)", body) is not None
+                    and "TokenDoesNotExist" in body)
+        if kind == "asset_names":
+            filename, raises = _semantic_server_raise(sources, "HTTPClientError")
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            return (body.count("Traceback (most recent call last):") == 2
+                    and bool(frames) and frames[-1][0] == filename and int(frames[-1][1]) in raises
+                    and re.match(r"esi\.exceptions\.HTTPClientError: <HTTPClientError 404\b",
+                                 case["record"]["rows"][-1]["text"]) is not None
+                    and "Invalid IDs in the request" in body
+                    and "HTTPClientError 404" in body
+                    and "_fetching_asset_names_from_esi" in body
+                    and re.search(r"\(ID:" + re.escape(failure["operation"]["identity"]) + r"\)", body) is not None
+                    and case.get("section") == "assets"
+                    and case.get("payload_bytes_verified") is True
+                    and case.get("relationships_valid") is True
+                    and case["current"].get("has_token_error") is False
+                    and case["current"].get("is_success") is True)
+        if kind == "discord_retry":
+            status = case.get("http_status")
+            op = failure["operation"]
+            return (status in {429, 503} and op["provider"] == "discord"
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("guild_id", "")) is not None
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("member_id", "")) is not None
+                    and op["identity"] == case["guild_id"] + "/" + case["member_id"]
+                    and case.get("method") == case.get("success_method") == "PATCH"
+                    and case.get("guild_id") == case.get("success_guild_id")
+                    and case.get("member_id") == case.get("success_member_id")
+                    and case.get("request_id") != case.get("success_request_id")
+                    and re.fullmatch(r"[0-9a-f]{32}", case.get("request_id", "")) is not None
+                    and re.fullmatch(r"[0-9a-f]{32}", case.get("success_request_id", "")) is not None
+                    and case.get("success_status") == 204
+                    and case.get("native_operation_completed") is True
+                    and type(case.get("backoff_ms")) is int and 0 < case["backoff_ms"] <= 120_000
+                    and 0 < (_semantic_stamp(case["success"]["finished_at"]) - _semantic_stamp(failure["at"])).total_seconds()
+                    <= case["backoff_ms"] / 1000 + 120
+                    and re.search(r"(?:status code|error code) " + str(status) + r"\b", body) is not None)
+        if kind == "discord_unknown_member":
+            return (case.get("http_status") == 404 and case.get("discord_code") == 10007
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("guild_id", "")) is not None
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("member_id", "")) is not None
+                    and failure["operation"]["identity"] == case["guild_id"] + "/" + case["member_id"]
+                    and case.get("delete_status") == 204
+                    and case.get("guild_id") == case.get("delete_guild_id") == case.get("current_guild_id")
+                    and case.get("member_id") == case.get("delete_member_id") == case.get("current_member_id")
+                    and case.get("binding_present") is False
+                    and case.get("current_http_status") == 404 and case.get("current_discord_code") == 10007
+                    and '"Unknown Member"' in body and re.search(r'"code"\s*:\s*10007\b', body) is not None)
+        if kind == "handled_callback":
+            tree, source = _semantic_source(sources, "esi.decorators")
+            function = next((node for node in ast.walk(tree)
+                             if isinstance(node, ast.FunctionDef) and node.name == "_check_callback"), None)
+            if function is None:
+                return False
+            catches = []
+            for handler in ast.walk(function):
+                if not isinstance(handler, ast.ExceptHandler):
+                    continue
+                types = [handler.type] if not isinstance(handler.type, ast.Tuple) else handler.type.elts
+                if not any(ast.unparse(node) == "CallbackRedirect.DoesNotExist" for node in types):
+                    continue
+                caught_logs = [node for node in ast.walk(handler) if isinstance(node, ast.Call)
+                               and isinstance(node.func, ast.Attribute) and node.func.attr == "debug"
+                               and any(keyword.arg == "exc_info" and isinstance(keyword.value, ast.Constant)
+                                       and keyword.value.value is True for keyword in node.keywords)]
+                if caught_logs and any(isinstance(node, ast.Return) and isinstance(node.value, ast.Constant)
+                                       and node.value.value is None for node in ast.walk(handler)):
+                    catches.extend(node.lineno for node in caught_logs)
+            header = ALLIANCEAUTH_LOG_HEADER_RE.match(case["record"]["rows"][0]["text"])
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            return (header is not None and header["level"] == "DEBUG" and header["component"] == "esi.decorators"
+                    and int(header["source_line"]) in catches
+                    and len(frames) == 3 and frames[0][0] == source["filename"] and frames[0][2] == "_check_callback"
+                    and case["record"]["rows"][-1]["text"]
+                    == "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+                    and SHA256_RE.fullmatch(case.get("session_sha256", "")) is not None
+                    and case.get("session_sha256") == case.get("success_session_sha256")
+                    and case.get("native_fallback_completed") is True
+                    and case.get("authentication_completed") is True
+                    and case.get("http_completion_status") == 200)
+        return False
+    except (KeyError, TypeError, ValueError, DeploymentError, RecursionError):
+        return False
+
+
+class RetainedSemanticAnalyzer:
+    """Analyze whole records and correlate successes across the entire interval.
+
+    The private disk index separates bounded display from unlimited analysis.
+    Source adapters provide native database/credential/byte evidence; log facts
+    and operation identities are derived here rather than supplied as decisions.
+    """
+
+    def __init__(self, state, *, complete_scan=True, display_limit=32):
+        self.state = state
+        self.ledger = SemanticRecoveryLedger(complete_scan=complete_scan,
+                                             analysis_complete=complete_scan,
+                                             display_limit=display_limit)
+        self.directory = tempfile.TemporaryDirectory(prefix="buh-semantic-recovery-")
+        self.database = sqlite3.connect(str(Path(self.directory.name) / "records.sqlite"))
+        self.database.execute("PRAGMA cache_size=-512")
+        self.database.execute("PRAGMA journal_mode=OFF")
+        self.database.execute("PRAGMA temp_store=FILE")
+        self.database.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, source TEXT, at TEXT, "
+                              "body TEXT, record TEXT, candidate INTEGER, request TEXT, session TEXT, target TEXT)")
+        self.database.execute("CREATE INDEX by_request ON records(source,request,seq)")
+        self.database.execute("CREATE INDEX by_target ON records(source,target,at)")
+        self.database.execute("CREATE INDEX by_time ON records(source,at)")
+        self.database.execute("CREATE INDEX all_times ON records(at)")
+        self.database.execute("CREATE INDEX by_session ON records(source,session,at)")
+        self.database.execute("CREATE INDEX candidate_order ON records(candidate,seq)")
+        self.decisions = {}
+        self.request_cache = {}
+        self.pending_sections = Counter()
+
+    def close(self):
+        self.database.close()
+        self.directory.cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def feed(self, record):
+        try:
+            original_source = record["source"]
+            mapped = self.state.get("capture_sources", {}).get(original_source)
+            if mapped is not None:
+                record = {**record, "source": mapped, "capture_source": original_source}
+            if original_source.startswith("diagnostic/") and mapped is None:
+                rows = record.get("rows")
+                if (record.get("record_complete") is not True or not isinstance(rows, list) or not rows
+                        or any(not isinstance(row.get("text"), str) for row in rows)):
+                    raise DeploymentError("Auxiliary retained evidence is incomplete")
+                text = "\n".join(row["text"] for row in rows)
+                if FATAL_LOG_RE.search(text) or SEMANTIC_CANDIDATE.search(text):
+                    proof = self.state.get("auxiliary_scope_proofs", {}).get(hashlib.sha256(text.encode()).hexdigest())
+                    valid = isinstance(proof, dict) and proof.get("source") == original_source and proof.get("scope") in {
+                        "command_audit", "optional_telemetry", "pre_auth_transport", "optional_identity_introspection"}
+                    self.ledger.add(proof["scope"] if valid else "unrecognized_auxiliary", "observation" if valid else "unknown",
+                                    evidence_id=original_source + "/" + str(record.get("ordinal")))
+                return
+            body = _semantic_record_body(record)
+            candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body))
+            if not candidate and not re.search(
+                    r"Discord Service|Nickname for |Account .*deleted|account.*deleted|"
+                    r"\[esi\.(?:decorators|views):|HTTP/[0-9.]+|"
+                    r"Starting (?:update_nickname|delete_user)|Successfully refreshed|IncompleteResponseError|"
+                    r"MissingTokenError|Attempting refresh|Authenticating .+ by ownership",
+                    body, re.IGNORECASE):
+                return
+            request = re.search(r"\[Discord Service\] ([0-9a-f]{32}):", body)
+            target = re.search(r"sending (?:GET|POST|PATCH|PUT|DELETE) request to url "
+                               r"'(https://discord\.com/api[^']+/members/[0-9]+[^']*)'", body)
+            sessions = record["rows"][0].get("session_sha256", [])
+            if not sessions:
+                match = re.search(r"\bsession sha256:([0-9a-f]{64})\b", body)
+                if match:
+                    sessions = [match[1]]
+            if len(sessions) > 1:
+                self.ledger.analysis_complete = False
+            self.database.execute("INSERT INTO records(source,at,body,record,candidate,request,session,target) "
+                                  "VALUES (?,?,?,?,?,?,?,?)", (
+                record["source"], _semantic_stamp(record["first_at"]).isoformat(), body, json.dumps(record, separators=(",", ":")),
+                int(candidate), request[1] if request else None, sessions[0] if len(sessions) == 1 else None,
+                target[1] if target else None))
+        except (DeploymentError, KeyError, TypeError, ValueError, sqlite3.Error):
+            self.ledger.analysis_complete = False
+            self.ledger.add("malformed_evidence", "unknown", evidence_id="invalid-record",
+                            reason="Incomplete or malformed retained record")
+
+    def _records(self, clause="1", parameters=()):
+        for row in self.database.execute("SELECT seq,record FROM records WHERE " + clause + " ORDER BY seq", parameters):
+            yield row[0], json.loads(row[1])
+
+    def _current(self, op, *, finished, healthy=True, extra=None):
+        return {"operation": op, "observed_at": self.state["observed_at"], "healthy": healthy,
+                "identity_preserved": self.state.get("identity_preserved") is True,
+                "credentials_valid": self.state.get("credentials_valid") is True,
+                "latest_failure_at": None, **(extra or {})}
+
+    def _case(self, kind, record, op, finished, *, extra=None, current=None):
+        return {"contract": kind, "complete": self.ledger.complete_scan and self.ledger.analysis_complete,
+                "record": record, "failure": {"at": record["first_at"], "operation": op},
+                "success": {"operation": op, "finished_at": finished, "persisted": True},
+                "current": current or self._current(op, finished=finished), **(extra or {})}
+
+    def _provider_decisions(self):
+        records = []
+        for seq, record in self._records("candidate=1"):
+            event = _semantic_provider_event(record, self.state["sources"])
+            if event is not None:
+                canonical = dict(record)
+                canonical["source"] = self.state.get("capture_sources", {}).get(record["source"], record["source"])
+                records.append((seq, canonical, event))
+        records.sort(key=lambda row: _semantic_stamp(row[1]["first_at"]))
+        clusters = []
+        for row in records:
+            if not clusters or (_semantic_stamp(row[1]["first_at"]) -
+                                _semantic_stamp(clusters[-1][0][1]["first_at"])).total_seconds() > 60:
+                clusters.append([])
+            clusters[-1].append(row)
+        for cluster in clusters:
+            selected, bodies = {}, {}
+            valid = True
+            for _, record, event in cluster:
+                body = _semantic_record_body(record)
+                key = event["task_id"]
+                if key in bodies and bodies[key] != body:
+                    valid = False
+                bodies[key] = body
+                selected[key] = record
+            proven = valid and prove_systemic_provider_recovery(
+                list(selected.values()), self.state["sources"], self.state["inventory_before"],
+                self.state["owners"], complete=self.ledger.complete_scan and self.ledger.analysis_complete)
+            for seq, record, event in cluster:
+                owner = self.state.get("task_operands", {}).get(event["task_id"])
+                owner_proven = False
+                if owner is not None:
+                    rows = [row for row in self.state["owners"] if row["subsystem"] == event["subsystem"]
+                            and row["owner_pk"] == owner.get("owner_pk")]
+                    if len(rows) == 1:
+                        row = rows[0]
+                        op = {"provider": "esi", "subsystem": event["subsystem"], "family": event["task"],
+                              "identity": str(row["owner_pk"])}
+                        case = self._case("owner_transient", record, op, row["finished_at"], extra={
+                            "owner_pk": row["owner_pk"], "owner_operand_source": owner.get("source_kind"),
+                            "operand_task_id": event["task_id"], "operand_source": record["source"]},
+                            current=self._current(op, finished=row["finished_at"],
+                                                  healthy=row.get("healthy") is True, extra={
+                                "credentials_valid": row.get("credentials_valid") is True,
+                                "latest_failure_at": row.get("latest_failure_at")}))
+                        owner_proven = prove_semantic_recovery(case, self.state["sources"])
+                self.decisions[seq] = ("owner_transient" if owner_proven else "systemic_provider",
+                                       "recovered" if owner_proven or proven else "unresolved")
+
+    def _discord_request(self, source, identifier):
+        cache_key = (source, identifier)
+        if cache_key in self.request_cache:
+            return self.request_cache[cache_key]
+        rows = [record for _, record in self._records("source=? AND request=?", (source, identifier))]
+        if not rows:
+            return None
+        body = "\n".join(_semantic_record_body(row) for row in rows)
+        sent = re.findall(r"sending (GET|POST|PATCH|PUT|DELETE) request to url "
+                          r"'(https://discord\.com/api(?:/v[0-9]+)?/guilds/([0-9]+)/members/([0-9]+)([^']*))'", body)
+        sent = list(dict.fromkeys(sent))
+        if len(sent) != 1 or SEMANTIC_HARD_FAILURE.search(body):
+            return None
+        method, url, guild, member, suffix = sent[0]
+        statuses = {int(value) for value in re.findall(r"returned status code ([0-9]{3})", body)}
+        completed = False
+        tail_at = max(_semantic_stamp(row["first_at"]) for row in rows)
+        for _, record in self._records("source=? AND request IS NULL AND at>=? AND at<=?",
+                                       (source, tail_at.isoformat(), (tail_at + timedelta(seconds=3)).isoformat())):
+            at = _semantic_stamp(record["first_at"])
+            if tail_at <= at <= tail_at + timedelta(seconds=2) and re.search(
+                    r"Nickname for .+ has been updated", _semantic_record_body(record)):
+                completed = True
+        result = {"id": identifier, "rows": rows, "body": body, "method": method, "url": url,
+                "guild": guild, "member": member, "suffix": suffix, "statuses": statuses,
+                "first_at": min(row["first_at"] for row in rows),
+                "last_at": max(row["first_at"] for row in rows), "completed": completed}
+        self.request_cache[cache_key] = result
+        return result
+
+    def _discord_decision(self, record):
+        body = _semantic_record_body(record)
+        identifier = re.search(r"\[Discord Service\] ([0-9a-f]{32}):", body)
+        if identifier is None:
+            retry = re.search(r"update_nickname failed for user .+, retrying in ([1-9][0-9]{0,2}) secs", body)
+            target = re.search(r"requests\.exceptions\.HTTPError: 503 Server Error: Service Unavailable "
+                               r"for url: (https://discord\.com/api/guilds/[0-9]+/members/[0-9]+)$", body)
+            if retry is None or target is None or body.count("Traceback (most recent call last):") != 1:
+                return None
+            at = _semantic_stamp(record["first_at"])
+            identifiers = self.database.execute(
+                "SELECT DISTINCT t.request FROM records t JOIN records r "
+                "ON r.source=t.source AND r.request=t.request "
+                "WHERE t.source=? AND t.target=? AND r.at>=? AND r.at<=? "
+                "AND r.body LIKE '%returned status code 503%'",
+                (record["source"], target[1], (at - timedelta(seconds=1)).isoformat(), at.isoformat())).fetchall()
+            if len(identifiers) != 1:
+                return ("discord_retry", "unresolved")
+            identifier = (None, identifiers[0][0])
+        request = self._discord_request(record["source"], identifier[1])
+        if request is None:
+            return ("discord_unproven", "unresolved")
+        statuses = request["statuses"]
+        op = {"provider": "discord", "subsystem": "discord", "family": "update_nickname",
+              "identity": request["guild"] + "/" + request["member"]}
+        members = self.state.get("discord_members", {})
+        current_member = members.get(request["member"], {})
+        if request["guild"] != self.state.get("discord_guild_id") or current_member.get("complete") is not True:
+            return ("discord_unproven", "unresolved")
+        identifiers = self.database.execute("SELECT DISTINCT request FROM records WHERE source=? AND target=? "
+                                            "AND request IS NOT NULL AND at>?",
+                                            (record["source"], request["url"],
+                                             _semantic_stamp(request["last_at"]).isoformat())).fetchall()
+        later = []
+        for (other,) in identifiers:
+            if other == identifier[1]:
+                continue
+            item = self._discord_request(record["source"], other)
+            if (item is not None and item["guild"] == request["guild"] and item["member"] == request["member"]
+                    and _semantic_stamp(item["first_at"]) > _semantic_stamp(request["last_at"])):
+                later.append(item)
+        later.sort(key=lambda row: _semantic_stamp(row["first_at"]))
+        if statuses <= {429, 503} and statuses and request["method"] == "PATCH" and not request["suffix"]:
+            successes = [item for item in later if item["method"] == "PATCH" and not item["suffix"]
+                         and item["statuses"] == {204} and item["completed"]]
+            if not successes or current_member.get("http_status") != 200 or current_member.get("binding_present") is not True:
+                return ("discord_retry", "unresolved")
+            success = successes[0]
+            newest = [item for item in later if item["method"] == "PATCH" and not item["suffix"]]
+            if newest and newest[-1]["statuses"] != {204}:
+                return ("discord_retry", "unresolved")
+            delays = re.findall(r"Need to back off for at least ([0-9]+) ms", request["body"])
+            if not delays and statuses == {503}:
+                tail = _semantic_stamp(request["last_at"])
+                for _, row in self._records("source=? AND request IS NULL AND at>=? AND at<=?",
+                                            (record["source"], tail.isoformat(), (tail + timedelta(seconds=2)).isoformat())):
+                    text = _semantic_record_body(row)
+                    retry = re.search(r"update_nickname failed for user .+, retrying in ([1-9][0-9]{0,2}) secs", text)
+                    if (retry and text.count("Traceback (most recent call last):") == 1
+                            and text.endswith("requests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url: " + request["url"])):
+                        delays.append(str(int(retry[1]) * 1000))
+            backoff = max(map(int, delays)) if delays else None
+            # Pick the complete native API error, including the response body,
+            # when the candidate is a mirrored DEBUG response-header record.
+            errors = [row for row in request["rows"] if "Discord API returned error code" in _semantic_record_body(row)]
+            selected = errors[0] if errors else record
+            case = self._case("discord_retry", selected, op, success["last_at"], extra={
+                "http_status": min(statuses), "method": request["method"], "success_method": success["method"],
+                "guild_id": request["guild"], "success_guild_id": success["guild"],
+                "member_id": request["member"], "success_member_id": success["member"],
+                "request_id": identifier[1], "success_request_id": success["id"], "success_status": 204,
+                "native_operation_completed": success["completed"], "backoff_ms": backoff})
+            return ("discord_retry", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+        if statuses == {404} and re.search(r'"code"\s*:\s*10007\b', request["body"]):
+            deleted = [item for item in later if item["method"] == "DELETE" and not item["suffix"]
+                       and item["statuses"] == {204}]
+            errors = [row for row in request["rows"] if '"Unknown Member"' in _semantic_record_body(row)]
+            if not deleted or not errors:
+                return ("discord_unknown_member", "unresolved")
+            selected = errors[0]
+            case = self._case("discord_unknown_member", selected, op, deleted[0]["last_at"], extra={
+                "http_status": 404, "discord_code": 10007, "delete_status": 204,
+                "guild_id": request["guild"], "delete_guild_id": deleted[0]["guild"],
+                "current_guild_id": self.state["discord_guild_id"],
+                "member_id": request["member"], "delete_member_id": deleted[0]["member"],
+                "current_member_id": current_member.get("member_id"), "binding_present": current_member.get("binding_present"),
+                "current_http_status": current_member.get("http_status"),
+                "current_discord_code": current_member.get("discord_error_code")})
+            return ("discord_unknown_member", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+        return ("discord_unproven", "unresolved")
+
+    def _callback_decision(self, record):
+        body = _semantic_record_body(record)
+        if "CallbackRedirect.DoesNotExist" not in body:
+            return None
+        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+        sessions = record["rows"][0].get("session_sha256", [])
+        if header is None or len(sessions) != 1:
+            return ("handled_callback", "unresolved")
+        principal = record["rows"][0]["text"][header.end():].split(" session ", 1)[0].removeprefix("No callback for ")
+        at = _semantic_stamp(record["first_at"])
+        following = []
+        for _, row in self._records("source=? AND session=?", (record["source"], sessions[0])):
+            when = _semantic_stamp(row["first_at"])
+            if at < when <= at + timedelta(hours=4):
+                following.append(row)
+        completions = [row for row in following if "Got new token from " + principal + " session "
+                       in _semantic_record_body(row) and ". Returning to view." in _semantic_record_body(row)]
+        fallback = any("Redirecting " in _semantic_record_body(row) and " to SSO." in _semantic_record_body(row)
+                       for row in following if _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=5))
+        if not completions:
+            # Already authenticated token selection is another native successful
+            # continuation. It must include the principal and view token check.
+            choices = [row for _, row in self._records("source=?", (record["source"],))
+                       if principal + " has selected token " in _semantic_record_body(row)
+                       and at < _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=120)]
+            if len(choices) == 1:
+                chosen = _semantic_stamp(choices[0]["first_at"])
+                validated = any("Selected token fulfills requirements of view. Returning." in _semantic_record_body(row)
+                                and chosen < _semantic_stamp(row["first_at"]) <= chosen + timedelta(seconds=1)
+                                for _, row in self._records("source=?", (record["source"],)))
+                if validated:
+                    completions = choices
+                    fallback = True
+        for completion in completions:
+            finished = completion["first_at"]
+            done = _semantic_stamp(finished)
+            http_rows = [row for _, row in self._records("at>? AND at<=? AND body LIKE '%HTTP/%'",
+                         (done.isoformat(), (done + timedelta(seconds=120)).isoformat()))]
+            # Bind the ordinary return to the same proxy client and user agent
+            # as the successful SSO redirect. The destination may be any native
+            # view; a hard-coded dashboard would reject valid return-to URLs.
+            access = re.compile(r'^(?P<client>\S+) .+ "GET (?P<path>/[^ ]*) HTTP/[0-9.]+" '
+                                r'(?P<status>[0-9]{3}) [0-9]+ "[^"]*" "(?P<agent>[^"]+)"$')
+            redirects = []
+            for row in http_rows:
+                parsed = access.match(_semantic_record_body(row))
+                if (parsed and parsed["path"].startswith("/sso/login") and parsed["status"] == "302"
+                        and _semantic_stamp(row["first_at"]) <= done + timedelta(seconds=5)):
+                    redirects.append((row, parsed))
+            http_ok = False
+            for redirect, client in redirects:
+                after = _semantic_stamp(redirect["first_at"])
+                returns = []
+                for row in http_rows:
+                    parsed = access.match(_semantic_record_body(row))
+                    if (parsed and row["source"] == redirect["source"]
+                            and parsed["client"] == client["client"] and parsed["agent"] == client["agent"]
+                            and after < _semantic_stamp(row["first_at"]) <= after + timedelta(seconds=5)
+                            and not parsed["path"].startswith(("/sso/", "/static/", "/media/"))):
+                        returns.append((row, parsed))
+                if returns and min(returns, key=lambda item: _semantic_stamp(item[0]["first_at"]))[1]["status"] == "200":
+                    http_ok = True
+            if not redirects:
+                # Authenticated token selection has no SSO redirect. Its
+                # successful token/view check still needs the normal UI return.
+                http_ok = principal != "AnonymousUser" and any(
+                    re.search(r'"GET /dashboard/(?:\?[^ ]*)? HTTP/[0-9.]+" 200\b', _semantic_record_body(row))
+                    for row in http_rows)
+            op = {"provider": "application", "subsystem": "esi", "family": "callback_lookup", "identity": sessions[0]}
+            case = self._case("handled_callback", record, op, finished, extra={
+                "session_sha256": sessions[0], "success_session_sha256": sessions[0],
+                "native_fallback_completed": fallback, "authentication_completed": True,
+                "http_completion_status": 200 if http_ok else None})
+            if prove_semantic_recovery(case, self.state["sources"]):
+                return ("handled_callback", "handled")
+        return ("handled_callback", "unresolved")
+
+    def _asset_decision(self, record):
+        body = _semantic_record_body(record)
+        match = re.search(r"\(ID:([1-9][0-9]*)\): assets: Error occurred: HTTPClientError: <HTTPClientError 404\b", body)
+        selected = record
+        if match is None and re.search(r"Task memberaudit\.tasks\.assets_build_list_from_esi\[", body):
+            # The native task rethrows the immediately logged same exception.
+            # Require one unique character, same worker and identical causal
+            # application frames; never use all-character health for this task.
+            related = []
+            at = _semantic_stamp(record["first_at"])
+            filename, raises = _semantic_server_raise(self.state["sources"], "HTTPClientError")
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            if (body.count("Traceback (most recent call last):") != 1 or not frames
+                    or frames[-1][0] != filename or int(frames[-1][1]) not in raises
+                    or record["rows"][-2]["text"].strip() != "raise HTTPClientError("):
+                return ("asset_names", "unresolved")
+            for _, row in self._records("candidate=1 AND source=?", (record["source"],)):
+                text = _semantic_record_body(row)
+                owner = re.search(r"\(ID:([1-9][0-9]*)\): assets: Error occurred: HTTPClientError: <HTTPClientError 404\b", text)
+                if (owner is not None and "Invalid IDs in the request" in text
+                        and abs((_semantic_stamp(row["first_at"]) - at).total_seconds()) < 1
+                        and "_fetching_asset_names_from_esi" in text and "_fetching_asset_names_from_esi" in body
+                        and record["rows"][-1]["text"] == "aiopenapi3.errors.HTTPError"):
+                    related.append((owner[1], row))
+            if len({item[0] for item in related}) == 1:
+                selected = related[0][1]
+                match = re.search(r"\(ID:([1-9][0-9]*)\)", _semantic_record_body(selected))
+        if match is None:
+            return None
+        section = self.state.get("sections", {}).get(match[1] + "/assets")
+        if section is None:
+            return ("asset_names", "unresolved")
+        op = {"provider": "esi", "subsystem": "memberaudit", "family": "assets", "identity": match[1]}
+        case = self._case("asset_names", selected, op, section["run_finished_at"], extra={
+            "section": "assets", "payload_bytes_verified": section.get("payload_bytes_verified"),
+            "relationships_valid": section.get("relationships_valid")},
+            current=self._current(op, finished=section["run_finished_at"], healthy=section.get("is_success") is True,
+                                  extra=section))
+        return ("asset_names", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+
+    def _section_decision(self, record):
+        body = _semantic_record_body(record)
+        match = re.search(r"\(ID:([1-9][0-9]*)\): ([a-z_]+): Error occurred: TokenDoesNotExist", body)
+        if match is None:
+            task = re.search(r"Task memberaudit\.tasks\.update_character_([a-z_]+)\[", body)
+            character = re.search(r"TokenDoesNotExist.*\(ID:([1-9][0-9]*)\)", body)
+            if (task is not None and character is not None and body.count("Traceback (most recent call last):") == 1
+                    and record["rows"][-1]["text"].startswith("memberaudit.errors.TokenDoesNotExist:")
+                    and "in _update_character_section" in body and "in fetch_token" in body):
+                match = (None, character[1], task[1])
+        if match is None:
+            return None
+        key = match[1] + "/" + match[2]
+        section = self.state.get("sections", {}).get(key)
+        incident = self._transient_section_cause(record, section)
+        if section is None or incident is None:
+            return ("memberaudit_cause_or_identity_unproven", "unresolved")
+        op = {"provider": "esi", "subsystem": "memberaudit", "family": match[2], "identity": match[1]}
+        case = self._case("memberaudit_transient", record, op, section["run_finished_at"], extra={
+            **incident, "section": match[2], "persisted_section": section.get("section"),
+            "character_pk": int(match[1]), "persisted_character_pk": section.get("character_pk")},
+            current=self._current(op, finished=section["run_finished_at"], healthy=section.get("is_success") is True,
+                                  extra=section))
+        proven = prove_semantic_recovery(case, self.state["sources"])
+        if not proven:
+            self.pending_sections[key] += 1
+        return ("memberaudit_transient", "recovered" if proven else "unresolved")
+
+    def _transient_section_cause(self, record, section):
+        """Derive an incomplete refresh from native logs and the installed branch."""
+        if not section or not isinstance(section.get("identity"), dict):
+            return None
+        identity = section["identity"]
+        tree, _ = _semantic_source(self.state["sources"], "esi.models")
+        handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
+                    and ast.unparse(node.type) == "MissingTokenError"]
+        if len(handlers) != 1 or not any(isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and ast.unparse(node.exc.func) == "IncompleteResponseError" for node in ast.walk(handlers[0])):
+            return None
+        scopes = re.search(r"with scopes: (\[[^\n]+?\])", _semantic_record_body(record))
+        if scopes is None:
+            return None
+        try:
+            required = ast.literal_eval(scopes[1])
+        except (ValueError, SyntaxError):
+            return None
+        validated = section.get("validated_required_scopes", [])
+        if not isinstance(required, list) or not required or not set(required) <= set(validated):
+            return None
+        at = _semantic_stamp(record["first_at"])
+        before = at - timedelta(seconds=5)
+        causes = []
+        token = int(identity["token_pk"])
+        character = int(identity["character_id"])
+        token_match = re.compile(r"Refresh failed for <Token\(id="+str(token)+r"\): "+str(character)
+                                 +r", [^>]+>: MissingTokenError\('\(missing_token\) Missing access token parameter\.'\)")
+        for _, row in self._records("source=? AND at>=? AND at<=? AND body LIKE '%MissingTokenError%'",
+                                   (record["source"], before.isoformat(), at.isoformat())):
+            text = _semantic_record_body(row)
+            if token_match.search(text) and not SEMANTIC_HARD_FAILURE.search(text):
+                causes.append(row)
+        later = []
+        refreshed = re.compile(r"Successfully refreshed <Token\(id="+str(token)+r"\): "+str(character)+r", [^>]+>")
+        for _, row in self._records("at>? AND body LIKE '%Successfully refreshed%'", (at.isoformat(),)):
+            if refreshed.search(_semantic_record_body(row)):
+                later.append(row)
+        if not causes or not later or identity.get("token_inventory") != [token]:
+            # Multiple possible credentials cannot be assigned to an old failure.
+            return None
+        return {"transient_exception":"IncompleteResponseError", "token_pk":token,
+                "failed_refresh_token_pk":token, "later_refresh_token_pk":token,
+                "required_scopes":required, "validated_required_scopes":required}
+
+    def _refinery_decision(self, record):
+        body = _semantic_record_body(record)
+        entity = re.search(r"Failed to fetch refinery with ID ([1-9][0-9]*) from ESI", body)
+        if entity is None:
+            return None
+        current = self.state.get("refineries", {}).get(entity[1])
+        if (current is None or SEMANTIC_HARD_FAILURE.search(body)
+                or re.search(r"(?:esi\.exceptions|aiopenapi3\.errors)\.HTTPServerError: <HTTPServerError 50[0234]\b", body) is None
+                or body.count("Traceback (most recent call last):") != 2
+                or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
+            return ("owner_specific_provider", "unresolved")
+        filename, raises = _semantic_server_raise(self.state["sources"])
+        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+        proven = (frames and frames[-1][0] == filename and int(frames[-1][1]) in raises
+                  and current.get("healthy") is True and current.get("credentials_valid") is True
+                  and current.get("operation_id") == "GetUniverseStructuresStructureId"
+                  and current.get("status_code") == 200
+                  and current.get("structure_id") == int(entity[1])
+                  and _semantic_stamp(current["observed_at"]) > _semantic_stamp(record["first_at"])
+                  and _semantic_stamp(current["owner_finished_at"]) > _semantic_stamp(record["first_at"]))
+        return ("owner_specific_provider", "recovered" if proven else "unresolved")
+
+    def finish(self):
+        self._provider_decisions()
+        for seq, record in self._records("candidate=1"):
+            body = _semantic_record_body(record)
+            decision = self.decisions.get(seq)
+            if SEMANTIC_HARD_FAILURE.search(body):
+                decision = ("auth_permission_or_permanent", "unresolved")
+            elif decision is None and len(record["rows"]) == 1 and _is_esi_error_schema_log(
+                    record["rows"][0]["text"], worker=record["source"].partition("/")[0] == self.state.get("worker_service")):
+                decision = ("esi_schema_enumeration", "non_failure")
+            elif decision is None:
+                for classifier in (self._discord_decision, self._callback_decision, self._asset_decision,
+                                   self._section_decision, self._refinery_decision):
+                    decision = classifier(record)
+                    if decision is not None:
+                        break
+            if decision is None:
+                # Auxiliary retained diagnostics are accounted for separately;
+                # their scope cannot waive a failure in an application stream.
+                if (len(record["rows"]) == 1
+                        and record["source"].partition("/")[0] == self.state.get("proxy_service", "nginx")
+                        and re.fullmatch(r'[0-9a-fA-F.:]+ - \S+ \[[^\n\]]+\] "GET /[^ ]* HTTP/[0-9.]+" '
+                                         r'499 [0-9]+ "[^"\n]*" "[^"\n]*"', body)):
+                    decision = ("client_closed_http_request", "observation")
+                else:
+                    decision = ("unrecognized_failure", "unknown")
+            identity = str(record["source"]) + "/" + str(record.get("ordinal", seq))
+            self.ledger.add(*decision, evidence_id=identity)
+            self.decisions[seq] = decision
+        summary = self.ledger.summary()
+        summary["pending_section_recoveries"] = dict(self.pending_sections)
+        return summary
+
+
+def _semantic_log_records(lines, source, *, stats, deadline):
+    """Parse every timestamped physical line; never cap the retained interval."""
+    stamp = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z) (.*)$")
+    header = re.compile(r"^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]+\]|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4} )")
+    session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{20,64})(?=[. ]|$)")
+    rows, first_at, ordinal, size = [], None, 0, 0
+    for line in lines:
+        if time.monotonic() > deadline:
+            raise DeploymentError("Complete semantic log parsing timed out")
+        parsed = stamp.fullmatch(line)
+        if parsed is None or "\ufffd" in line:
+            raise DeploymentError("Complete semantic log stream has a malformed row")
+        at, original = parsed.groups()
+        _semantic_stamp(at)
+        stats["physical_lines"] += 1
+        stats["first_at"] = stats.get("first_at") or at
+        stats["last_at"] = at
+        if rows and (header.match(original) or not original.startswith((" ", "Traceback ", "During handling ",
+                                                                        "The above exception "))
+                     and not re.match(r"^[a-zA-Z_][a-zA-Z_0-9.]*?(?:Error|Exception|DoesNotExist)(?::|$)", original)
+                     and original != ""):
+            yield {"source": source, "first_at": first_at, "ordinal": ordinal,
+                   "record_complete": True, "rows": rows}
+            rows, size = [], 0
+        if not rows:
+            first_at = at
+            ordinal += 1
+        fingerprints = [hashlib.sha256(item["key"].encode()).hexdigest() for item in session.finditer(original)]
+        hashed = session.sub(lambda item: "session sha256:" + hashlib.sha256(item["key"].encode()).hexdigest(), original)
+        safe = redact_sensitive_text(hashed)
+        row = {"text": safe, "at": at, "raw_sha256": hashlib.sha256(original.encode()).hexdigest(),
+               "session_sha256": fingerprints}
+        rows.append(row)
+        size += len(safe.encode())
+        if len(rows) > 128 or size > 512 * 1024:
+            raise DeploymentError("Complete semantic log record exceeds its bound")
+    if rows:
+        yield {"source": source, "first_at": first_at, "ordinal": ordinal,
+               "record_complete": True, "rows": rows}
+
+
+SEMANTIC_CURRENT_READ_CODE = r'''
+import gzip
+import hashlib
+import importlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import time
+from datetime import datetime, timezone
+from django.apps import apps
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import connection, transaction
+from allianceauth.authentication.models import CharacterOwnership
+from esi.models import Token
+from memberaudit.models import Character, CharacterAsset, CharacterLocation, CharacterUpdateStatus
+
+def emit_semantic_current(expected):
+    result = {'read_only': True, 'complete': False, 'owners': [], 'sections': {}, 'refineries': {},
+              'source_hashes': {}, 'discord_members': {}, 'errors': []}
+    for name, source in expected['sources'].items():
+        if not re.fullmatch(r'(?:allianceauth|esi|memberaudit|moonmining|structures|buh_max_history|buh_structure_ops)(?:\.[a-z_][a-z_0-9]*)+', name):
+            raise ValueError('Unrecognized installed source module')
+        module = importlib.import_module(name)
+        path = Path(module.__file__)
+        raw = path.read_bytes()
+        filename=source['filename']
+        path_matches=(str(path)==filename if Path(filename).is_absolute()
+                      else filename==name.replace('.','/')+'.py' and str(path).endswith('/'+filename))
+        if len(raw) > 256 * 1024 or hashlib.sha256(raw).hexdigest() != source['sha256'] or not path_matches:
+            raise ValueError('Installed source identity differs')
+        result['source_hashes'][name] = source['sha256']
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION READ ONLY')
+    with transaction.atomic():
+        owners = {(row['subsystem'], row['owner_pk']): row for row in expected['inventory_before']}
+        for label in ('moonmining', 'structures'):
+            model = apps.get_model(label, 'Owner')
+            current = list(model.objects.order_by('pk'))
+            if {owner.pk for owner in current} != {pk for app, pk in owners if app == label}:
+                raise ValueError('Complete configured owner inventory changed')
+            for owner in current:
+                wanted = owners[(label, owner.pk)]
+                ownership = CharacterOwnership.objects.select_related('character').get(pk=wanted['auth_link_pk'])
+                token = Token.objects.get(pk=wanted['token_pk'])
+                identity = (ownership.character.character_id == wanted['character_id']
+                            and ownership.character.corporation_id == wanted['corporation_id']
+                            and owner.corporation.corporation_id == wanted['corporation_id']
+                            and token.character_id == wanted['character_id']
+                            and token.user_id == ownership.user_id
+                            and token.character_owner_hash == ownership.owner_hash)
+                scopes = set(token.scopes.values_list('name', flat=True))
+                required = set(wanted['required_scopes'])
+                credentials = identity and bool(required) and required <= scopes and bool(token.refresh_token)
+                if label == 'moonmining':
+                    healthy = owner.is_enabled is True and owner.last_update_ok is True and owner.character_ownership_id == ownership.pk
+                    completed = owner.last_update_at
+                else:
+                    link_model = apps.get_model('structures', 'OwnerCharacter')
+                    link = link_model.objects.get(owner=owner, character_ownership=ownership)
+                    healthy = owner.is_active is True and owner.is_up is True and link.is_enabled is True and link.error_count == 0
+                    completed = owner.notifications_last_update_at
+                result['owners'].append({**wanted, 'healthy': healthy, 'credentials_valid': credentials,
+                                         'native_success': healthy, 'finished_at': completed,
+                                         'latest_failure_at': None})
+        for key, wanted in expected.get('sections', {}).items():
+            character_pk, section = key.split('/')
+            member = Character.objects.select_related('eve_character').get(pk=int(character_pk))
+            status = CharacterUpdateStatus.objects.get(character=member, section=section)
+            identity = wanted['identity']
+            ownership = CharacterOwnership.objects.get(pk=identity['auth_link_pk'], user_id=identity['user_id'], character=member.eve_character)
+            token = Token.objects.get(pk=identity['token_pk'], user_id=identity['user_id'], character_id=identity['character_id'])
+            tokens = list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk', flat=True))
+            required = set(identity.get('required_scopes', ['esi-assets.read_assets.v1']))
+            if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                    or token.character_owner_hash != ownership.owner_hash or tokens != identity['token_inventory']
+                    or not required <= set(token.scopes.values_list('name', flat=True))):
+                raise ValueError('Section existing credential or Auth identity differs')
+            row = {'character_pk': member.pk, 'section': section, 'pk': status.pk,
+                   'identity': identity, 'validated_required_scopes': sorted(token.scopes.values_list('name',flat=True)),
+                   'is_success': status.is_success, 'has_token_error': status.has_token_error,
+                   'error_length': len(status.error_message), 'error_sha256':hashlib.sha256(status.error_message.encode()).hexdigest(),
+                   'run_started_at': status.run_started_at,
+                   'run_finished_at': status.run_finished_at, 'update_started_at': status.update_started_at,
+                   'update_finished_at': status.update_finished_at,
+                   'content_hashes': [status.content_hash_1, status.content_hash_2, status.content_hash_3]}
+            if section == 'location':
+                location=CharacterLocation.objects.get(character=member)
+                valid=bool(location.eve_solar_system_id)
+                for field in location._meta.fields:
+                    if field.is_relation and field.many_to_one:
+                        pk=getattr(location,field.attname)
+                        valid=valid and (pk is None and field.null or pk is not None and field.remote_field.model.objects.filter(pk=pk).exists())
+                row['location_valid']=valid
+                if not valid:
+                    raise ValueError('Current native LOCATION data is invalid')
+            if section == 'assets':
+                assets = list(CharacterAsset.objects.filter(character=member).values('pk','item_id','quantity','parent_id','eve_type_id','location_id'))
+                pks = {item['pk'] for item in assets}
+                valid = (len({item['item_id'] for item in assets}) == len(assets)
+                         and all(type(item['item_id']) is int and item['item_id'] > 0
+                                 and type(item['quantity']) is int and item['quantity'] >= 0
+                                 and (item['parent_id'] is None or item['parent_id'] in pks and item['parent_id'] != item['pk'])
+                                 for item in assets))
+                for field in ('eve_type', 'location'):
+                    ids = {item[field+'_id'] for item in assets if item[field+'_id'] is not None}
+                    related = CharacterAsset._meta.get_field(field).remote_field.model
+                    valid = valid and set(related.objects.filter(pk__in=ids).values_list('pk',flat=True)) == ids
+                from buh_max_history.capture import archive_root
+                archive = archive_root().resolve(strict=True)
+                for payload in wanted['payloads']:
+                    relative = Path(payload['relative_path'])
+                    if relative.is_absolute() or '..' in relative.parts or relative.parts[0] != 'private':
+                        raise ValueError('Asset evidence path differs')
+                    path = archive / relative
+                    for parent in (path, *path.parents):
+                        if parent == archive:
+                            break
+                        if parent.is_symlink():
+                            raise ValueError('Asset evidence contains a link')
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(descriptor, 'rb') as source:
+                        before = os.fstat(source.fileno())
+                        if not stat.S_ISREG(before.st_mode) or before.st_size != payload['stored_bytes']:
+                            raise ValueError('Asset evidence file metadata differs')
+                        with gzip.GzipFile(fileobj=source) as compressed:
+                            raw = compressed.read(32 * 1024 * 1024 + 1)
+                        after = os.fstat(source.fileno())
+                    if (len(raw) != payload['source_bytes'] or len(raw) > 32 * 1024 * 1024
+                            or hashlib.sha256(raw).hexdigest() != payload['payload_sha256']
+                            or (before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_ino,after.st_size,after.st_mtime_ns)):
+                        raise ValueError('Actual retained asset bytes differ')
+                    data = json.loads(raw)
+                    if not isinstance(data,list) or not all(isinstance(item,dict) and type(item.get('item_id')) is int for item in data):
+                        raise ValueError('Retained asset payload is malformed')
+                row.update(relationships_valid=valid, payload_bytes_verified=bool(wanted['payloads']))
+            result['sections'][key] = row
+        refinery_model = apps.get_model('moonmining','Refinery')
+        from buh_max_history.models import ArchiveStream
+        for key, wanted in expected.get('refineries',{}).items():
+            refinery = refinery_model.objects.get(pk=int(key), owner_id=wanted['owner_pk'])
+            stream = ArchiveStream.objects.get(pk=wanted['stream_pk'])
+            owner = next(row for row in result['owners'] if row['subsystem']=='moonmining' and row['owner_pk']==refinery.owner_id)
+            result['refineries'][key] = {**wanted,'healthy':owner['healthy'],'credentials_valid':owner['credentials_valid'],
+                'owner_finished_at':owner['finished_at'],'status_code':stream.last_status_code,
+                'observed_at':stream.last_seen_at,'structure_id':stream.safe_parameters.get('structure_id'),
+                'operation_id':stream.operation_id}
+        discord = apps.get_model('discord','DiscordUser')
+        bindings = {str(user.uid): user.user_id for user in discord.objects.all()}
+    # Native credentials are used only for bounded read-only membership GETs.
+    import requests
+    guild = str(settings.DISCORD_GUILD_ID)
+    if guild != expected['discord_guild_id']:
+        raise ValueError('Current Discord guild differs')
+    with requests.Session() as session:
+        session.trust_env = False
+        session.headers.update({'Authorization':'Bot '+str(settings.DISCORD_BOT_TOKEN),
+                                'User-Agent':'B-UH-semantic-recovery-read-only/1'})
+        for member in expected['discord_members']:
+            if not re.fullmatch(r'[1-9][0-9]{5,19}',member):
+                raise ValueError('Discord member identity is malformed')
+            for attempt in range(3):
+              with session.get('https://discord.com/api/v10/guilds/'+guild+'/members/'+member,
+                             timeout=15,allow_redirects=False,stream=True) as response:
+                chunks,size=[],0
+                for chunk in response.iter_content(4096):
+                    size+=len(chunk)
+                    if size>64*1024:
+                        raise ValueError('Discord read-only response exceeds its bound')
+                    chunks.append(chunk)
+                data=json.loads(b''.join(chunks))
+                if response.status_code==429 and attempt<2:
+                    retry=data.get('retry_after')
+                    if type(retry) not in (int,float) or not 0<retry<=10:
+                        raise ValueError('Discord read-only backoff is not bounded')
+                    time.sleep(retry)
+                    continue
+                complete=(response.status_code==200 and data.get('user',{}).get('id')==member
+                          or response.status_code==404 and data.get('code')==10007)
+                result['discord_members'][member]={'member_id':member,'http_status':response.status_code,
+                    'discord_error_code':data.get('code'),'complete':complete,'binding_present':member in bindings,
+                    'binding_user_pk':bindings.get(member)}
+                break
+            time.sleep(0.35)
+    result['observed_at']=datetime.now(timezone.utc).isoformat()
+    for owner in result['owners']:
+        owner['observed_at']=result['observed_at']
+    result['complete']=not result['errors'] and all(row['complete'] for row in result['discord_members'].values())
+    print('BUH_SEMANTIC_CURRENT_BEGIN')
+    print(json.dumps(result,sort_keys=True,cls=DjangoJSONEncoder))
+    print('BUH_SEMANTIC_CURRENT_END')
+'''
+
+EXISTING_LOCATION_RECOVERY_CODE = r'''
+import hashlib
+import json
+import logging
+import signal
+from datetime import datetime, timezone
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
+from django.db.models.signals import pre_delete, pre_save
+from allianceauth.authentication.models import CharacterOwnership
+from esi import app_settings
+from esi.managers import TokenManager
+from esi.models import Token
+from memberaudit.models import Character, CharacterLocation, CharacterUpdateStatus
+from memberaudit.tasks import _update_character_section
+from requests.auth import HTTPBasicAuth
+from requests_oauthlib import OAuth2Session
+
+def recover_existing_location(expected):
+    identity, wanted = expected['identity'], expected['status']
+    token_pk, character_pk = identity['token_pk'], identity['memberaudit_character_pk']
+    started = datetime.now(timezone.utc)
+    result = {'complete':False,'native_location_attempts':0,'token_refresh_attempts':0,
+              'token_pk':token_pk,'character_pk':character_pk,'started_at':started.isoformat()}
+    def abort(signum, frame):
+        raise TimeoutError('Bounded existing LOCATION recovery timed out')
+    signal.signal(signal.SIGALRM, abort)
+    signal.alarm(180)
+    # Native libraries log decoded credentials at DEBUG; this private operation
+    # emits only normalized identity/status evidence and never credential data.
+    logging.disable(logging.CRITICAL)
+    def no_delete(sender, instance, **kwargs):
+        raise ValueError('Token or Auth deletion is outside existing LOCATION recovery')
+    def save_token(sender, instance, **kwargs):
+        if instance.pk != token_pk:
+            raise ValueError('Another token save is outside existing LOCATION recovery')
+        old=Token.objects.get(pk=token_pk)
+        allowed={'access_token','refresh_token','created','sso_version'}
+        if any(getattr(instance,field.attname)!=getattr(old,field.attname)
+               for field in Token._meta.concrete_fields if field.name not in allowed):
+            raise ValueError('Existing token identity changed')
+    def save_auth(sender, instance, **kwargs):
+        raise ValueError('Auth-link mutation is outside existing LOCATION recovery')
+    def save_section(sender, instance, **kwargs):
+        if instance.character_id != character_pk or instance.section != 'location':
+            raise ValueError('Another section save is outside existing LOCATION recovery')
+    guards=((pre_delete,Token,no_delete),(pre_delete,CharacterOwnership,no_delete),
+            (pre_save,Token,save_token),(pre_save,CharacterOwnership,save_auth),
+            (pre_save,CharacterUpdateStatus,save_section))
+    for event,model,function in guards:
+        event.connect(function,sender=model,weak=False)
+    try:
+        member=Character.objects.select_related('eve_character').get(pk=character_pk)
+        ownership=CharacterOwnership.objects.get(pk=identity['auth_link_pk'],user_id=identity['user_id'],character=member.eve_character)
+        inventory=list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+        if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                or inventory != identity['token_inventory'] or inventory != [token_pk]
+                or hashlib.sha256(ownership.owner_hash.encode()).hexdigest()!=identity['owner_hash_sha256']):
+            raise ValueError('Reviewed existing LOCATION identity differs')
+        status=CharacterUpdateStatus.objects.get(pk=wanted['id'],character=member,section='location')
+        original_error=hashlib.sha256(status.error_message.encode()).hexdigest()
+        if (status.is_success is not False or status.has_token_error is not True
+                or original_error != wanted['original_error_message_sha256']
+                or status.run_finished_at.isoformat().replace('+00:00','Z')[:23]!=wanted['run_finished_at'][:23]):
+            raise ValueError('Known stale LOCATION state differs; native update was not attempted')
+        required=set(identity['required_scopes'])
+        original_scopes=set(Token.objects.get(pk=token_pk).scopes.values_list('name',flat=True))
+        verified={'claims':False}
+        class ValidatedNativeSession(OAuth2Session):
+            def request(self,*args,**kwargs):
+                kwargs['timeout']=15
+                return super().request(*args,**kwargs)
+            def refresh_token(self,*args,**kwargs):
+                payload=super().refresh_token(*args,**kwargs)
+                if not isinstance(payload,dict) or not payload.get('access_token') or not payload.get('refresh_token'):
+                    raise ValueError('Native refresh did not return complete credentials')
+                claims=TokenManager.validate_access_token(payload['access_token'])
+                if (not isinstance(claims,dict) or claims.get('character_id')!=identity['character_id']
+                        or claims.get('owner')!=ownership.owner_hash or not required<=set(claims.get('scp',[]))):
+                    raise ValueError('Native refreshed claims do not prove existing identity and required scopes')
+                verified['claims']=True
+                return payload
+        import esi.managers as managers
+        original_get=managers.requests.get
+        def bounded_get(*args,**kwargs):
+            kwargs['timeout']=15
+            return original_get(*args,**kwargs)
+        managers.requests.get=bounded_get
+        try:
+            with transaction.atomic():
+                token=Token.objects.select_for_update().get(pk=token_pk,user_id=identity['user_id'],character_id=identity['character_id'])
+                if token.character_owner_hash!=ownership.owner_hash or not required<=set(token.scopes.values_list('name',flat=True)):
+                    raise ValueError('Existing token identity or scope inventory differs')
+                result['token_refresh_attempts']=1
+                with ValidatedNativeSession(app_settings.ESI_SSO_CLIENT_ID) as native_session:
+                    token.refresh(session=native_session,auth=HTTPBasicAuth(app_settings.ESI_SSO_CLIENT_ID,app_settings.ESI_SSO_CLIENT_SECRET))
+                if not verified['claims']:
+                    raise ValueError('Native refreshed claims were not verified')
+            result['native_location_attempts']=1
+            # This is the installed native reset, real ESI update, and persisted
+            # result path. It is invoked once, without asynchronous retries.
+            _update_character_section(character_pk,Character.UpdateSection.LOCATION,force_update=True)
+        finally:
+            managers.requests.get=original_get
+        status.refresh_from_db()
+        location=CharacterLocation.objects.get(character=member)
+        foreign_keys={}
+        for field in location._meta.fields:
+            if field.is_relation and field.many_to_one:
+                pk=getattr(location,field.attname)
+                foreign_keys[field.name]=pk is None and field.null or pk is not None and field.remote_field.model.objects.filter(pk=pk).exists()
+        current_inventory=list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+        location_valid=all(foreign_keys.values()) and bool(location.eve_solar_system_id)
+        if (status.is_success is not True or status.has_token_error is not False or status.error_message
+                or not status.run_finished_at or status.run_finished_at<=started
+                or not status.update_finished_at or status.update_finished_at<=started
+                or not status.content_hash_1 or not location_valid or current_inventory!=inventory):
+            raise ValueError('Actual native LOCATION recovery is not persisted and healthy')
+        ownership.refresh_from_db()
+        token.refresh_from_db()
+        if (token.character_id!=identity['character_id'] or token.user_id!=identity['user_id']
+                or token.character_owner_hash!=ownership.owner_hash or ownership.user_id!=identity['user_id']
+                or ownership.character_id!=member.eve_character_id
+                or set(token.scopes.values_list('name',flat=True))!=original_scopes):
+            raise ValueError('Existing token or Auth identity was not preserved')
+        result.update(complete=True,existing_token_preserved=True,auth_link_preserved=True,token_inventory_preserved=True,
+                      required_scopes_validated=True,has_token_error=status.has_token_error,is_success=status.is_success,
+                      error_length=len(status.error_message),run_started_at=status.run_started_at,run_finished_at=status.run_finished_at,
+                      update_started_at=status.update_started_at,update_finished_at=status.update_finished_at,
+                      content_hashes=[status.content_hash_1,status.content_hash_2,status.content_hash_3],
+                      location_pk=location.pk,location_foreign_keys_valid=foreign_keys,
+                      normal_token_refresh_fields_only=True)
+    except Exception as error:
+        result.update(error_type=type(error).__name__,failure_message_sha256=hashlib.sha256(str(error).encode()).hexdigest(),
+                      preserve_recovery_resources=True)
+        cause=error
+        for _ in range(8):
+            oauth_reason=getattr(cause,'error',None)
+            if oauth_reason in {'invalid_grant','invalid_client','invalid_scope','unauthorized_client','access_denied'}:
+                result['permanent_oauth_reason']=oauth_reason
+                break
+            cause=getattr(cause,'__cause__',None) or getattr(cause,'__context__',None)
+            if cause is None:
+                break
+        if isinstance(error,(ValueError,TimeoutError)):
+            result['guard_reason']=str(error) if str(error).startswith(('Reviewed ','Known ','Existing ','Native ','Another ','Auth-',
+                                  'Token or Auth','Actual native','Bounded ')) else 'Scoped native recovery failed validation'
+    finally:
+        for event,model,function in guards:
+            event.disconnect(function,sender=model)
+        signal.alarm(0)
+        result['finished_at']=datetime.now(timezone.utc).isoformat()
+    print('BUH_EXISTING_LOCATION_RECOVERY_BEGIN')
+    print(json.dumps(result,sort_keys=True,cls=DjangoJSONEncoder))
+    print('BUH_EXISTING_LOCATION_RECOVERY_END')
+'''
 
 
 MAX_STATIC_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -204,6 +1542,127 @@ RECOVERY_PLAN_SCHEMA_VERSION = 1
 RECOVERY_PLAN_NAME = "active-recovery.json"
 MAX_RECOVERY_PLAN_BYTES = 256 * 1024
 CELERY_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}@[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _prove_discord_nickname_429(lines, proof):
+    """Accept only one complete, correlated nickname request and its short retry."""
+    def fail():
+        raise DeploymentError("Discord nickname 429 recovery is not proven")
+
+    try:
+        begin = datetime.fromisoformat(proof["since"])
+        end = datetime.fromisoformat(proof["until"])
+        if (begin.utcoffset() is None or end.utcoffset() is None
+                or not 0 < (end - begin).total_seconds() <= 5
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", proof["username"])
+                or any(not re.fullmatch(r"[0-9]{1,20}", proof[key])
+                       for key in ("guild_id", "member_id"))
+                or any(not re.fullmatch(r"[0-9a-f]{32}", proof[key])
+                       for key in ("request_id", "retry_request_id"))
+                or proof["request_id"] == proof["retry_request_id"]
+                or not isinstance(proof["error_line_sha256"], list)
+                or len(set(proof["error_line_sha256"])) != 2
+                or any(SHA256_RE.fullmatch(item) is None
+                       for item in proof["error_line_sha256"])):
+            fail()
+    except (KeyError, TypeError, ValueError):
+        fail()
+    endpoint = (f"https://discord.com/api/guilds/{proof['guild_id']}"
+                f"/members/{proof['member_id']}")
+    client = "allianceauth.services.modules.discord.discord_client.client"
+    tasks = "allianceauth.services.modules.discord.tasks"
+    models = "allianceauth.services.modules.discord.models"
+    rows, errors, families = [], [], set()
+    for line in lines:
+        aa = ALLIANCEAUTH_LOG_HEADER_RE.match(line)
+        celery = CELERY_LOG_HEADER_RE.match(line)
+        if aa:
+            clock = (f"{aa['year']}-{ALLIANCEAUTH_LOG_MONTHS[aa['month']]}-"
+                     f"{aa['day']} {aa['clock']}+00:00")
+            event, level, component = datetime.fromisoformat(clock), aa["level"], aa["component"]
+            family, message = "allianceauth", line[aa.end():]
+        elif celery:
+            event = datetime.fromisoformat(celery["timestamp"] + "+00:00")
+            level, component = celery["level"], ""
+            family, message = "celery", line[celery.end():]
+            if celery["process"] != "MainProcess":
+                if FATAL_LOG_RE.search(line):
+                    fail()
+                continue
+        else:
+            if FATAL_LOG_RE.search(line):
+                fail()
+            continue
+        if not begin <= event < end:
+            fail()
+        error = re.fullmatch(
+            r"\[Discord Service\] ([0-9a-f]{32}): Discord API returned error code 429 "
+            r"for member ID ([0-9]{1,20}) with this response: (.+)", message)
+        if level == "ERROR":
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            if (error is None or digest not in proof["error_line_sha256"]
+                    or error[1] != proof["request_id"] or error[2] != proof["member_id"]
+                    or family == "allianceauth" and component != client
+                    or family in families):
+                fail()
+            try:
+                payload = json.loads(error[3])
+                if (set(payload) != {"message", "retry_after", "global"}
+                        or payload["message"] != "You are being rate limited."
+                        or payload["global"] is not False
+                        or type(payload["retry_after"]) not in {int, float}
+                        or not 0 < payload["retry_after"] <= 60000):
+                    fail()
+            except (TypeError, ValueError):
+                fail()
+            errors.append((event, digest))
+            families.add(family)
+        elif level == "CRITICAL" or re.search(
+            r"error code (?:403|401)|returned status code (?:403|401)|50013|"
+            r"Missing Permissions|after max retries", message, re.IGNORECASE
+        ):
+            fail()
+        if family == "allianceauth":
+            rows.append((event, level, component, message))
+    if len(errors) != 2 or families != {"allianceauth", "celery"}:
+        fail()
+
+    def one(level, component, pattern):
+        found = [(event, message) for event, severity, logger, message in rows
+                 if severity == level and logger == component and re.fullmatch(pattern, message)]
+        if len(found) != 1:
+            fail()
+        return found[0][0]
+
+    start = one("INFO", client, re.escape(
+        f"[Discord Service] {proof['request_id']}: sending PATCH request to url '{endpoint}'"))
+    rejected = one("DEBUG", client, re.escape(
+        f"[Discord Service] {proof['request_id']}: returned status code 429 with headers: ") + r".+")
+    retry = one("INFO", client, re.escape(
+        f"[Discord Service] {proof['retry_request_id']}: sending PATCH request to url '{endpoint}'"))
+    success = one("DEBUG", client, re.escape(
+        f"[Discord Service] {proof['retry_request_id']}: returned status code 204 with headers: ") + r".+")
+    backoff = one("INFO", tasks, re.escape(
+        f"[Discord Service] API back off for update_nickname wth user {proof['username']} "
+        "due to DiscordTooManyRequestsError(), retrying in 1 seconds"))
+    done = one("INFO", models, re.escape(
+        f"[Discord Service] Nickname for {proof['username']} has been updated"))
+    running = [event for event, severity, logger, message in rows
+               if severity == "INFO" and logger == tasks and message ==
+               f"[Discord Service] Running update_nickname for user {proof['username']}"]
+    # AA headers have one-second precision. Celery mirrors independently bind the
+    # exact fatal records; allow equality within that precision, never reversed seconds.
+    if (len(running) != 2 or not running[0] <= start <= rejected <= backoff
+            or not backoff < retry <= success <= done or not backoff < running[1] <= retry
+            or not 0 < (success - rejected).total_seconds() <= 5
+            or any(abs((event - rejected).total_seconds()) > 1 for event, _ in errors)):
+        fail()
+    hashes = {digest for _, digest in errors}
+    original_digest = hashlib.sha256("\n".join(sorted(hashes)).encode("ascii")).hexdigest()
+    return hashes, (
+        "recovered warning: Discord nickname HTTP 429 -> HTTP 204 within 5s; "
+        f"original ERROR pair sha256={original_digest}"
+    )
 
 
 def celery_nodename(pattern: str, hostname: str) -> str:
@@ -540,6 +1999,457 @@ def _atomic_text(
     _atomic_bytes(path, text.encode("utf-8"), mode, owner=owner)
 
 
+# This is the already-installed and independently reviewed script, not a new
+# healthcheck or an adjustable memory policy. Only legacy retained recovery may
+# opt into proving its graceful recycles. Normal deployment checks stay strict.
+WORKER_MEMORY_SCRIPT_SHA256 = "ca060b5f6e55108d3c4a82ea97eb521e02515f98bcba613d3bb1da23423c3438"
+WORKER_MEMORY_SCRIPT = Path("/opt/aa-docker/conf/memory_check.sh")
+WORKER_RESTART_STORE = Path("/var/lib/buh-diagnostics/history.sqlite3")
+WORKER_MEMORY_CHECK = {"Test": ["CMD", "/memory_check.sh", "500000000"],
+                       "Interval": 60000000000, "Timeout": 10000000000,
+                       "StartPeriod": 300000000000, "Retries": 3}
+# Warm shutdown drains in-flight work. The installed check signals immediately;
+# a clean exit may take the rest of one check interval rather than 30 seconds.
+# A longer drain still blocks, as do missing threshold/signal/lifecycle evidence.
+WORKER_RECYCLE_MAX_DRAIN_SECONDS = WORKER_MEMORY_CHECK["Interval"] / 1_000_000_000
+WORKER_RESTART_RECORD = re.compile(
+    r'msg="restarting container" container=([0-9a-f]{64}) exitCode=(\d+) '
+    r'exitedAt="([^"]+)" manualRestart=(true|false) restartCount=(\d+) '
+    r'restartPolicy="\{([^}]*)\}"')
+WORKER_RECYCLE_INSPECT = (
+    '[{{json .Id}},{{json .Name}},{{json .Image}},{{json .RestartCount}},'
+    '{{json .State}},{{json .Config.Labels}},{{json (index .Config "Healthcheck")}},'
+    '{{json .HostConfig.RestartPolicy}},{{json .Mounts}}]')
+
+
+def _recycle_time(value):
+    try:
+        point = datetime.fromisoformat(value.replace(" +0000 UTC", "Z").replace(" ", "T", 1)
+                                       .replace("Z", "+00:00"))
+        if point.utcoffset() != timedelta(0):
+            raise ValueError()
+        return point
+    except (AttributeError, TypeError, ValueError) as error:
+        raise DeploymentError("Worker recycle timestamp is invalid") from error
+
+
+def _validate_worker_recycle_policy(policy, rows, worker_service):
+    required = {"schema_version", "reviewed_evidence_sha256", "host_boot_id",
+                "diagnostics_store_id", "daemons", "workers", "script_sha256"}
+    if (not isinstance(policy, dict) or set(policy) != required
+            or type(policy["schema_version"]) is not int or policy["schema_version"] != 1
+            or policy["script_sha256"] != WORKER_MEMORY_SCRIPT_SHA256
+            or not isinstance(policy["reviewed_evidence_sha256"], str)
+            or SHA256_RE.fullmatch(policy["reviewed_evidence_sha256"]) is None
+            or any(not isinstance(policy[key], str) or re.fullmatch(r"[0-9a-f]{32}", policy[key]) is None
+                   for key in ("host_boot_id", "diagnostics_store_id"))
+            or not isinstance(policy["workers"], dict) or not policy["workers"]
+            or not isinstance(policy["daemons"], dict)
+            or set(policy["daemons"]) != {"docker.service", "containerd.service"}):
+        raise DeploymentError("Reviewed worker recycle policy is malformed")
+    expected = {row["container_id"] for row in rows if row["service"] == worker_service}
+    if (set(policy["workers"]) != expected
+            or any(not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", name) is None
+                   for name in policy["workers"].values())
+            or len(set(policy["workers"].values())) != len(expected)):
+        raise DeploymentError("Worker recycle policy differs from retained worker identities")
+    for daemon in policy["daemons"].values():
+        if (not isinstance(daemon, dict) or set(daemon) != {"MainPID", "ExecMainStartTimestampMonotonic"}
+                or any(not isinstance(value, str) or not value.isdigit() or int(value) <= 0
+                       for value in daemon.values())):
+            raise DeploymentError("Worker recycle daemon baseline is malformed")
+
+
+def _is_esi_error_schema_log(line, *, worker=False):
+    """The existing exact DEBUG model-name rule, never a generic DEBUG exception."""
+    schema = ALLIANCEAUTH_LOG_HEADER_RE.match(line)
+    if schema is not None:
+        return (schema["level"] == "DEBUG" and schema["component"] == "esi.aiopenapi3.plugins"
+                and schema["source_line"] == "121" and line[schema.end():] == "- Error")
+    mirrored = CELERY_LOG_HEADER_RE.match(line)
+    return bool(worker and mirrored is not None and mirrored["level"] == "DEBUG"
+                and mirrored["process"] == "MainProcess" and line[mirrored.end():] == "- Error")
+
+
+def _prove_worker_recycle(event, events, application, journal, *, container, name, observed):
+    """Prove one complete causal chain; a warm exit or a count alone is insufficient."""
+    exit_at, restart_at = _recycle_time(event["exited_at"]), _recycle_time(event["at"])
+    if (event["container_id"] != container or event["manual_restart"] is not False
+            or type(event["exit_code"]) is not int or event["exit_code"] != 0
+            or event["restart_policy"] != "always 0" or exit_at <= _recycle_time(observed)
+            or not 0 <= (restart_at - exit_at).total_seconds() <= 2):
+        raise DeploymentError("Worker exit was not a proven automatic graceful recycle")
+    allowed = {"exec_create: /memory_check.sh 500000000", "exec_start: /memory_check.sh 500000000",
+               "exec_die", "health_status: unhealthy", "health_status: healthy", "die", "start"}
+    if any(row["service"] != name or row["message"] not in allowed for row in events):
+        raise DeploymentError("Worker recycle has an unexpected/manual Docker operation")
+    before = [row for row in events if _recycle_time(row["at"]) <= exit_at]
+    executions = [row for row in before if row["message"] == "exec_start: /memory_check.sh 500000000"]
+    if len(executions) < 4:
+        raise DeploymentError("Worker recycle lacks four configured memory check executions")
+    checks = executions[-4:]
+    points = [_recycle_time(row["at"]) for row in checks]
+    if (any(not 59 <= (right - left).total_seconds() <= 62 for left, right in zip(points, points[1:]))
+            or not 0 < (exit_at - points[-1]).total_seconds() <= WORKER_RECYCLE_MAX_DRAIN_SECONDS):
+        raise DeploymentError("Worker recycle memory check sequence is incomplete")
+    unhealthy = [row for row in before if row["message"] == "health_status: unhealthy"
+                 and 0 <= (_recycle_time(row["at"]) - points[-2]).total_seconds() <= 2]
+    warm = [row for row in application if row.get("kind") == "warm"]
+    if (len(unhealthy) != 1 or len(warm) != 1
+            or not 0 <= (_recycle_time(warm[0]["at"]) - points[-1]).total_seconds() <= 0.5
+            or any(row.get("kind") not in {"warm", "schema_model_listing"} for row in application)):
+        raise DeploymentError("Worker recycle lacks the threshold/SIGTERM/warm-shutdown proof")
+    # An unrelated fatal exception, OOM, host restart, or explicit control action
+    # remains a blocker. These records are never put on the health log allowlist.
+    control = re.compile(r"\b(?:SIGKILL|SIGINT|SIGTERM|out of memory|killed process|oom-kill|"
+                         r"reboot|daemon shutdown|shutting down|Stopping Docker|Starting Docker|Stopped Docker)\b|"
+                         r"\b(?:docker(?:-compose|\s+compose)?\s+(?:restart|stop|kill|up|down|rm)|"
+                         r"compose\s+(?:restart|up|down)|kill(?:all)?\s+-)", re.I)
+    if any(control.search(row["message"]) for row in journal):
+        raise DeploymentError("Worker recycle has conflicting host/control evidence")
+    dies = [row for row in events if row["message"] == "die"
+            and 0 <= (_recycle_time(row["at"]) - exit_at).total_seconds() <= 2]
+    starts = [row for row in events if row["message"] == "start"
+              and 0 <= (_recycle_time(row["at"]) - exit_at).total_seconds() <= 3]
+    healthy = [row for row in events if row["message"] == "health_status: healthy"
+               and 0 < (_recycle_time(row["at"]) - exit_at).total_seconds() <= 30]
+    if len(dies) != 1 or len(starts) != 1 or len(healthy) != 1:
+        raise DeploymentError("Worker recycle lacks automatic restart/current health evidence")
+    start_at, healthy_at = _recycle_time(starts[0]["at"]), _recycle_time(healthy[0]["at"])
+    if not exit_at < start_at < healthy_at:
+        raise DeploymentError("Worker recycle lifecycle ordering is invalid")
+    # Preserve the original warning/evidence without retaining arbitrary payloads
+    # or auth credentials from application/host logs.
+    schema_logs = [row for row in application if row.get("kind") == "schema_model_listing"]
+    return {"container_id": container, "restart_count": event["restart_count"],
+            "exit_code": 0, "manual_restart": False, "exited_at": event["exited_at"],
+            "started_event_at": starts[0]["at"], "healthy_at": healthy[0]["at"],
+            "warm_shutdown_at": warm[0]["at"], "memory_check_at": checks[-1]["at"],
+            "graceful_drain_seconds": (exit_at - _recycle_time(warm[0]["at"])).total_seconds(),
+            "maximum_drain_seconds": WORKER_RECYCLE_MAX_DRAIN_SECONDS,
+             "threshold_evidence": "reviewed script branch plus third-failure Docker health transition",
+             "schema_model_log_count": len(schema_logs), "schema_model_log_samples": schema_logs[:16],
+             "schema_model_log_samples_truncated": len(schema_logs) > 16,
+             "schema_model_log_evidence_sha256": hashlib.sha256(canonical_json_bytes(schema_logs)).hexdigest(),
+            "restart_record_sha256": event["message_sha256"],
+            "evidence_sha256": hashlib.sha256(canonical_json_bytes(
+                {"event": event, "events": events, "application": application,
+                 "journal": [{"at": row["at"], "sha256": hashlib.sha256(row["message"].encode()).hexdigest()}
+                             for row in journal]})).hexdigest()}
+
+
+def _retained_log_records(rows):
+    """Complete selected application records, with hashes of the original lines."""
+    record = []
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("text"), str)
+                or not isinstance(row.get("raw_sha256"), str)
+                or SHA256_RE.fullmatch(row["raw_sha256"]) is None):
+            raise DeploymentError("Retained finding record is incomplete")
+        if ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
+            if record:
+                yield record
+            record = []
+        if record or ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
+            record.append(row)
+    if record:
+        yield record
+
+
+ASSET_ERROR_FRAMES = tuple(line.split(":", 1) for line in """esi/openapi_clients.py:result
+esi/openapi_clients.py:_make_request
+tenacity/__init__.py:__call__
+tenacity/__init__.py:iter
+tenacity/__init__.py:<lambda>
+concurrent/futures/_base.py:result
+concurrent/futures/_base.py:__get_result
+tenacity/__init__.py:__call__
+esi/openapi_clients.py:__func
+aiopenapi3/request.py:request
+aiopenapi3/v30/glue.py:_process_request
+aiopenapi3/request.py:_raise_on_http_status
+memberaudit/models/characters.py:perform_update_with_error_logging
+memberaudit/models/characters.py:assets_build_list_from_esi
+memberaudit/managers/character_sections_1.py:fetch_from_esi
+memberaudit/models/characters.py:update_section_if_changed
+memberaudit/decorators.py:_wrapped_view
+memberaudit/managers/character_sections_1.py:_fetch_data_from_esi
+memberaudit/managers/character_sections_1.py:_fetching_asset_names_from_esi
+esi/openapi_clients.py:results
+buh_max_history/capture.py:result
+esi/openapi_clients.py:result""".splitlines())
+ASSET_TASK_FRAMES = tuple(line.split(":", 1) for line in """celery/app/trace.py:trace_task
+celery_once/tasks.py:__call__
+celery/app/trace.py:__protected_call__
+esi/decorators.py:wrapper
+memberaudit/tasks.py:assets_build_list_from_esi
+memberaudit/models/characters.py:perform_update_with_error_logging
+memberaudit/models/characters.py:perform_update_with_error_logging""".splitlines()) + ASSET_ERROR_FRAMES[13:]
+CALLBACK_LOOKUP_SHA256 = "3cb440117225d96aac40de9d417dc4481a9f5691480327eb383c8d4ccde2b681"
+
+
+def _asset_trace_frames(text):
+    frames = re.findall(r'  File "([^"]+)", line [0-9]+, in ([^\n]+)', text)
+    return tuple([path.split("site-packages/", 1)[-1].split("lib/python3.12/", 1)[-1], function]
+                 for path, function in frames)
+
+
+def _prove_retained_findings(report, review, config, proof):
+    """Only digest-pinned historical records with later/current success qualify.
+
+    A handled DEBUG lookup is distinct from an OAuth failure. Its normal redirect
+    or token-selection continuation and eventual successful authentication must
+    both be present; an initial login redirect alone cannot qualify a traceback.
+    """
+    if (report.get("schema_version") != 1 or report.get("scan_complete") is not True
+            or report.get("read_only") is not True or report.get("diagnostic_only") is not True
+            or report.get("errors") != [] or report.get("attempt_id") != review["attempt_id"]
+            or report.get("protected_state_unchanged") is not True
+            or any(report.get(key) is not False for key in (
+                "deployment_attempted", "tooling_installation_attempted", "supported_recovery_attempted",
+                "token_refresh_attempted", "memberaudit_mutation_attempted", "structures_mutation_attempted"))):
+        raise DeploymentError("Retained finding report identity or preservation differs")
+    if (not isinstance(proof, dict) or set(proof) != {"report_path", "report_sha256", "asset_task_id", "asset_error_at"}
+            or not isinstance(proof.get("report_path"), str) or not Path(proof["report_path"]).is_absolute()
+            or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None
+            or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", proof.get("asset_task_id", "")) is None):
+        raise DeploymentError("Retained finding selection differs")
+    for key in ("memberaudit_preserved", "memberaudit_preserved_after"):
+        preserved = report.get(key, {})
+        if (preserved.get("characters") != 87 or preserved.get("successful_sections") != 348
+                or preserved.get("auth_and_token_inventory_preserved") is not True
+                or preserved.get("older_sections_unchanged") is not True
+                or preserved.get("older_section_count") != 61):
+            raise DeploymentError("Retained finding Member Audit preservation differs")
+    for boundary in ("before_host", "after_host"):
+        host = report.get(boundary, {})
+        if (host.get("hold_sha256") != review["plan_sha256"] or host.get("platform_version") != "0.8.2"
+                or host.get("public_smoke_passed") is not True
+                or host.get("traffic_only_verified_previous_image") is not True):
+            raise DeploymentError("Retained finding production boundary differs")
+    selected = report.get("selected_character", {})
+    status, assets, identity = (selected.get(key, {}) for key in ("assets_status", "current_assets", "identity"))
+    if (selected.get("scan_complete") is not True or selected.get("errors") != []
+            or selected.get("later_successful_assets_run") is not True
+            or status.get("is_success") is not True or status.get("has_token_error") is not False
+            or status.get("error_length") != 0 or not status.get("content_hashes", [None])[0]
+            or assets.get("all_rows_metadata_valid") is not True
+            or not isinstance(assets.get("relationship_issues"), dict)
+            or any(assets["relationship_issues"].values())
+            or identity.get("is_disabled") is not False
+            or any(identity.get(key) is not True for key in (
+                "same_token_character", "same_token_owner", "same_token_user", "required_assets_scope_present"))
+            or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in (
+                "character_id", "memberaudit_character_pk", "token_pk", "auth_link_pk", "user_id"))):
+        raise DeploymentError("Recovered assets or existing credential evidence differs")
+    payloads = selected.get("historical_asset_payloads", []) + selected.get("later_asset_payloads", [])
+    if (not selected.get("historical_asset_payloads") or not selected.get("later_asset_payloads")
+            or not payloads or len(payloads) > 16
+            or any(any(row.get(key) is not True for key in (
+                "actual_hash_matches", "actual_size_matches", "format_valid")) for row in payloads)):
+        raise DeploymentError("Independent retained asset byte evidence is incomplete")
+    containers = {row["container_id"]: row["service"] for row in review["containers"]}
+    streams = report.get("logs", [])
+    if (not streams or any(stream.get("complete") is not True for stream in streams)
+            or any(stream["since"] != review["verification_since"] for stream in streams)):
+        raise DeploymentError("Retained finding log interval is incomplete")
+    for stream in streams:
+        service, separator, container = stream["source"].partition("/")
+        if not separator or containers.get(container) != service:
+            raise DeploymentError("Retained finding log container differs")
+    web = [stream for stream in streams if stream["source"].partition("/")[0] == config.gunicorn_service]
+    if len(web) != 1:
+        raise DeploymentError("Retained callback source is ambiguous")
+    http_sources = report.get("login_http", [])
+    if (len(http_sources) != 1 or http_sources[0].get("complete") is not True
+            or containers.get(http_sources[0].get("container_id")) != config.proxy_service):
+        raise DeploymentError("Retained callback HTTP evidence is incomplete")
+    http = http_sources[0]["rows"]
+    if any(row["status"] >= 400 for row in http):
+        raise DeploymentError("Retained login HTTP failure remains unresolved")
+    web_rows = web[0]["rows"]
+    if any(re.search(r"\b(?:ERROR|CRITICAL)\b", row["text"]) for row in web_rows):
+        raise DeploymentError("Retained login application failure remains unresolved")
+    records, warnings = {}, []
+    def add(source, record, warning):
+        key = (source, record[0]["raw_sha256"])
+        hashes = tuple(row["raw_sha256"] for row in record)
+        if len(hashes) > MAX_OWNER_RECORD_LINES:
+            raise DeploymentError("Retained finding record exceeds its bound")
+        records.setdefault(key, []).append(hashes)
+        if warning not in warnings:
+            warnings.append(warning)
+    name = re.escape(identity["character_name"])
+    asset_errors, task_errors = [], []
+    for stream in streams:
+        service = stream["source"].partition("/")[0]
+        if service != config.worker_service:
+            continue
+        for record in _retained_log_records(stream["rows"]):
+            header = record[0]["text"]
+            if not re.search(r"\bERROR(?: |/MainProcess\])", header):
+                continue
+            text = "\n".join(row["text"] for row in record)
+            if re.search(name + r" \(ID:" + str(identity["memberaudit_character_pk"])
+                         + r"\): assets: Error occurred: HTTPClientError: <HTTPClientError 404 "
+                         r"details=None error='Invalid IDs in the request' Headers\(", header):
+                aa, celery = ALLIANCEAUTH_LOG_HEADER_RE.match(header), CELERY_LOG_HEADER_RE.match(header)
+                if (_asset_trace_frames(text) != ASSET_ERROR_FRAMES
+                        or not ((aa is not None and aa["level"] == "ERROR"
+                                 and aa["component"] == "memberaudit.models.characters" and aa["source_line"] == "551")
+                                or (celery is not None and celery["level"] == "ERROR" and celery["process"] == "MainProcess"))
+                        or re.search(r"\b(?:invalid_grant|50013|PermissionError|403|500)\b", text)):
+                    raise DeploymentError("Retained asset-name traceback differs")
+                asset_errors.append((record, re.findall(r"\('x-esi-request-id', '([0-9a-f-]{36})'\)", header), stream["source"]))
+            elif re.search(r"Task memberaudit\.tasks\.assets_build_list_from_esi\[" + re.escape(proof["asset_task_id"]) + r"\] "
+                           r"raised unexpected: HTTPError\(\)$", header):
+                if (_asset_trace_frames(text) != ASSET_TASK_FRAMES
+                        or record[-1]["text"] != "aiopenapi3.errors.HTTPError"):
+                    raise DeploymentError("Retained asset task traceback differs")
+                task_errors.append((record, stream["source"]))
+    if (len(asset_errors) != 2 or len(task_errors) != 1
+            or len(asset_errors[0][1]) != 1 or asset_errors[0][1] != asset_errors[1][1]
+            or asset_errors[0][2] != asset_errors[1][2] or asset_errors[0][2] != task_errors[0][1]
+            or asset_errors[0][0][0]["at"] != proof["asset_error_at"]
+            or abs((_recycle_time(asset_errors[0][0][0]["at"]) - _recycle_time(task_errors[0][0][0]["at"])).total_seconds()) > 1
+            or _recycle_time(status["run_finished_at"]) <= _recycle_time(task_errors[0][0][0]["at"])
+            or _recycle_time(status["update_finished_at"]) <= _recycle_time(task_errors[0][0][0]["at"])):
+        raise DeploymentError("One exact asset-name incident and its later success are not proven")
+    asset_warning = ("recovered warning: exact historical asset-name Invalid IDs 404; "
+                     f"character {identity['character_id']} original {proof['asset_error_at']} "
+                     f"header {asset_errors[0][0][0]['raw_sha256']}; status {status['pk']} "
+                     f"later assets update {status['update_finished_at']} and run {status['run_finished_at']}")
+    for record, source in [(row[0], row[2]) for row in asset_errors] + task_errors:
+        add(source, record, asset_warning)
+    callbacks = 0
+    lookup = selected.get("installed_sources", {}).get("callback_lookup", {})
+    if (selected.get("versions", {}).get("django-esi") != "9.6.0"
+            or lookup.get("sha256") != CALLBACK_LOOKUP_SHA256):
+        raise DeploymentError("Installed handled callback lookup source differs")
+    for record in _retained_log_records(web_rows):
+        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record[0]["text"])
+        if header is None or "No callback for " not in record[0]["text"]:
+            continue
+        text = "\n".join(row["text"] for row in record)
+        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', text)
+        expected_frames = [(lookup["filename"], "29", "_check_callback"),
+            ("/usr/local/lib/python3.12/site-packages/django/db/models/manager.py", "87", "manager_method"),
+            ("/usr/local/lib/python3.12/site-packages/django/db/models/query.py", "635", "get")]
+        if (header.group("level") != "DEBUG" or header.group("component") != "esi.decorators"
+                or header.group("source_line") != "39" or len(record) != 11 or frames != expected_frames
+                or record[1]["text"] != "Traceback (most recent call last):"
+                or record[-1]["text"] != "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+                or len(record[0].get("session_sha256", [])) != 1):
+            raise DeploymentError("Handled callback traceback shape differs")
+        at = _recycle_time(record[0]["at"])
+        session = record[0]["session_sha256"]
+        following = [row for row in web_rows if row.get("session_sha256") == session
+            and at < _recycle_time(row["at"]) <= at + timedelta(hours=4)]
+        immediate = [row for row in following if _recycle_time(row["at"]) - at <= timedelta(seconds=5)]
+        redirected = any("Redirecting " in row["text"] and " to SSO." in row["text"] for row in immediate)
+        principal = record[0]["text"][header.end():].split(" session sha256:", 1)[0].removeprefix("No callback for ")
+        returned = any("Retrieved 2 tokens for " + principal + " session " in row["text"] for row in immediate)
+        choices = [row for row in web_rows if principal + " has selected token " in row["text"]
+                   and at < _recycle_time(row["at"]) <= at + timedelta(seconds=120 if returned else 1)]
+        selected_token = False
+        if len(choices) == 1:
+            choice_at = _recycle_time(choices[0]["at"])
+            selected_token = (any("[esi.decorators:159] Selected token fulfills requirements of view. Returning." in row["text"]
+                for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
+                and any("INFO [allianceauth.authentication.views:172] Changed user " + principal + " main character to " in row["text"]
+                    for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
+                and any(row["path"] == "/dashboard/" and row["status"] == 200
+                    and choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=10) for row in http))
+        complete = [row for row in following if "Got new token from " + principal + " session " in row["text"]
+            and ". Returning to view." in row["text"]]
+        redirect_http = any(row["path"] == "/sso/login" and row["status"] == 302
+            and at < _recycle_time(row["at"]) <= at + timedelta(seconds=1) for row in http)
+        login_complete = False
+        for completion in complete:
+            done = _recycle_time(completion["at"])
+            processed = any("[esi.views:91] Processed callback for " + principal + " session " in row["text"]
+                            and done - timedelta(seconds=2) <= _recycle_time(row["at"]) < done for row in following)
+            callback_http = any(row["path"] == "/sso/callback/" and row["status"] == 302
+                                and abs((_recycle_time(row["at"]) - done).total_seconds()) <= 2 for row in http)
+            dashboard = any(row["path"] == "/dashboard/" and row["status"] == 200
+                            and done < _recycle_time(row["at"]) <= done + timedelta(seconds=120) for row in http)
+            login_complete = login_complete or (processed and callback_http and dashboard
+                and (redirect_http or done - at < timedelta(seconds=120)))
+        # Initial auth and already-authenticated token selection are distinct.
+        # A delayed browser continuation is accepted only for this exact pinned
+        # historical record, with both its immediate normal redirect and its
+        # later same-session token return and successful HTTP completion.
+        if not ((redirected and login_complete) or selected_token):
+            raise DeploymentError("Handled callback successful continuation is incomplete")
+        add(web[0]["source"], record, "recovered warning: exact handled DEBUG CallbackRedirect lookup; "
+            f"original header {record[0]['raw_sha256']} at {record[0]['at']}; successful continuation retained")
+        callbacks += 1
+    if callbacks == 0:
+        raise DeploymentError("No exact handled callback recovery evidence")
+    return records, tuple(warnings)
+
+
+RETAINED_ASSETS_READ_CODE = """
+from datetime import datetime
+import hashlib
+import inspect
+import json
+from allianceauth.authentication.models import CharacterOwnership
+from django.db import connection, transaction
+from esi.models import Token
+from esi.decorators import _check_callback
+from memberaudit.models import Character, CharacterAsset, CharacterUpdateStatus
+
+def verify_retained_assets(identity, expected_status, expected_source):
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION READ ONLY')
+    with transaction.atomic():
+        member = Character.objects.select_related('eve_character').get(pk=identity['memberaudit_character_pk'])
+        link = CharacterOwnership.objects.get(pk=identity['auth_link_pk'], character=member.eve_character,
+                                               user_id=identity['user_id'])
+        token = Token.objects.get(pk=identity['token_pk'], character_id=identity['character_id'], user_id=link.user_id)
+        if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                or member.eve_character.character_name != identity['character_name']
+                or token.character_owner_hash != link.owner_hash
+                or not token.scopes.filter(name='esi-assets.read_assets.v1').exists()
+                or list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+                != identity['token_inventory']):
+            raise ValueError('Retained assets identity or existing token inventory changed')
+        status = CharacterUpdateStatus.objects.get(pk=expected_status['pk'], character=member, section='assets')
+        if (status.is_success is not True or status.has_token_error or status.error_message or not status.content_hash_1
+                or not status.run_started_at or not status.run_finished_at or status.run_finished_at < status.run_started_at
+                or status.run_finished_at < datetime.fromisoformat(expected_status['run_finished_at'].replace('Z','+00:00'))
+                or not status.update_finished_at
+                or status.update_finished_at < datetime.fromisoformat(expected_status['update_finished_at'].replace('Z','+00:00'))):
+            raise ValueError('Retained assets are currently unsuccessful')
+        rows = list(CharacterAsset.objects.filter(character=member).values('pk','item_id','quantity','parent_id',
+                     'eve_type_id','location_id')[:25001])
+        if len(rows) > 25000:
+            raise ValueError('Retained assets exceed bounded verification')
+        ids = [row['item_id'] for row in rows]
+        pks = {row['pk'] for row in rows}
+        if (len(ids) != len(set(ids)) or any(type(row['item_id']) is not int or row['item_id'] <= 0
+                or type(row['quantity']) is not int or row['quantity'] < 0
+                or row['parent_id'] is not None and (row['parent_id'] not in pks or row['parent_id'] == row['pk'])
+                for row in rows)):
+            raise ValueError('Retained assets row relationship is invalid')
+        for field in ('eve_type','location'):
+            expected = {row[field+'_id'] for row in rows if row[field+'_id'] is not None}
+            ordered, found = sorted(expected), set()
+            model = CharacterAsset._meta.get_field(field).remote_field.model
+            for offset in range(0,len(ordered),500):
+                found.update(model.objects.filter(pk__in=ordered[offset:offset+500]).values_list('pk',flat=True))
+            if found != expected:
+                raise ValueError('Retained assets foreign key is missing')
+        if hashlib.sha256(inspect.getsource(_check_callback).encode()).hexdigest() != expected_source:
+            raise ValueError('Installed handled callback source changed')
+    print('BUH_RETAINED_FINDINGS_CURRENT_BEGIN')
+    print(json.dumps({'read_only':True,'assets_successful':True,'assets_relationships_valid':True,
+                      'identity_and_token_inventory_preserved':True,'callback_source_verified':True}))
+    print('BUH_RETAINED_FINDINGS_CURRENT_END')
+"""
+
+
 class DockerHost:
     """Apply a verified release to the existing `/opt/aa-docker` layout."""
 
@@ -555,6 +2465,18 @@ class DockerHost:
         self.candidate_image_ids: dict[str, str] = {}
         self.auth_replica_counts: dict[str, int] = {}
         self.restart_baselines: dict[str, int] = {}
+        self.restart_baseline_services: dict[str, str] = {}
+        self.retained_restart_images: dict[str, str] = {}
+        self.retained_restart_started_at: dict[str, str] = {}
+        self.retained_verifier_review: dict | None = None
+        self.semantic_log_analysis: dict | None = None
+        self.worker_recycle_policy: dict | None = None
+        self.accepted_worker_recycles: dict[str, list[dict]] = {}
+        self.blocked_worker_recycles: dict[str, str] = {}
+        self.recovered_discord_429_hashes: set[str] = set()
+        self.recovered_discord_429_seen: dict[str, int] = {}
+        self.recovered_retained_log_records: dict[tuple[str, str], list[tuple[str, ...]]] = {}
+        self.recovered_retained_log_seen: dict[tuple[str, str, tuple[str, ...]], int] = {}
         self.live_replacement_started = False
         self.original_upstream: Path | None = None
         self.original_upstream_metadata: tuple[int, int, int] | None = None
@@ -627,6 +2549,8 @@ class DockerHost:
             },
             "previous_image_pins": dict(self.previous_image_pins),
             "auth_replica_counts": dict(self.auth_replica_counts),
+            "restart_baselines": dict(self.restart_baselines),
+            "restart_baseline_services": dict(self.restart_baseline_services),
             "previous_web_slots": list(self.previous_web_slots),
             "candidate_web_slots": list(self.candidate_web_slots),
             "original_local_settings_metadata": list(
@@ -754,7 +2678,8 @@ class DockerHost:
         }
         if (
             not isinstance(value, dict)
-            or set(value) != expected_keys
+            or set(value) not in (expected_keys, expected_keys | {
+                "restart_baselines", "restart_baseline_services"})
             or value["schema_version"] != RECOVERY_PLAN_SCHEMA_VERSION
             or value["status"] != "active"
             or not isinstance(value["attempt_id"], str)
@@ -935,6 +2860,10 @@ class DockerHost:
             host.static_assets_backup = backup / "static-assets.previous.tar"
         for name, item in flags.items():
             setattr(host, name, item)
+        host._hydrate_restart_baselines(value.get("restart_baselines", {}),
+                                       value.get("restart_baseline_services", {}))
+        if not host.restart_baselines:
+            host._load_retained_verifier_review(value, sha256_file(active))
         return host, value
 
     @classmethod
@@ -969,6 +2898,409 @@ class DockerHost:
                 return "A verified prior attempt left only a stale recovery marker."
         recovery = host.rollback(None, value["phase"])  # type: ignore[arg-type]
         return "Recovered an incomplete prior deployment before accepting new input: " + recovery
+
+
+    def _hydrate_restart_baselines(self, counts, services) -> None:
+        """Restore evidence, never learn a new baseline from current containers."""
+        expected = {*self.config.auth_services, self.config.database_service,
+                    self.config.redis_service, self.config.proxy_service}
+        if (not isinstance(counts, dict) or not isinstance(services, dict)
+                or set(counts) != set(services)
+                or len(counts) > MAX_SERVICE_REPLICAS * len(expected)
+                or any(not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None
+                       or type(value) is not int or not 0 <= value <= 2**31 - 1
+                       for key, value in counts.items())
+                or any(not isinstance(role, str) or role not in expected
+                       for role in services.values())):
+            raise DeploymentError("Retained restart baseline is malformed")
+        if counts:
+            required = {**self.auth_replica_counts, self.config.database_service: 1,
+                        self.config.redis_service: 1, self.config.proxy_service: 1}
+            if any(sum(role == item for item in services.values()) != number
+                   for role, number in required.items()):
+                raise DeploymentError("Retained restart baseline topology differs")
+        self.restart_baselines = dict(counts)
+        self.restart_baseline_services = dict(services)
+
+    def _load_retained_verifier_review(self, value, plan_digest, *, review_path=None) -> None:
+        """Legacy plans require separately reviewed, private, attempt-bound evidence."""
+        assert self.backup_path is not None
+        path = review_path or self.backup_path / "VERIFIER-REVIEW.json"
+        if not path.exists() and not path.is_symlink():
+            return
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+                or info.st_size > 64 * 1024
+                or (os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600))):
+            raise DeploymentError("Retained verifier review is unsafe")
+        try:
+            review = json.loads(path.read_text(encoding="ascii"))
+        except (OSError, ValueError) as error:
+            raise DeploymentError("Retained verifier review is unreadable") from error
+        self._apply_retained_verifier_review(review, value, plan_digest)
+
+    def _apply_retained_verifier_review(self, review, value, plan_digest) -> None:
+        """Validate the private reviewed document before any exception is usable."""
+        if self.retained_verifier_review != review:
+            self.accepted_worker_recycles = {}
+        fields = {"schema_version", "attempt_id", "plan_sha256", "host_evidence_sha256",
+                  "host_observed_at", "containers", "discord_429", "verification_since"}
+        if (not isinstance(review, dict)
+                or type(review.get("schema_version")) is not int
+                or review["schema_version"] not in {1, 2, 3, 4}
+                or set(review) != fields | ({"worker_memory_recycles"} if review["schema_version"] >= 2 else set())
+                | ({"retained_log_findings"} if review["schema_version"] == 3 else set())
+                | ({"semantic_recovery"} if review["schema_version"] == 4 else set())
+                or review["attempt_id"] != value["attempt_id"]
+                or review["plan_sha256"] != plan_digest
+                or not isinstance(review["host_evidence_sha256"], str)
+                or SHA256_RE.fullmatch(review["host_evidence_sha256"]) is None
+                or not isinstance(review["containers"], list)):
+            raise DeploymentError("Retained verifier review identity differs")
+        try:
+            observed = datetime.fromisoformat(review["host_observed_at"])
+            since = datetime.fromisoformat(review["verification_since"])
+            if observed.utcoffset() is None or since.utcoffset() is None or since > observed:
+                raise ValueError()
+        except (TypeError, ValueError) as error:
+            raise DeploymentError("Retained verifier review time boundary is invalid") from error
+        counts, services, images, started = {}, {}, {}, {}
+        for row in review["containers"]:
+            if (not isinstance(row, dict)
+                    or set(row) != {"container_id", "service", "image_id", "restart_count", "started_at"}
+                    or not isinstance(row["image_id"], str)
+                    or SAFE_IMAGE_ID_RE.fullmatch(row["image_id"]) is None
+                    or not isinstance(row["container_id"], str)
+                    or not isinstance(row["service"], str)
+                    or not isinstance(row["started_at"], str)
+                    or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", row["started_at"]) is None
+                    or row["container_id"] in counts
+                    or row["service"] in self.previous_images
+                    and row["image_id"] != self.previous_images[row["service"]][0]):
+                raise DeploymentError("Retained verifier review container identity differs")
+            counts[row["container_id"]] = row["restart_count"]
+            services[row["container_id"]] = row["service"]
+            images[row["container_id"]] = row["image_id"]
+            started[row["container_id"]] = row["started_at"]
+        self._hydrate_restart_baselines(counts, services)
+        if not counts:
+            raise DeploymentError("Retained verifier review baseline is empty")
+        self.retained_restart_images = images
+        self.retained_restart_started_at = started
+        self.retained_verifier_review = review
+        self.worker_recycle_policy = review.get("worker_memory_recycles")
+        if self.worker_recycle_policy is not None:
+            _validate_worker_recycle_policy(self.worker_recycle_policy, review["containers"], self.config.worker_service)
+        elif review["schema_version"] >= 2:
+            raise DeploymentError("Reviewed worker recycle policy is missing")
+        if review["schema_version"] == 3:
+            proof = review["retained_log_findings"]
+            if (not isinstance(proof, dict)
+                    or set(proof) != {"report_path", "report_sha256", "asset_task_id", "asset_error_at"}
+                    or not isinstance(proof["report_path"], str) or not Path(proof["report_path"]).is_absolute()
+                    or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None
+                    or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", proof.get("asset_task_id", "")) is None):
+                raise DeploymentError("Reviewed retained log evidence is malformed")
+            _recycle_time(proof["asset_error_at"])
+        if review["schema_version"] == 4:
+            proof = review["semantic_recovery"]
+            if (not isinstance(proof, dict) or set(proof) != {"report_path", "report_sha256"}
+                    or not isinstance(proof["report_path"], str) or not Path(proof["report_path"]).is_absolute()
+                    or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None):
+                raise DeploymentError("Complete semantic recovery proof is malformed")
+        self.log_since = review["verification_since"]
+
+    def _verified_retained_log_findings(self) -> tuple[str, ...]:
+        self.recovered_retained_log_records = {}
+        self.recovered_retained_log_seen = {}
+        review = self.retained_verifier_review
+        if review is None or "retained_log_findings" not in review:
+            return ()
+        proof = review["retained_log_findings"]
+        raw = self._worker_recycle_private_bytes(Path(proof["report_path"]), 2 * 1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != proof["report_sha256"]:
+            raise DeploymentError("Reviewed retained log report digest changed")
+        try:
+            report = json.loads(raw)
+            records, warnings = _prove_retained_findings(report, review, self.config, proof)
+            selected = report["selected_character"]
+            code = (RETAINED_ASSETS_READ_CODE + "\nverify_retained_assets(" + repr(selected["identity"]) + ","
+                    + repr(selected["assets_status"]) + "," + repr(CALLBACK_LOOKUP_SHA256) + ")")
+            current = self._manage_live("shell", "--no-imports", "-c", code,
+                                        context="Read-only current retained assets and handled callback proof")
+            begin, end = "BUH_RETAINED_FINDINGS_CURRENT_BEGIN\n", "\nBUH_RETAINED_FINDINGS_CURRENT_END"
+            if current.count(begin) != 1 or current.count(end) != 1:
+                raise DeploymentError("Current retained log recovery proof is incomplete")
+            result = json.loads(current.split(begin, 1)[1].split(end, 1)[0])
+            expected = {"read_only", "assets_successful", "assets_relationships_valid",
+                        "identity_and_token_inventory_preserved", "callback_source_verified"}
+            if set(result) != expected or any(value is not True for value in result.values()):
+                raise DeploymentError("Current retained log recovery proof failed")
+        except (KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Reviewed retained log recovery evidence is invalid") from error
+        self.recovered_retained_log_records = records
+        return warnings
+
+    def _worker_recycle_private_bytes(self, path: Path, maximum: int) -> bytes:
+        """Root-owned read only; never execute or edit the installed healthcheck."""
+        if not path.is_absolute() or ".." in path.parts:
+            raise DeploymentError("Worker recycle evidence path is invalid")
+        for parent in reversed(path.parents):
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or parent.is_symlink()
+                    or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+                raise DeploymentError("Worker recycle evidence ancestor is unsafe")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+                    or stat.S_IMODE(before.st_mode) & 0o022 or before.st_size > maximum):
+                raise DeploymentError("Worker recycle evidence is unsafe")
+            raw = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            if (len(raw) != before.st_size or (before.st_ino, before.st_mtime_ns, before.st_size)
+                    != (after.st_ino, after.st_mtime_ns, after.st_size)):
+                raise DeploymentError("Worker recycle evidence changed during read")
+            return raw
+
+    def _worker_recycle_journal(self, since, until, *, daemons_only=False):
+        arguments = ["journalctl", "--since", _recycle_time(since).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                     "--until", _recycle_time(until).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                     "--no-pager", "--output=json"]
+        if daemons_only:
+            arguments.extend(("-u", "docker.service", "-u", "containerd.service"))
+        stream = self._stream_log_lines(arguments, deadline=time.monotonic() + self.config.command_timeout_seconds,
+                                        context="Complete retained worker recycle journal")
+        rows, consumed = [], 0
+        for line in stream:
+            consumed += len(line.encode())
+            if len(rows) >= 30000 or consumed > 32 * 1024 * 1024:
+                raise DeploymentError("Worker recycle journal interval exceeds safe bounds")
+            try:
+                record = json.loads(line)
+                message, boot = record["MESSAGE"], record["_BOOT_ID"]
+                if not isinstance(message, str) or boot != self.worker_recycle_policy["host_boot_id"]:
+                    raise ValueError()
+                at = datetime.fromtimestamp(int(record["__REALTIME_TIMESTAMP"]) / 1e6, timezone.utc).isoformat()
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeploymentError("Worker recycle journal is incomplete or host identity changed") from error
+            rows.append({"at": at, "message": message})
+        return rows
+
+    def _worker_recycle_runtime(self, container):
+        try:
+            raw = self._run(["docker", "inspect", "--format", WORKER_RECYCLE_INSPECT, container],
+                            bounded_output=True, context="Worker recycle immutable runtime identity")
+            identity, name, image, count, state, labels, check, policy, mounts = json.loads(raw)
+            expected = self.worker_recycle_policy
+            if (identity != container or name != "/" + expected["workers"].get(container, "")
+                    or image != self.retained_restart_images[container]
+                    or type(count) is not int or not 0 <= count <= 2**31 - 1
+                    or not isinstance(state, dict) or state.get("Status") != "running"
+                    or state.get("OOMKilled") is not False or type(state.get("ExitCode")) is not int
+                    or state["ExitCode"] != 0 or state.get("Error")
+                    or not isinstance(state.get("Health"), dict) or state["Health"].get("Status") != "healthy"
+                    or not isinstance(labels, dict) or labels.get("com.docker.compose.service") != self.config.worker_service
+                    or not isinstance(check, dict)
+                    or {key: check.get(key) for key in WORKER_MEMORY_CHECK} != WORKER_MEMORY_CHECK
+                    or policy != {"Name": "always", "MaximumRetryCount": 0}
+                    or not isinstance(mounts, list)
+                    or [{key: row.get(key) for key in ("Source", "Destination", "RW")} for row in mounts
+                        if row.get("Destination") == "/memory_check.sh"]
+                    != [{"Source": str(WORKER_MEMORY_SCRIPT), "Destination": "/memory_check.sh", "RW": True}]):
+                raise ValueError()
+            _recycle_time(state["StartedAt"])
+            _recycle_time(state["FinishedAt"])
+            return {"container_id": identity, "image_id": image, "restart_count": count,
+                    "started_at": state["StartedAt"], "finished_at": state["FinishedAt"]}
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Worker recycle runtime identity/image/health/configuration changed") from error
+
+    def _worker_recycle_store(self, name, start, end):
+        """Read only the indexed lifecycle rows, not the entire archive/database."""
+        path = WORKER_RESTART_STORE
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise DeploymentError("Worker recycle diagnostic store is unsafe")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            meta = dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('store_id','source:docker-event:last_success')"))
+            if (meta.get("store_id") != self.worker_recycle_policy["diagnostics_store_id"]
+                    or _recycle_time(meta.get("source:docker-event:last_success")) < _recycle_time(end)):
+                raise DeploymentError("Worker recycle Docker event capture is missing or has not caught up")
+            gaps = list(db.execute("SELECT source,reason FROM gaps WHERE at>=? AND at<=?", (start, end)))
+            if any(source == "docker-event" for source, _ in gaps):
+                raise DeploymentError("Worker recycle Docker event evidence has a coverage gap")
+            cursor = db.execute("SELECT at,service,message FROM logs WHERE service=? AND source='docker-event' "
+                                "AND at>=? AND at<=? ORDER BY at,id LIMIT 2001", (name, start, end))
+            events = []
+            import zlib
+            for at, service, blob in cursor:
+                if len(events) >= 2000:
+                    raise DeploymentError("Worker recycle Docker event interval exceeds safe bounds")
+                decoder = zlib.decompressobj()
+                raw = decoder.decompress(blob, 4097)
+                if len(raw) > 4096 or not decoder.eof:
+                    raise DeploymentError("Worker recycle Docker event is unreadable")
+                events.append({"at": at, "service": service, "message": raw.decode("utf-8")})
+            after = path.lstat()
+            if (info.st_ino, info.st_dev) != (after.st_ino, after.st_dev):
+                raise DeploymentError("Worker recycle diagnostic store identity changed")
+            return events
+
+    def _worker_recycle_application(self, container, start, end):
+        rows, size, count = [], 0, 0
+        for line in self._stream_log_lines(
+                ["docker", "logs", "--timestamps", f"--since={start}", f"--until={end}", container],
+                deadline=time.monotonic() + self.config.command_timeout_seconds,
+                context="Complete worker recycle application interval"):
+            count += 1
+            size += len(line.encode())
+            if count > 100000 or size > 64 * 1024 * 1024:
+                raise DeploymentError("Worker recycle application interval exceeds safe bounds")
+            at, separator, message = line.partition(" ")
+            if not separator:
+                raise DeploymentError("Worker recycle application log has no Docker timestamp")
+            _recycle_time(at)
+            if message == "worker: Warm shutdown (MainProcess)":
+                rows.append({"at": at, "kind": "warm", "sha256": hashlib.sha256(message.encode()).hexdigest()})
+            elif _is_esi_error_schema_log(message, worker=True):
+                # Use the same precise model-name classification as the existing
+                # health-log gate, and retain its evidence in the recycle proof.
+                rows.append({"at": at, "kind": "schema_model_listing",
+                             "sha256": hashlib.sha256(message.encode()).hexdigest()})
+            elif FATAL_LOG_RE.search(message) or re.search(
+                    r"\b(?:SIGTERM|SIGINT|SIGKILL|FATAL)\b|Cold shutdown|"
+                    r"Connection (?:lost|refused)|Cannot connect|broker.*disconnect", message, re.I):
+                # A distinct failure in this narrow shutdown interval needs its
+                # own investigation; do not silently call it a memory recycle.
+                # Use the health gate's existing severity-token rule: metadata
+                # names such as X-Esi-Error-Limit are not severity words. Actual
+                # ERROR/traceback/permission failures anywhere still conflict.
+                rows.append({"at": at, "kind": "conflicting", "sha256": hashlib.sha256(message.encode()).hexdigest()})
+        return rows
+
+    def _worker_recycle_actions(self, start, end):
+        directory = Path("/opt/aa-docker/conf/buh-vps-health/run/actions")
+        if not directory.exists():
+            return
+        paths = list(directory.glob("*.json"))
+        if len(paths) > 2000:
+            raise DeploymentError("Worker recycle host action inventory exceeds safe bounds")
+        for path in paths:
+            value = json.loads(self._worker_recycle_private_bytes(path, 65536))
+            at = next((value.get(key) for key in ("accepted_at", "at", "started_at", "requested_at", "created_at")
+                       if isinstance(value.get(key), str)), None)
+            if at is None:
+                raise DeploymentError("Worker recycle host action has no verifiable time boundary")
+            finished = value.get("finished_at") or datetime.now(timezone.utc).isoformat()
+            if _recycle_time(at) <= _recycle_time(end) and _recycle_time(finished) >= _recycle_time(start):
+                raise DeploymentError("Worker recycle overlaps a host-agent control action")
+
+    def _verify_retained_worker_recycles(self, container, count, started_at):
+        """Keep the reviewed baseline fixed; prove every later restart independently."""
+        policy = self.worker_recycle_policy
+        if (policy is None or container not in policy["workers"]
+                or self.restart_baseline_services.get(container) != self.config.worker_service
+                or type(count) is not int or not 0 < count - self.restart_baselines.get(container, count) <= 20):
+            raise DeploymentError("Unreviewed worker restart remains blocking")
+        current = self._worker_recycle_runtime(container)
+        if (current["restart_count"], current["started_at"]) != (count, started_at):
+            raise DeploymentError("Worker restarted during recycle verification")
+        script = self._worker_recycle_private_bytes(WORKER_MEMORY_SCRIPT, 4096)
+        if hashlib.sha256(script).hexdigest() != policy["script_sha256"]:
+            raise DeploymentError("Installed worker memory healthcheck changed")
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
+        if boot != policy["host_boot_id"]:
+            raise DeploymentError("Host reboot invalidated worker recycle evidence")
+        for unit, baseline in policy["daemons"].items():
+            raw = self._run(["systemctl", "show", unit, "--property=MainPID,ExecMainStartTimestampMonotonic,ActiveState,SubState"],
+                            bounded_output=True, context="Worker recycle daemon continuity")
+            daemon = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+            if any(daemon.get(key) != value for key, value in baseline.items()) or (
+                    daemon.get("ActiveState"), daemon.get("SubState")) != ("active", "running"):
+                raise DeploymentError("Docker/containerd restart invalidated worker recycle evidence")
+        previous = self.accepted_worker_recycles.get(container, [])
+        if (previous and previous[-1]["restart_count"] == count
+                and _recycle_time(current["finished_at"]) == _recycle_time(previous[-1]["exited_at"])
+                and 0 <= (_recycle_time(previous[-1]["started_event_at"]) - _recycle_time(started_at)).total_seconds() <= 2
+                and self._worker_recycle_runtime(container) == current):
+            return tuple(previous)
+        observed = self.retained_verifier_review["host_observed_at"]
+        now = datetime.now(timezone.utc).isoformat()
+        events = []
+        for row in self._worker_recycle_journal(observed, now, daemons_only=True):
+            if 'msg="restarting container"' not in row["message"] or container not in row["message"]:
+                continue
+            match = WORKER_RESTART_RECORD.search(row["message"])
+            if match is None:
+                raise DeploymentError("Unknown Docker restart record remains blocking")
+            events.append({"container_id": match[1], "exit_code": int(match[2]), "exited_at": match[3],
+                           "manual_restart": match[4] == "true", "restart_count": int(match[5]),
+                           "restart_policy": match[6], "at": row["at"],
+                           "message_sha256": hashlib.sha256(row["message"].encode()).hexdigest()})
+        required = list(range(self.restart_baselines[container] + 1, count + 1))
+        if [row["restart_count"] for row in events] != required:
+            raise DeploymentError("Not every additional worker restart has retained causal evidence")
+        accepted = []
+        for event in events:
+            exit_at = _recycle_time(event["exited_at"])
+            start, end = ((exit_at + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                          for offset in (-270, 45))
+            records = self._worker_recycle_store(policy["workers"][container], start, end)
+            journal = self._worker_recycle_journal(start, end)
+            application = self._worker_recycle_application(container, start, end)
+            self._worker_recycle_actions(start, end)
+            proof = _prove_worker_recycle(event, records, application, journal, container=container,
+                                         name=policy["workers"][container], observed=observed)
+            proof["image_id"] = current["image_id"]
+            accepted.append(proof)
+        last_start = _recycle_time(accepted[-1]["started_event_at"])
+        if (not 0 <= (last_start - _recycle_time(started_at)).total_seconds() <= 2
+                or _recycle_time(current["finished_at"]) != _recycle_time(events[-1]["exited_at"])
+                or self._worker_recycle_runtime(container) != current):
+            raise DeploymentError("Worker current state does not match the last proven recycle")
+        self.accepted_worker_recycles[container] = accepted
+        return tuple(accepted)
+
+    def _verified_discord_429(self) -> tuple[str, ...]:
+        """Re-read the original bounded request, retaining its recovered warning."""
+        review = self.retained_verifier_review
+        if review is None or review["discord_429"] is None:
+            self.recovered_discord_429_hashes = set()
+            return ()
+        proof = review["discord_429"]
+        if (not isinstance(proof, dict)
+                or set(proof) != {"service", "container_id", "since", "until", "username",
+                                 "guild_id", "member_id", "request_id", "retry_request_id",
+                                 "error_line_sha256"}
+                or proof["service"] != "allianceauth_worker_services"
+                or self.restart_baseline_services.get(proof["container_id"]) != proof["service"]):
+            raise DeploymentError("Retained Discord review identity differs")
+        expected = {proof["service"]: sum(role == proof["service"]
+                    for role in self.restart_baseline_services.values())}
+        if not self._containers_healthy(expected, zero_restart_services=set()):
+            raise DeploymentError("Retained Discord runtime identity or restart changed")
+        deadline = time.monotonic() + self.config.command_timeout_seconds
+        stream = self._stream_log_lines(
+            ["docker", "logs", f"--since={proof['since']}", f"--until={proof['until']}",
+             proof["container_id"]],
+            deadline=deadline, context="Reviewed Discord nickname recovery evidence")
+        lines, size = [], 0
+        try:
+            for line in stream:
+                size += len(line.encode("utf-8")) + 1
+                if size > LOG_READ_BYTES or len(lines) >= 2048:
+                    raise DeploymentError("Retained Discord evidence exceeds its safe bound")
+                lines.append(line)
+        finally:
+            stream.close()
+        hashes, warning = _prove_discord_nickname_429(lines, proof)
+        self.recovered_discord_429_hashes = hashes
+        self.recovered_discord_429_seen = {}
+        return (warning,)
 
     @property
     def compose_prefix(self) -> list[str]:
@@ -2407,6 +4739,7 @@ class DockerHost:
         reference_images: dict[str, str] = {}
         replica_counts: dict[str, int] = {}
         restart_baselines: dict[str, int] = {}
+        restart_services: dict[str, str] = {}
         seen_containers: set[str] = set()
         for service in self.config.auth_services:
             image_ids: set[str] = set()
@@ -2451,6 +4784,7 @@ class DockerHost:
                 image_ids.add(image_id)
                 image_references.add(reference)
                 restart_baselines[container] = int(parts[3])
+                restart_services[container] = service
             if len(image_ids) != 1:
                 raise DeploymentError(
                     f"Live replicas for service {service} do not share one image"
@@ -2470,9 +4804,11 @@ class DockerHost:
         self.previous_images = service_images
         self.auth_replica_counts = replica_counts
         self.restart_baselines = restart_baselines
+        self.restart_baseline_services = restart_services
 
     def _capture_infrastructure_restart_baselines(self) -> None:
         baselines = dict(self.restart_baselines)
+        services = dict(self.restart_baseline_services)
         for service in (
             self.config.database_service,
             self.config.redis_service,
@@ -2501,7 +4837,9 @@ class DockerHost:
                     f"Infrastructure service {service} is not stable"
                 )
             baselines[containers[0]] = int(parts[1])
+            services[containers[0]] = service
         self.restart_baselines = baselines
+        self.restart_baseline_services = services
 
     def _capture_candidate_images(self, bundle: ValidatedBundle) -> None:
         if set(self.previous_images) != set(self.config.auth_services):
@@ -4365,14 +6703,30 @@ class DockerHost:
                 )
                 if len(ids) != expected_count:
                     return False
+                retained = {identity for identity, role in self.restart_baseline_services.items()
+                            if role == service}
+                if (service not in zero_restart_services and retained
+                        and set(ids) != retained):
+                    return False
                 for container in ids:
+                    runtime_started = None
+                    if container in self.retained_restart_images:
+                        image = self._run(
+                            ["docker", "inspect", "--format",
+                             "{{.Image}}|{{.State.StartedAt}}|{{.State.OOMKilled}}", container],
+                            context=f"Retained restart image identity for {service}").strip()
+                        image_parts = image.split("|")
+                        if (len(image_parts) != 3 or image_parts[0] != self.retained_restart_images[container]
+                                or image_parts[2] != "false"):
+                            return False
+                        runtime_started = image_parts[1]
                     state = self._run(
                         [
                             "docker",
                             "inspect",
                             "--format",
                             "{{.State.Status}}|{{.RestartCount}}|"
-                            "{{if .State.Health}}{{.State.Health.Status}}"
+                            '{{with index .State "Health"}}{{.Status}}'
                             "{{else}}none{{end}}",
                             container,
                         ],
@@ -4385,19 +6739,24 @@ class DockerHost:
                         or parts[0] != "running"
                         or restart_count is None
                         or parts[2] not in {"none", "healthy"}
+                        or (self.worker_recycle_policy is not None
+                            and container in self.worker_recycle_policy["workers"] and parts[2] != "healthy")
                         or (
                             service in zero_restart_services
                             and restart_count != 0
                         )
-                        or (
-                            service not in zero_restart_services
-                            and self.restart_baselines.get(container)
-                            != restart_count
-                        )
                     ):
                         return False
+                    if service not in zero_restart_services and (
+                            self.restart_baselines.get(container) != restart_count
+                            or runtime_started is not None
+                            and runtime_started != self.retained_restart_started_at[container]):
+                        self._verify_retained_worker_recycles(container, restart_count, runtime_started)
             return True
-        except DeploymentError:
+        except (DeploymentError, OSError, sqlite3.Error) as error:
+            if self.worker_recycle_policy is not None:
+                self.blocked_worker_recycles[locals().get("container", "discovery")] = (
+                    str(error)[:200] if isinstance(error, DeploymentError) else type(error).__name__)
             return False
 
     def replace_workers(self, bundle: ValidatedBundle) -> None:
@@ -4960,12 +7319,173 @@ class DockerHost:
                         "Retained log incident spool failed; verification incomplete"
                     ) from exc
 
+    def _recover_existing_location(self):
+        expected = self._semantic_recovery_proof()["location_recovery"]
+        code = EXISTING_LOCATION_RECOVERY_CODE + "\nrecover_existing_location(" + repr(expected) + ")"
+        if len(code.encode()) > 100 * 1024:
+            raise DeploymentError("Existing LOCATION recovery input exceeds its bound")
+        raw = self._run([*self.compose_prefix, "exec", "-T", self.config.gunicorn_service,
+                         "python3", self.config.manage_py, "shell", "--no-imports", "-c", code], timeout=195,
+                        context="One authorized native existing-token LOCATION recovery")
+        begin, end = "BUH_EXISTING_LOCATION_RECOVERY_BEGIN\n", "\nBUH_EXISTING_LOCATION_RECOVERY_END"
+        if raw.count(begin) != 1 or raw.count(end) != 1:
+            raise DeploymentError("Existing LOCATION recovery returned incomplete evidence")
+        return json.loads(raw.split(begin, 1)[1].split(end, 1)[0])
+
+    def _semantic_recovery_proof(self):
+        proof = self.retained_verifier_review["semantic_recovery"]
+        raw = self._worker_recycle_private_bytes(Path(proof["report_path"]), 16 * 1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != proof["report_sha256"]:
+            raise DeploymentError("Complete semantic recovery evidence digest differs")
+        try:
+            report = json.loads(raw)
+            summary = report["reviewed_summary"]
+            if (report["schema_version"] != 1 or summary["complete_scan"] is not True
+                    or summary["analysis_complete"] is not True or summary["total_candidate_findings"] <= 0
+                    or summary["unresolved_count"] != 0 or summary["unknown_count"] != 0
+                    or report["original_report_sha256"] != report["state"]["complete_retained_report_sha256"]):
+                raise ValueError()
+            for name in report["state"]["sources"]:
+                _semantic_source(report["state"]["sources"], name)
+            if _semantic_stamp(report["state"]["interval"]["since"]) != _semantic_stamp(self.log_since):
+                raise ValueError()
+            expected = {row["container_id"] for row in self.retained_verifier_review["containers"]}
+            reviewed = {identity for value in report["state"]["source_container_bindings"].values()
+                        for identity in value["reviewed_ids"]}
+            if expected != reviewed:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Complete semantic recovery evidence is malformed") from error
+        return report
+
+    def _semantic_read_current(self, state):
+        expected = {key: state[key] for key in ("inventory_before", "sections", "refineries",
+                                                 "discord_guild_id", "discord_members")}
+        expected["sources"] = {name: {key: source[key] for key in ("filename", "sha256")}
+                               for name, source in state["sources"].items()}
+        code = SEMANTIC_CURRENT_READ_CODE + "\nemit_semantic_current(" + repr(expected) + ")"
+        if len(code.encode()) > 100 * 1024:
+            raise DeploymentError("Native semantic recovery read exceeds its argument bound")
+        raw = self._manage_live("shell", "--no-imports", "-c", code,
+                                context="Complete read-only native semantic recovery state")
+        begin, end = "BUH_SEMANTIC_CURRENT_BEGIN\n", "\nBUH_SEMANTIC_CURRENT_END"
+        if raw.count(begin) != 1 or raw.count(end) != 1:
+            raise DeploymentError("Native semantic recovery state is incomplete")
+        current = json.loads(raw.split(begin, 1)[1].split(end, 1)[0])
+        if (current.get("read_only") is not True or current.get("complete") is not True
+                or current.get("source_hashes") != {name: source["sha256"] for name, source in state["sources"].items()}
+                or not current.get("owners")
+                or any(row.get("healthy") is not True or row.get("credentials_valid") is not True for row in current["owners"])):
+            raise DeploymentError("Current native semantic recovery health or source proof failed")
+        return {**state, **{key: current[key] for key in ("observed_at", "owners", "sections", "refineries", "discord_members")},
+                "identity_preserved": True, "credentials_valid": True}
+
+    def _scan_semantic_logs(self, services_and_slots):
+        """Use sealed complete history, then read every source through one fresh cutoff."""
+        report = self._semantic_recovery_proof()
+        state = {**report["state"], "proxy_service": self.config.proxy_service}
+        archive = report["signal_archive"]
+        name = archive.get("filename", "")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,150}\.ndjson\.gz", name) is None:
+            raise DeploymentError("Reviewed signal archive name is malformed")
+        path = Path(self.retained_verifier_review["semantic_recovery"]["report_path"]).parent / name
+        compressed = self._worker_recycle_private_bytes(path, 64 * 1024 * 1024)
+        if len(compressed) != archive["stored_bytes"] or hashlib.sha256(compressed).hexdigest() != archive["sha256"]:
+            raise DeploymentError("Complete reviewed signal archive identity differs")
+        cutoff = datetime.now(timezone.utc).isoformat()
+        since = state["interval"]["until"]
+        sources = {row["source"] for row in report["source_exports"]}
+        expected = {row["service"] + "/" + row["container_id"] for row in self.retained_verifier_review["containers"]}
+        for slot in services_and_slots:
+            if slot not in self.config.auth_services and slot not in {
+                    self.config.database_service, self.config.redis_service, self.config.proxy_service}:
+                matching = {identity for identity in sources if identity.startswith(slot + "/")}
+                if not matching:
+                    raise DeploymentError("Retained safety-slot semantic source is missing")
+                expected.update(matching)
+        if not expected <= sources:
+            raise DeploymentError("Complete semantic source coverage differs")
+        for service in {row["service"] for row in self.retained_verifier_review["containers"]}:
+            configured = {row["container_id"] for row in self.retained_verifier_review["containers"] if row["service"] == service}
+            if set(self._running_service_containers(service, context="Complete semantic source identities")) != configured:
+                raise DeploymentError("Complete semantic source container identity changed")
+        coverage = {}
+        with RetainedSemanticAnalyzer(state) as analyzer:
+            measured, lines, checksum = 0, 0, hashlib.sha256()
+            deadline = time.monotonic() + self.config.command_timeout_seconds * 4
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+                    while True:
+                        line = stream.readline(1024 * 1024 + 1)
+                        if not line:
+                            break
+                        if len(line) > 1024 * 1024 or time.monotonic() > deadline:
+                            raise DeploymentError("Complete reviewed signal archive read exceeded its bound")
+                        measured += len(line)
+                        lines += 1
+                        if measured > archive["source_bytes"]:
+                            raise DeploymentError("Complete reviewed signal archive expands beyond its identity")
+                        checksum.update(line)
+                        record = json.loads(line)
+                        if record["source"] not in sources or not (
+                                _semantic_stamp(state["interval"]["since"]) <= _semantic_stamp(record["first_at"])
+                                <= _semantic_stamp(since)):
+                            raise DeploymentError("Reviewed signal record is outside the retained interval")
+                        analyzer.feed(record)
+                if (measured != archive["source_bytes"] or lines != archive["record_count"]
+                        or checksum.hexdigest() != archive["uncompressed_sha256"]):
+                    raise DeploymentError("Complete reviewed signal archive EOF proof differs")
+                for capture in report["retained_captures"]:
+                    analyzer.feed(capture)
+            except (OSError, EOFError, KeyError, ValueError, DeploymentError) as error:
+                analyzer.ledger.complete_scan = analyzer.ledger.analysis_complete = False
+                analyzer.ledger.add("unreadable_retained_evidence", "unknown",
+                                    evidence_id="reviewed-signal-archive", reason=type(error).__name__)
+            for source in sorted(sources):
+                service, identity = source.split("/", 1)
+                if re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+                    raise DeploymentError("Complete semantic container identity is malformed")
+                stats = {"physical_lines": 0, "read_complete": False}
+                coverage[source] = stats
+                deadline = time.monotonic() + self.config.command_timeout_seconds
+                stream = self._stream_log_lines(["docker", "logs", "--timestamps", "--since="+since,
+                                                "--until="+cutoff, identity], deadline=deadline,
+                                                context="Complete current semantic logs for " + service)
+                try:
+                    for record in _semantic_log_records(stream, source, stats=stats, deadline=deadline):
+                        analyzer.feed(record)
+                    stats["read_complete"] = True
+                except DeploymentError as error:
+                    analyzer.ledger.complete_scan = analyzer.ledger.analysis_complete = False
+                    analyzer.ledger.add("unreadable_current_source", "unknown", evidence_id=source, reason=type(error).__name__)
+                finally:
+                    stream.close()
+            try:
+                analyzer.state = self._semantic_read_current(state)
+            except (DeploymentError, KeyError, TypeError, ValueError) as error:
+                analyzer.ledger.analysis_complete = False
+                analyzer.ledger.add("current_native_state_unproven", "unresolved",
+                                    evidence_id="native-current-read", reason=type(error).__name__)
+            summary = analyzer.finish()
+            summary.update(original_reviewed_summary=report["reviewed_summary"], original_report_sha256=report["original_report_sha256"],
+                           reviewed_signal_archive_sha256=archive["sha256"], current_interval={"since": since, "until": cutoff},
+                           source_coverage=coverage, native_observed_at=analyzer.state["observed_at"])
+            self.semantic_log_analysis = summary
+            analyzer.ledger.require_complete_recovery()
+        return tuple("recovered warning: " + family + " (" + str(counts.get("recovered", counts.get("handled", 0))) + ")"
+                     for family, counts in summary["counts_by_semantic_family"].items()
+                     if counts.get("recovered", 0) or counts.get("handled", 0))
+
     def _scan_new_logs(
         self,
         services_and_slots: Sequence[str],
         *,
         owner_transition_phase: str | None = None,
     ) -> tuple[str, ...]:
+        if self.retained_verifier_review is not None and self.retained_verifier_review.get("schema_version") == 4:
+            if owner_transition_phase is not None:
+                raise DeploymentError("Complete semantic recovery does not authorize owner transition exceptions")
+            return self._scan_semantic_logs(services_and_slots)
         infrastructure = (
             self.config.proxy_service,
             self.config.database_service,
@@ -5054,8 +7574,20 @@ class DockerHost:
                         )
                     )
                 individually_scanned.add(service)
+        recovered_findings = self._verified_retained_log_findings()
+        finding_services = {source.partition("/")[0] for source, _ in self.recovered_retained_log_records}
         for service in service_set:
             if service in individually_scanned:
+                continue
+            if service in finding_services:
+                expected = {row["container_id"] for row in self.retained_verifier_review["containers"]
+                            if row["service"] == service}
+                if set(self._running_service_containers(service, context="Exact retained finding log identities")) != expected:
+                    raise DeploymentError("Retained finding current container identities changed")
+                for container in sorted(expected):
+                    commands.append((f"{service}/{container}",
+                        ["docker", "logs", f"--since={self.log_since}", container],
+                        "Complete exact retained finding container logs"))
                 continue
             commands.append(
                 (
@@ -5081,7 +7613,7 @@ class DockerHost:
                     f"New web-slot log scan for {slot}",
                 )
             )
-        findings: list[str] = []
+        findings: list[str] = [*self._verified_discord_429(), *recovered_findings]
         failures: list[str] = []
         scan_complete = True
         truncated = False
@@ -5101,7 +7633,7 @@ class DockerHost:
             lines = self._stream_log_lines(command, deadline=deadline, context=context)
             batches = self._log_batches(
                 lines,
-                owner_scoped=source.partition("/")[0] in individually_scanned,
+                owner_scoped=source.partition("/")[0] in individually_scanned or bool(self.recovered_retained_log_records),
                 deadline=deadline,
             )
             try:
@@ -5441,6 +7973,20 @@ class DockerHost:
             owner_indexes = owner_service_findings.get(source, set())
             invalid_indexes = owner_invalid_indexes.get(source, set())
             source_lines = text.splitlines()
+            recovered_indexes: set[int] = set()
+            starts = [index for index, line in enumerate(source_lines)
+                      if ALLIANCEAUTH_LOG_HEADER_RE.match(line) or CELERY_LOG_HEADER_RE.match(line)]
+            for start, stop in zip(starts, [*starts[1:], len(source_lines)]):
+                hashes = tuple(hashlib.sha256(line.encode()).hexdigest() for line in source_lines[start:stop])
+                key = (source, hashes[0])
+                expected = self.recovered_retained_log_records.get(key, [])
+                if not expected or hashes not in expected:
+                    continue
+                occurrence = (*key, hashes)
+                seen = self.recovered_retained_log_seen.get(occurrence, 0) + 1
+                self.recovered_retained_log_seen[occurrence] = seen
+                if seen <= expected.count(hashes):
+                    recovered_indexes.update(range(start, stop))
             # aiopenapi3 names its error response *schema* "Error" while it
             # rebuilds ESI models. The DEBUG message is emitted twice on a
             # Celery worker, once with the AllianceAuth logger and once through
@@ -5450,13 +7996,7 @@ class DockerHost:
             schema_indexes: set[int] = set()
             for schema_index, schema_line in enumerate(source_lines):
                 schema = ALLIANCEAUTH_LOG_HEADER_RE.match(schema_line)
-                if (
-                    schema is None
-                    or schema.group("level") != "DEBUG"
-                    or schema.group("component") != "esi.aiopenapi3.plugins"
-                    or schema.group("source_line") != "121"
-                    or schema_line[schema.end():] != "- Error"
-                ):
+                if not _is_esi_error_schema_log(schema_line):
                     continue
                 schema_indexes.add(schema_index)
                 if schema_index + 1 >= len(source_lines):
@@ -5477,21 +8017,14 @@ class DockerHost:
                 ):
                     schema_indexes.add(schema_index + 1)
             for index, raw_line in enumerate(source_lines):
-                if index in schema_indexes:
+                if index in schema_indexes or index in recovered_indexes:
                     continue
                 # Compose can split or reorder Celery's duplicate into a later
                 # bounded batch without its AllianceAuth partner. On the one
                 # configured worker service, this exact DEBUG model-name line
                 # is still benign; every other line remains subject to the
                 # fatal scan, including a following traceback.
-                celery_schema = CELERY_LOG_HEADER_RE.match(raw_line)
-                if (
-                    source == self.config.worker_service
-                    and celery_schema is not None
-                    and celery_schema.group("level") == "DEBUG"
-                    and celery_schema.group("process") == "MainProcess"
-                    and raw_line[celery_schema.end():] == "- Error"
-                ):
+                if _is_esi_error_schema_log(raw_line, worker=source.partition("/")[0] == self.config.worker_service):
                     continue
                 if index in owner_indexes:
                     processes = ",".join(sorted(owner_service_processes[source]))
@@ -5511,6 +8044,16 @@ class DockerHost:
                     reject(_failure_sample(source_lines, index))
                     continue
                 if not FATAL_LOG_RE.search(raw_line):
+                    continue
+                digest = hashlib.sha256(raw_line.encode("utf-8")).hexdigest()
+                if (self.retained_verifier_review is not None
+                        and source == "allianceauth_worker_services"
+                        and digest in self.recovered_discord_429_hashes):
+                    seen = self.recovered_discord_429_seen.get(digest, 0) + 1
+                    self.recovered_discord_429_seen[digest] = seen
+                    if seen == 1:
+                        continue
+                    reject(_failure_sample(source_lines, index))
                     continue
                 safe = _safe_report_text(raw_line, MAX_RETAINED_LOG_FINDING_CHARS)
                 if any(pattern.fullmatch(raw_line) for pattern in allowlist):

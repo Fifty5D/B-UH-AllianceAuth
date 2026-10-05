@@ -1,0 +1,81 @@
+
+name: Recovery verifier focused checks
+on:
+  push:
+    branches: [incident/recovery-verifier-corrections]
+  pull_request:
+    paths:
+      - ops/deploy/docker_host.py
+      - ops/deploy/verifier_repair.py
+      - ops/deploy/run-verifier-repair.ps1
+      - ops/deploy/collect_worker_restart_evidence.py
+      - ops/deploy/collect_retained_log_findings.py
+      - ops/deploy/run-retained-log-findings.ps1
+      - tests/deploy/**
+      - .github/workflows/recovery-verifier-checks.yml
+permissions:
+  contents: read
+concurrency:
+  group: recovery-verifiers-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verifiers:
+    name: Retained recovery regressions and existing deploy checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.13'
+      - name: Install only the existing pinned YAML and lint dependencies
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('platform/requirements/test.lock').read_text()
+          selected = []
+          lines = source.splitlines()
+          for number, line in enumerate(lines):
+              if not line.lower().startswith(('pyyaml==', 'ruff==')):
+                  continue
+              block = [line]
+              for continuation in lines[number + 1:]:
+                  if not continuation.startswith((' ', '\\t')):
+                      break
+                  block.append(continuation)
+              selected.append('\n'.join(block))
+          if len(selected) != 2:
+              raise SystemExit('Pinned verifier test dependencies are incomplete')
+          Path('/tmp/buh-verifier-deps.txt').write_text('\n\n'.join(selected) + '\n')
+          PY
+          python -m pip install --require-hashes --only-binary=:all: -r /tmp/buh-verifier-deps.txt
+      - run: python -m compileall -q ops/deploy tests/deploy
+      - run: ruff check ops/deploy/docker_host.py ops/deploy/verifier_repair.py ops/deploy/collect_worker_restart_evidence.py ops/deploy/collect_retained_log_findings.py tests/deploy/test_verifier_corrections.py tests/deploy/test_verifier_repair.py tests/deploy/test_docker_health_parser.py tests/deploy/test_worker_memory_recycles.py tests/deploy/test_retained_log_findings.py tests/deploy/test_retained_log_recovery.py tests/deploy/test_semantic_recovery.py tests/deploy/test_existing_location_recovery.py tests/deploy/verifier_fixtures.py
+      - name: Run focused regressions and complete host-independent deployment suite
+        env:
+          BUH_REQUIRE_DOCKER_HEALTH_REGRESSION: '1'
+        run: python -m unittest discover -s tests/deploy -t . -p 'test_*.py' -v
+      - name: Parse the owner launcher without executing it
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          foreach ($path in @('ops/deploy/run-verifier-repair.ps1', 'ops/deploy/run-retained-log-findings.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path (Get-Location).Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw 'Recovery launcher syntax failed.' }
+          }
+      - name: Record exact tested hashes
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          for name in ('docker_host.py', 'verifier_repair.py', 'run-verifier-repair.ps1',
+                       'collect_retained_log_findings.py', 'run-retained-log-findings.ps1'):
+              path = Path('ops/deploy') / name
+              if path.exists():
+                  print('TESTED_FILE_SHA256', name, hashlib.sha256(path.read_bytes()).hexdigest())
+          PY
