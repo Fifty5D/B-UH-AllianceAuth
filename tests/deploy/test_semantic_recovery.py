@@ -427,6 +427,27 @@ class DiscordRecoveryTests(unittest.TestCase):
 
 
 class StreamingSemanticTests(unittest.TestCase):
+    def test_client_cancellation_cannot_hide_unknown_text_or_another_service(self):
+        state={'sources':SOURCES,'inventory_before':[],'owners':[],'worker_service':'worker','proxy_service':'nginx'}
+        line='192.0.2.1 - - [01/Jan/2026:00:01:00 +0000] "GET /counts/ HTTP/1.1" 499 0 "-" "fixture-browser"'
+        original=record(line)
+        original['source']='nginx/'+'a'*64
+        for mutation in ('normal','unknown_tail','worker_source','unknown_prefix'):
+            item=deepcopy(original)
+            if mutation=='unknown_tail':
+                item['rows'].append({'text':'ERROR: unknown failure without a traceback'})
+            elif mutation=='worker_source':
+                item['source']='worker/'+'a'*64
+            elif mutation=='unknown_prefix':
+                item['rows'][0]['text']='ERROR: '+line
+            with self.subTest(mutation=mutation),RetainedSemanticAnalyzer(state) as analyzer:
+                analyzer.feed(item)
+                result=analyzer.finish()
+                self.assertEqual(result['unknown_count'],0 if mutation=='normal' else 1)
+                if mutation!='normal':
+                    with self.assertRaises(LogScanError):
+                        analyzer.ledger.require_complete_recovery()
+
     def test_caught_callback_requires_same_session_native_fallback_and_http_completion(self):
         item=case('handled_callback')
         session='a'*64

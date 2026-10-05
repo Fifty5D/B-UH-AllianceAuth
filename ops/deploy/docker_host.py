@@ -1108,7 +1108,10 @@ class RetainedSemanticAnalyzer:
             if decision is None:
                 # Auxiliary retained diagnostics are accounted for separately;
                 # their scope cannot waive a failure in an application stream.
-                if re.search(r'"GET [^ ]+ HTTP/[0-9.]+" 499\b', body) and "Traceback" not in body:
+                if (len(record["rows"]) == 1
+                        and record["source"].partition("/")[0] == self.state.get("proxy_service", "nginx")
+                        and re.fullmatch(r'[0-9a-fA-F.:]+ - \S+ \[[^\n\]]+\] "GET /[^ ]* HTTP/[0-9.]+" '
+                                         r'499 [0-9]+ "[^"\n]*" "[^"\n]*"', body)):
                     decision = ("client_closed_http_request", "observation")
                 else:
                     decision = ("unrecognized_failure", "unknown")
@@ -7380,7 +7383,7 @@ class DockerHost:
     def _scan_semantic_logs(self, services_and_slots):
         """Use sealed complete history, then read every source through one fresh cutoff."""
         report = self._semantic_recovery_proof()
-        state = report["state"]
+        state = {**report["state"], "proxy_service": self.config.proxy_service}
         archive = report["signal_archive"]
         name = archive.get("filename", "")
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,150}\.ndjson\.gz", name) is None:
