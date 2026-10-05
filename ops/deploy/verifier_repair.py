@@ -240,6 +240,11 @@ def build_review(host, plan, assessment, baseline, prior):
         if "worker_memory_recycles" not in assessment:
             raise DeploymentError("Retained log proof requires the reviewed restart policy")
         review.update(schema_version=3, retained_log_findings=assessment["retained_log_findings"])
+    if "semantic_recovery" in assessment:
+        if "worker_memory_recycles" not in assessment:
+            raise DeploymentError("Complete semantic proof requires the reviewed restart policy")
+        review.pop("retained_log_findings", None)
+        review.update(schema_version=4, semantic_recovery=assessment["semantic_recovery"])
     if review["schema_version"] >= 2:
         host._apply_retained_verifier_review(review, plan, assessment["hold_sha256"])
     if plan["flags"]["traffic_switch_started"]:
@@ -373,6 +378,8 @@ def failure_evidence(error):
         row["findings"] = [redact_sensitive_text(str(item))[:500] for item in findings[:32]]
         row["log_scan_complete"] = error.scan_complete
         row["findings_truncated"] = bool(getattr(error, "findings_truncated", False)) or len(findings) > 32
+    if isinstance(getattr(error, "analysis", None), dict):
+        row["semantic_analysis"] = error.analysis
     return row
 
 
@@ -385,6 +392,8 @@ def all_checks(host):
             row["passed"] = True
             if name == "retained-interval-logs":
                 warnings.extend(value)
+                if isinstance(getattr(host, "semantic_log_analysis", None), dict):
+                    row["semantic_analysis"] = host.semantic_log_analysis
         except Exception as error:
             row.update(failure_evidence(error))
         results.append(row)
@@ -454,15 +463,20 @@ def main(argv=None):
     parser.add_argument("--pilot-directory", type=Path, required=True)
     parser.add_argument("--ma-directory", type=Path, required=True)
     parser.add_argument("--operation", choices=("verify", "install-and-recover"), default="verify")
+    parser.add_argument("--recover-existing-location", action="store_true")
     args = parser.parse_args(argv)
     report = {"schema_version": 1, "scan_complete": False,
+              "complete_scan": False, "analysis_complete": False, "total_candidate_findings": 0,
+              "recovered_count": 0, "unresolved_count": 0, "unknown_count": 0,
+              "counts_by_semantic_family": {}, "examples_truncated": False,
               "read_only": args.operation == "verify",
               "started_at": datetime.now(timezone.utc).isoformat(), "source_commit": args.commit,
               "deployment_attempted": False, "memberaudit_mutation_attempted": False,
               "supported_recovery_attempted": False}
     lock, host, phase = None, None, "validate_source_and_assessment"
     try:
-        if (os.geteuid() != 0 or re.fullmatch(r"[0-9a-f]{40}", args.commit) is None
+        if (os.geteuid() != 0 or args.recover_existing_location and args.operation != "install-and-recover"
+                or re.fullmatch(r"[0-9a-f]{40}", args.commit) is None
                 or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in
                        (args.candidate_sha256, args.assessment_sha256))):
             raise DeploymentError("Reviewed root repair arguments are invalid")
@@ -511,15 +525,47 @@ def main(argv=None):
         refs = memberaudit_refs(completed, targets)
         report["memberaudit_before"] = verify_memberaudit(host, refs, excluded, completed)
         report["retained_database_backup"] = bridge.verify_backup(host, pilot)
+        if args.recover_existing_location:
+            phase = "one_native_existing_token_location_recovery"
+            if review["schema_version"] != 4:
+                raise DeploymentError("Existing LOCATION recovery requires complete semantic evidence")
+            # Collect every current source before the first application mutation.
+            # Only the exact known pending section may be resolved by this flag;
+            # every other health, auth, permission and unknown finding blocks it.
+            report["checks_before_location"], _ = all_checks(host)
+            pending = host.semantic_log_analysis
+            expected_location = host._semantic_recovery_proof()["location_recovery"]
+            key = str(expected_location["identity"]["memberaudit_character_pk"]) + "/location"
+            if (not isinstance(pending, dict) or pending.get("complete_scan") is not True
+                    or pending.get("analysis_complete") is not True or pending.get("unknown_count") != 0
+                    or pending.get("unresolved_count", 0) <= 0
+                    or pending.get("pending_section_recoveries") != {key:pending["unresolved_count"]}
+                    or any(not row["passed"] and row["check"] != "retained-interval-logs" for row in report["checks_before_location"])):
+                raise DeploymentError("A current failure outside the authorized existing LOCATION recovery requires review")
+            report["semantic_analysis_before_location"] = pending
+            for field in ("complete_scan", "analysis_complete", "total_candidate_findings", "recovered_count",
+                          "unresolved_count", "unknown_count", "counts_by_semantic_family", "examples_truncated"):
+                report[field] = pending[field]
+            report["memberaudit_mutation_attempted"] = True
+            report["location_recovery"] = host._recover_existing_location()
+            if report["location_recovery"].get("complete") is not True:
+                raise DeploymentError("Existing LOCATION recovery did not complete; preserve hold and stop")
+            report["memberaudit_after_location"] = verify_memberaudit(host, refs, excluded, completed)
         phase = "all_read_only_verifier_checks"
         report["pre_install_checks"], report["recovered_log_warnings"] = all_checks(host)
+        if isinstance(getattr(host, "semantic_log_analysis", None), dict):
+            analysis = host.semantic_log_analysis
+            report["semantic_analysis"] = analysis
+            for key in ("complete_scan", "analysis_complete", "total_candidate_findings", "recovered_count",
+                        "unresolved_count", "unknown_count", "counts_by_semantic_family", "examples_truncated"):
+                report[key] = analysis[key]
         report["proven_worker_recycles"] = host.accepted_worker_recycles
         report["blocked_worker_recycles"] = host.blocked_worker_recycles
         report["reviewed_restart_baseline_unchanged"] = host.restart_baselines == {
             row["container_id"]: row["restart_count"] for row in review["containers"]}
         if not report["pre_install_checks"] or any(not row["passed"] for row in report["pre_install_checks"]):
             raise DeploymentError("Current verification checks failed; no tooling activation or cleanup")
-        if not any("recovered warning: Discord nickname HTTP 429 -> HTTP 204" in warning
+        if review["schema_version"] != 4 and not any("recovered warning: Discord nickname HTTP 429 -> HTTP 204" in warning
                    for warning in report["recovered_log_warnings"]):
             raise DeploymentError("The exact original Discord recovery warning was not retained")
         if "retained_log_findings" in review:
@@ -532,6 +578,11 @@ def main(argv=None):
                 "report_path": review["retained_log_findings"]["report_path"],
                 "exact_records": sum(len(rows) for rows in host.recovered_retained_log_records.values()),
                 "current_assets_and_callback_source_verified": True}
+        if review["schema_version"] == 4:
+            if (report["complete_scan"] is not True or report["analysis_complete"] is not True
+                    or report["unresolved_count"] != 0 or report["unknown_count"] != 0):
+                raise DeploymentError("Complete semantic recovery is not proven")
+            report["semantic_evidence"] = review["semantic_recovery"]
         if args.operation == "verify":
             report["scan_complete"] = True
             report["ready_for_single_file_activation"] = True
@@ -559,6 +610,23 @@ def main(argv=None):
                 raise DeploymentError("Original reviewed restart baseline changed")
             _atomic_bytes(current.backup_path / "WORKER-RECYCLES.json",
                           (json.dumps(record, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
+            if review["schema_version"] == 4:
+                analysis = current.semantic_log_analysis
+                if (not isinstance(analysis, dict) or analysis.get("complete_scan") is not True
+                        or analysis.get("analysis_complete") is not True or analysis.get("unresolved_count") != 0
+                        or analysis.get("unknown_count") != 0):
+                    raise DeploymentError("Final complete semantic scan failed before cleanup")
+                evidence = {"schema_version": 1, "attempt_id": plan["attempt_id"],
+                            "plan_sha256": assessment["hold_sha256"], "source_commit": args.commit,
+                            "source_sha256": args.candidate_sha256, "proof": review["semantic_recovery"],
+                            "analysis": analysis, "location_recovery": report.get("location_recovery")}
+                path = current.backup_path / "SEMANTIC-RECOVERY.json"
+                _atomic_bytes(path, (json.dumps(evidence, sort_keys=True)+"\n").encode(), 0o600, owner=(0, 0))
+                report["semantic_analysis_before_cleanup"] = analysis
+                report["semantic_evidence_before_cleanup"] = {"path":str(path),"sha256":digest(private_read(path))}
+                for key in ("complete_scan", "analysis_complete", "total_candidate_findings", "recovered_count",
+                            "unresolved_count", "unknown_count", "counts_by_semantic_family", "examples_truncated"):
+                    report[key] = analysis[key]
             if "retained_log_findings" in review:
                 findings = {"schema_version": 1, "attempt_id": plan["attempt_id"],
                     "plan_sha256": assessment["hold_sha256"], "review_sha256": digest(private_read(review_path)),
@@ -593,6 +661,11 @@ def main(argv=None):
         if host is not None:
             report["proven_worker_recycles"] = host.accepted_worker_recycles
             report["blocked_worker_recycles"] = host.blocked_worker_recycles
+            if isinstance(getattr(host, "semantic_log_analysis", None), dict):
+                report["semantic_analysis"] = host.semantic_log_analysis
+                for key in ("complete_scan", "analysis_complete", "total_candidate_findings", "recovered_count",
+                            "unresolved_count", "unknown_count", "counts_by_semantic_family", "examples_truncated"):
+                    report[key] = host.semantic_log_analysis[key]
         report["preserve_recovery_resources"] = True
     finally:
         if lock is not None:

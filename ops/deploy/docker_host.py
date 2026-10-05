@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+from collections import Counter
 import gzip
 import hashlib
+import io
 import json
 import os
 import queue as thread_queue
@@ -164,19 +167,1351 @@ MAX_RETAINED_LOG_FINDING_CHARS = 200
 class LogScanError(DeploymentError):
     """Bounded findings from every readable stream, never a health approval."""
 
-    def __init__(self, findings, *, complete=True, truncated=False):
+    def __init__(self, findings, *, complete=True, truncated=False, analysis=None):
         unique = tuple(dict.fromkeys(
             _safe_report_text(str(item), 500) for item in findings
         ))
         self.findings = unique[:MAX_RETAINED_LOG_FINDINGS]
         self.scan_complete = complete
         self.findings_truncated = truncated or len(unique) > MAX_RETAINED_LOG_FINDINGS
+        self.analysis = analysis
         super().__init__(
             "New fatal AllianceAuth log pattern was detected: "
             + "\n".join(self.findings)
             + ("\nLog collection incomplete; preserve recovery resources." if not complete else "")
             + ("\nAdditional findings exceed the report bound." if self.findings_truncated else "")
         )
+
+
+"""Reusable contracts, embedded in the single-file receiver installation."""
+
+# A family name selects a native persistence contract, never an incident or owner.
+SEMANTIC_OWNER_TASKS = {
+    "moonmining.tasks.update_refineries_from_esi_for_owner": ("moonmining", "last_update_at"),
+    "moonmining.tasks.fetch_notifications_from_esi_for_owner": ("moonmining", "last_update_at"),
+    "moonmining.tasks.update_extractions_for_owner": ("moonmining", "last_update_at"),
+    "structures.tasks.fetch_notification_for_owner": ("structures", "notifications_last_update_at"),
+}
+SEMANTIC_HARD_FAILURE = re.compile(
+    r"\b(?:invalid_grant|invalid_client|invalid_scope|invalid_token|unauthorized_client|"
+    r"TokenInvalidError|InvalidTokenError|MissingScopes|MissingScope|PermissionError|"
+    r"NotRefreshableTokenError|MemoryError|50013)\b|Missing Permissions|permission denied|"
+    r"\b(?:401 Unauthorized|403 Forbidden)\b|"
+    r"\b(?:status(?:_code)?|status code|error code|HTTP(?:Client)?Error)\s*[:=<( ]+"
+    r"(?:401|403)\b|\b(?:401|403) Client Error\b|"
+    r"\b(?:invalid|revoked) (?:credential|refresh token|access token)\b",
+    re.IGNORECASE,
+)
+SEMANTIC_CANDIDATE = re.compile(
+    r"\b(?:HTTP(?:Server)?Error|InvalidTokenError|TokenError|MissingScopes|"
+    r"AuthenticationError|AuthorizationError|ConnectionError|TimeoutError)\b|"
+    r"\bHTTP/[0-9.]+[\" ]+\s*[45]\d\d\b|"
+    r"\b(?:status_code|status code|error code)\s*[:= ]\s*[45]\d\d\b|"
+    r"\b(?:invalid|revoked|expired)\s+(?:credential|refresh token|access token)\b",
+    re.IGNORECASE,
+)
+
+
+def _semantic_stamp(value):
+    if not isinstance(value, str):
+        raise DeploymentError("Recovery evidence timestamp is missing")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise DeploymentError("Recovery evidence timestamp is malformed") from error
+    if result.utcoffset() is None:
+        raise DeploymentError("Recovery evidence timestamp lacks a timezone")
+    return result
+
+
+def _semantic_source(sources, name):
+    """Inspect digest-bound installed source, without importing or executing it."""
+    item = sources.get(name)
+    if (not isinstance(item, dict) or set(item) != {"text", "sha256", "filename"}
+            or not isinstance(item["text"], str) or len(item["text"].encode()) > 256 * 1024
+            or SHA256_RE.fullmatch(item.get("sha256", "")) is None
+            or hashlib.sha256(item["text"].encode()).hexdigest() != item["sha256"]
+            or not isinstance(item["filename"], str)):
+        raise DeploymentError("Installed recovery source proof is malformed")
+    try:
+        return ast.parse(item["text"]), item
+    except (SyntaxError, ValueError, RecursionError) as error:
+        raise DeploymentError("Installed recovery source proof cannot be parsed") from error
+
+
+def _semantic_server_raise(sources, exception="HTTPServerError"):
+    tree, item = _semantic_source(sources, "esi.openapi_clients")
+    aliases = {alias.asname or alias.name for node in ast.walk(tree)
+               if isinstance(node, ast.ImportFrom) and node.module == "aiopenapi3.errors"
+               for alias in node.names if alias.name == exception}
+    native = {alias.asname or alias.name for node in ast.walk(tree)
+              if isinstance(node, ast.ImportFrom) and (node.module == "esi.exceptions"
+                                                       or node.module == "exceptions" and node.level == 1)
+              for alias in node.names if alias.name == exception}
+    raises = set()
+    for handler in ast.walk(tree):
+        if (not isinstance(handler, ast.ExceptHandler) or not isinstance(handler.type, ast.Name)
+                or handler.type.id not in aliases or not handler.name):
+            continue
+        for node in ast.walk(handler):
+            call = node.exc if isinstance(node, ast.Raise) else None
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in native
+                    and {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
+                    == {key: handler.name + "." + key for key in ("status_code", "headers", "data")}):
+                raises.add(node.lineno)
+    if not raises:
+        raise DeploymentError("Installed ESI source does not prove the server-error route")
+    return item["filename"], raises
+
+
+def _semantic_native_clocks(sources):
+    """A clock counts only when the installed native path persists after success."""
+    tree, _ = _semantic_source(sources, "moonmining.tasks")
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    update = functions.get("update_owner")
+    final = functions.get("mark_successful_update_for_owner")
+    expected = [name.rsplit(".", 1)[1] for name in SEMANTIC_OWNER_TASKS if name.startswith("moonmining.")]
+    expected.append("mark_successful_update_for_owner")
+    chains = []
+    if update is not None:
+        for node in ast.walk(update):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "chain":
+                parts = []
+                for part in node.args:
+                    if (isinstance(part, ast.Call) and isinstance(part.func, ast.Attribute)
+                            and part.func.attr == "si" and isinstance(part.func.value, ast.Name)
+                            and [ast.unparse(arg) for arg in part.args] == ["owner_pk"]):
+                        parts.append(part.func.value.id)
+                chains.append(parts)
+    final_ok = final is not None and any(
+        isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and node.value.value is True
+        and any(isinstance(target, ast.Attribute) and target.attr == "last_update_ok" for target in node.targets)
+        for node in ast.walk(final)
+    ) and any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "save" for node in ast.walk(final))
+    if chains != [expected] or not final_ok:
+        raise DeploymentError("Installed Moon Mining full-chain success contract differs")
+    tree, _ = _semantic_source(sources, "structures.models.owners")
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    function = functions.get("fetch_notifications_esi")
+    if function is None or any(isinstance(node, ast.ExceptHandler) for node in ast.walk(function)):
+        raise DeploymentError("Installed Structures notification success contract differs")
+    fetched = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "_fetch_notifications_from_esi"]
+    stored = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute) and node.func.attr == "_store_notifications"]
+    clocks = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Attribute) and target.attr == "notifications_last_update_at"
+                      for target in node.targets)]
+    saves = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "save"
+             and any(keyword.arg == "update_fields" and ast.literal_eval(keyword.value)
+                     == ["notifications_last_update_at"] for keyword in node.keywords)]
+    if not (len(fetched) == len(stored) == len(clocks) == len(saves) == 1
+            and fetched[0] < stored[0] < clocks[0] < saves[0]):
+        raise DeploymentError("Installed Structures persisted notification clock differs")
+
+
+def _semantic_record_body(record):
+    rows = record.get("rows")
+    if (record.get("record_complete") is not True or not isinstance(rows, list) or not rows
+            or len(rows) > MAX_OWNER_RECORD_LINES
+            or any(not isinstance(row, dict) or not isinstance(row.get("text"), str) for row in rows)
+            or sum(len(row["text"].encode()) for row in rows) > MAX_OWNER_INCIDENT_BYTES):
+        raise DeploymentError("Recovery log record is incomplete or exceeds its bound")
+    _semantic_stamp(record.get("first_at"))
+    return "\n".join(row["text"] for row in rows)
+
+
+def _semantic_operation_key(operation):
+    """No guessed identity, nullable operand or different-operation substitution."""
+    fields = ("provider", "subsystem", "family", "identity")
+    if (not isinstance(operation, dict) or set(operation) != set(fields)
+            or any(not isinstance(operation[key], str) or not operation[key] for key in fields)):
+        raise DeploymentError("Recovery operation identity is incomplete")
+    return tuple(operation[key] for key in fields)
+
+
+class SemanticRecoveryLedger:
+    """Count every decision before applying any display cap.
+
+    Evidence adapters supply complete original records and native persistence
+    facts. A hash selects evidence; it never changes a contract's semantics.
+    Ordinary logs remain strict until a complete recovery contract proves them.
+    """
+
+    def __init__(self, *, complete_scan=True, analysis_complete=True, display_limit=32):
+        self.complete_scan = complete_scan is True
+        self.analysis_complete = analysis_complete is True
+        self.counts = Counter()
+        self.families = {}
+        self.examples = []
+        self.display_limit = display_limit
+        self.findings = []
+
+    def add(self, family, decision, *, evidence_id, reason=None):
+        if decision not in {"non_failure", "handled", "recovered", "observation", "unresolved", "unknown"}:
+            raise DeploymentError("Recovery decision is not recognized")
+        self.counts[decision] += 1
+        self.families.setdefault(family, Counter())[decision] += 1
+        if len(self.examples) < self.display_limit:
+            self.examples.append({"family": family, "decision": decision, "evidence_id": evidence_id,
+                                  "reason": _safe_report_text(reason or "", 200)})
+        if decision in {"unresolved", "unknown"} and len(self.findings) < self.display_limit:
+            self.findings.append(f"{family}: {evidence_id}: {reason or decision}")
+
+    def summary(self):
+        total = sum(self.counts.values())
+        return {"complete_scan": self.complete_scan, "analysis_complete": self.analysis_complete,
+                "total_candidate_findings": total,
+                **{key + "_count": self.counts[key] for key in
+                   ("recovered", "unresolved", "unknown", "handled", "non_failure", "observation")},
+                "counts_by_semantic_family": {family: {"total": sum(count.values()), **dict(count)}
+                                              for family, count in sorted(self.families.items())},
+                "examples_truncated": total > len(self.examples), "examples": self.examples}
+
+    def require_complete_recovery(self):
+        if (not self.complete_scan or not self.analysis_complete
+                or self.counts["unresolved"] or self.counts["unknown"]):
+            raise LogScanError(self.findings or ["Recovery analysis is incomplete"],
+                               complete=self.complete_scan,
+                               truncated=sum(self.counts[key] for key in ("unresolved", "unknown"))
+                               > len(self.findings), analysis=self.summary())
+
+
+def _semantic_current_success(failure, success, current):
+    """Same native operation, successful persisted run, no subsequent failure."""
+    key = _semantic_operation_key(failure["operation"])
+    if key != _semantic_operation_key(success.get("operation")) or key != _semantic_operation_key(current.get("operation")):
+        return False
+    at = _semantic_stamp(failure["at"])
+    succeeded = _semantic_stamp(success.get("finished_at"))
+    observed = _semantic_stamp(current.get("observed_at"))
+    if not at < succeeded <= observed:
+        return False
+    if (success.get("persisted") is not True or current.get("healthy") is not True
+            or current.get("identity_preserved") is not True or current.get("credentials_valid") is not True):
+        return False
+    newest_failure = current.get("latest_failure_at")
+    if newest_failure is not None and _semantic_stamp(newest_failure) >= succeeded:
+        return False
+    return True
+
+
+def _semantic_provider_event(record, sources):
+    body = _semantic_record_body(record)
+    if SEMANTIC_HARD_FAILURE.search(body):
+        return None
+    task = re.search(r"Task ([A-Za-z0-9_.]+)\[([0-9a-f-]{36})\] raised unexpected: HTTPError\(\)$",
+                     record["rows"][0]["text"])
+    if task is None or task[1] not in SEMANTIC_OWNER_TASKS:
+        return None
+    if (body.count("Traceback (most recent call last):") != 1
+            or record["rows"][-1]["text"] != "aiopenapi3.errors.HTTPError"):
+        return None
+    filename, raises = _semantic_server_raise(sources)
+    frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+    if (not frames or frames[-1][0] != filename or int(frames[-1][1]) not in raises
+            or frames[-1][2] != "result" or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
+        return None
+    app, function = task[1].split(".tasks.")
+    if not any(path.endswith("/" + app + "/tasks.py") and name == function for path, _, name in frames):
+        return None
+    return {"task": task[1], "task_id": task[2], "source": record["source"],
+            "at": record["first_at"], "subsystem": SEMANTIC_OWNER_TASKS[task[1]][0]}
+
+
+def prove_systemic_provider_recovery(records, sources, inventory_before, inventory_current, *, complete):
+    """Unknown operands need positive systemic proof, not a healthy unrelated owner.
+
+    At least three independent tasks, two workers, two native task families and
+    two applications must overlap within one minute. Capture copies do not count
+    as independent tasks or workers. Every originally configured owner must be
+    present with unchanged stable bindings, a later native completion and valid
+    current credentials. An isolated/newer/current failure cannot use this rule.
+    """
+    if complete is not True or not records:
+        return False
+    _semantic_native_clocks(sources)
+    events = [_semantic_provider_event(record, sources) for record in records]
+    if any(event is None for event in events):
+        return False
+    distinct = {}
+    for event in events:
+        old = distinct.get(event["task_id"])
+        if old is not None and old != event:
+            return False
+        distinct[event["task_id"]] = event
+    events = list(distinct.values())
+    clocks = [_semantic_stamp(event["at"]) for event in events]
+    if (len(events) < 3 or len({event["source"] for event in events}) < 2
+            or len({event["task"] for event in events}) < 2
+            or len({event["subsystem"] for event in events}) < 2
+            or (max(clocks) - min(clocks)).total_seconds() > 60):
+        return False
+    if not isinstance(inventory_before, list) or not isinstance(inventory_current, list):
+        return False
+    def identity(row):
+        fields = ("subsystem", "owner_pk", "corporation_id", "character_id", "auth_link_pk", "token_pk")
+        if not isinstance(row, dict) or any(row.get(key) is None for key in fields):
+            raise DeploymentError("Provider recovery owner inventory is incomplete")
+        if row["subsystem"] not in {"moonmining", "structures"} or any(
+                type(row[key]) is not int or row[key] <= 0 for key in fields[1:]):
+            raise DeploymentError("Provider recovery owner identity is malformed")
+        return tuple(row[key] for key in fields)
+    before = [identity(row) for row in inventory_before]
+    current = [identity(row) for row in inventory_current]
+    if (not before or len(before) != len(set(before)) or len(current) != len(set(current))
+            or set(before) != set(current)
+            or {row["subsystem"] for row in inventory_before} != {event["subsystem"] for event in events}):
+        return False
+    for row in inventory_current:
+        if any(row.get(key) is not True for key in ("healthy", "credentials_valid", "native_success")):
+            return False
+        completed = _semantic_stamp(row.get("finished_at"))
+        if not max(clocks) < completed <= _semantic_stamp(row.get("observed_at")):
+            return False
+        if row.get("latest_failure_at") is not None and _semantic_stamp(row["latest_failure_at"]) >= completed:
+            return False
+    return True
+
+
+def prove_semantic_recovery(case, sources):
+    """A shared evidence vocabulary for stable, reusable recovery contracts."""
+    try:
+        if not isinstance(case, dict) or case.get("complete") is not True:
+            return False
+        body = _semantic_record_body(case["record"])
+        if SEMANTIC_HARD_FAILURE.search(body):
+            return False
+        kind, failure = case["contract"], case["failure"]
+        if failure["at"] != case["record"]["first_at"]:
+            return False
+        if not _semantic_current_success(failure, case["success"], case["current"]):
+            return False
+        if kind == "owner_transient":
+            event = _semantic_provider_event(case["record"], sources)
+            return (event is not None and case.get("owner_operand_source") in {"task_args", "structured_task_log"}
+                    and type(case.get("owner_pk")) is int
+                    and failure["operation"]["provider"] == "esi"
+                    and failure["operation"]["family"] == event["task"]
+                    and failure["operation"]["subsystem"] == event["subsystem"]
+                    and failure["operation"]["identity"] == str(case["owner_pk"])
+                    and case.get("operand_task_id") == event["task_id"]
+                    and case.get("operand_source") == event["source"])
+        if kind == "memberaudit_transient":
+            # TokenDoesNotExist alone proves neither transience nor identity.
+            # A complete same-token refresh incident must explain the sticky flag.
+            return (case.get("section") in {"location", "assets", "online_status", "ship", "skill_queue", "wallet_balance"}
+                    and case.get("transient_exception") == "IncompleteResponseError"
+                    and type(case.get("token_pk")) is int
+                    and case.get("failed_refresh_token_pk") == case["token_pk"]
+                    and case.get("later_refresh_token_pk") == case["token_pk"]
+                    and case.get("character_pk") == case.get("persisted_character_pk")
+                    and type(case.get("character_pk")) is int and case["character_pk"] > 0
+                    and case.get("section") == case.get("persisted_section")
+                    and case["current"].get("has_token_error") is False
+                    and case["current"].get("error_length") == 0
+                    and case["current"].get("is_success") is True
+                    and case.get("required_scopes") == case.get("validated_required_scopes")
+                    and isinstance(case.get("required_scopes"), list) and bool(case["required_scopes"])
+                    and failure["operation"]["identity"] == str(case["character_pk"])
+                    and failure["operation"]["family"] == case["section"]
+                    and re.search(r"\(ID:" + str(case["character_pk"]) + r"\)", body) is not None
+                    and "TokenDoesNotExist" in body)
+        if kind == "asset_names":
+            filename, raises = _semantic_server_raise(sources, "HTTPClientError")
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            return (body.count("Traceback (most recent call last):") == 2
+                    and bool(frames) and frames[-1][0] == filename and int(frames[-1][1]) in raises
+                    and re.match(r"esi\.exceptions\.HTTPClientError: <HTTPClientError 404\b",
+                                 case["record"]["rows"][-1]["text"]) is not None
+                    and "Invalid IDs in the request" in body
+                    and "HTTPClientError 404" in body
+                    and "_fetching_asset_names_from_esi" in body
+                    and re.search(r"\(ID:" + re.escape(failure["operation"]["identity"]) + r"\)", body) is not None
+                    and case.get("section") == "assets"
+                    and case.get("payload_bytes_verified") is True
+                    and case.get("relationships_valid") is True
+                    and case["current"].get("has_token_error") is False
+                    and case["current"].get("is_success") is True)
+        if kind == "discord_retry":
+            status = case.get("http_status")
+            op = failure["operation"]
+            return (status in {429, 503} and op["provider"] == "discord"
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("guild_id", "")) is not None
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("member_id", "")) is not None
+                    and op["identity"] == case["guild_id"] + "/" + case["member_id"]
+                    and case.get("method") == case.get("success_method") == "PATCH"
+                    and case.get("guild_id") == case.get("success_guild_id")
+                    and case.get("member_id") == case.get("success_member_id")
+                    and case.get("request_id") != case.get("success_request_id")
+                    and re.fullmatch(r"[0-9a-f]{32}", case.get("request_id", "")) is not None
+                    and re.fullmatch(r"[0-9a-f]{32}", case.get("success_request_id", "")) is not None
+                    and case.get("success_status") == 204
+                    and case.get("native_operation_completed") is True
+                    and type(case.get("backoff_ms")) is int and 0 < case["backoff_ms"] <= 120_000
+                    and 0 < (_semantic_stamp(case["success"]["finished_at"]) - _semantic_stamp(failure["at"])).total_seconds()
+                    <= case["backoff_ms"] / 1000 + 120
+                    and re.search(r"(?:status code|error code) " + str(status) + r"\b", body) is not None)
+        if kind == "discord_unknown_member":
+            return (case.get("http_status") == 404 and case.get("discord_code") == 10007
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("guild_id", "")) is not None
+                    and re.fullmatch(r"[1-9][0-9]{5,19}", case.get("member_id", "")) is not None
+                    and failure["operation"]["identity"] == case["guild_id"] + "/" + case["member_id"]
+                    and case.get("delete_status") == 204
+                    and case.get("guild_id") == case.get("delete_guild_id") == case.get("current_guild_id")
+                    and case.get("member_id") == case.get("delete_member_id") == case.get("current_member_id")
+                    and case.get("binding_present") is False
+                    and case.get("current_http_status") == 404 and case.get("current_discord_code") == 10007
+                    and '"Unknown Member"' in body and re.search(r'"code"\s*:\s*10007\b', body) is not None)
+        if kind == "handled_callback":
+            tree, source = _semantic_source(sources, "esi.decorators")
+            function = next((node for node in ast.walk(tree)
+                             if isinstance(node, ast.FunctionDef) and node.name == "_check_callback"), None)
+            if function is None:
+                return False
+            catches = []
+            for handler in ast.walk(function):
+                if not isinstance(handler, ast.ExceptHandler):
+                    continue
+                types = [handler.type] if not isinstance(handler.type, ast.Tuple) else handler.type.elts
+                if not any(ast.unparse(node) == "CallbackRedirect.DoesNotExist" for node in types):
+                    continue
+                caught_logs = [node for node in ast.walk(handler) if isinstance(node, ast.Call)
+                               and isinstance(node.func, ast.Attribute) and node.func.attr == "debug"
+                               and any(keyword.arg == "exc_info" and isinstance(keyword.value, ast.Constant)
+                                       and keyword.value.value is True for keyword in node.keywords)]
+                if caught_logs and any(isinstance(node, ast.Return) and isinstance(node.value, ast.Constant)
+                                       and node.value.value is None for node in ast.walk(handler)):
+                    catches.extend(node.lineno for node in caught_logs)
+            header = ALLIANCEAUTH_LOG_HEADER_RE.match(case["record"]["rows"][0]["text"])
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            return (header is not None and header["level"] == "DEBUG" and header["component"] == "esi.decorators"
+                    and int(header["source_line"]) in catches
+                    and len(frames) == 3 and frames[0][0] == source["filename"] and frames[0][2] == "_check_callback"
+                    and case["record"]["rows"][-1]["text"]
+                    == "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+                    and SHA256_RE.fullmatch(case.get("session_sha256", "")) is not None
+                    and case.get("session_sha256") == case.get("success_session_sha256")
+                    and case.get("native_fallback_completed") is True
+                    and case.get("authentication_completed") is True
+                    and case.get("http_completion_status") == 200)
+        return False
+    except (KeyError, TypeError, ValueError, DeploymentError, RecursionError):
+        return False
+
+
+class RetainedSemanticAnalyzer:
+    """Analyze whole records and correlate successes across the entire interval.
+
+    The private disk index separates bounded display from unlimited analysis.
+    Source adapters provide native database/credential/byte evidence; log facts
+    and operation identities are derived here rather than supplied as decisions.
+    """
+
+    def __init__(self, state, *, complete_scan=True, display_limit=32):
+        self.state = state
+        self.ledger = SemanticRecoveryLedger(complete_scan=complete_scan,
+                                             analysis_complete=complete_scan,
+                                             display_limit=display_limit)
+        self.directory = tempfile.TemporaryDirectory(prefix="buh-semantic-recovery-")
+        self.database = sqlite3.connect(str(Path(self.directory.name) / "records.sqlite"))
+        self.database.execute("PRAGMA cache_size=-512")
+        self.database.execute("PRAGMA journal_mode=OFF")
+        self.database.execute("PRAGMA temp_store=FILE")
+        self.database.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, source TEXT, at TEXT, "
+                              "body TEXT, record TEXT, candidate INTEGER, request TEXT, session TEXT, target TEXT)")
+        self.database.execute("CREATE INDEX by_request ON records(source,request,seq)")
+        self.database.execute("CREATE INDEX by_target ON records(source,target,at)")
+        self.database.execute("CREATE INDEX by_time ON records(source,at)")
+        self.database.execute("CREATE INDEX all_times ON records(at)")
+        self.database.execute("CREATE INDEX by_session ON records(source,session,at)")
+        self.database.execute("CREATE INDEX candidate_order ON records(candidate,seq)")
+        self.decisions = {}
+        self.request_cache = {}
+        self.pending_sections = Counter()
+
+    def close(self):
+        self.database.close()
+        self.directory.cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def feed(self, record):
+        try:
+            original_source = record["source"]
+            mapped = self.state.get("capture_sources", {}).get(original_source)
+            if mapped is not None:
+                record = {**record, "source": mapped, "capture_source": original_source}
+            if original_source.startswith("diagnostic/") and mapped is None:
+                rows = record.get("rows")
+                if (record.get("record_complete") is not True or not isinstance(rows, list) or not rows
+                        or any(not isinstance(row.get("text"), str) for row in rows)):
+                    raise DeploymentError("Auxiliary retained evidence is incomplete")
+                text = "\n".join(row["text"] for row in rows)
+                if FATAL_LOG_RE.search(text) or SEMANTIC_CANDIDATE.search(text):
+                    proof = self.state.get("auxiliary_scope_proofs", {}).get(hashlib.sha256(text.encode()).hexdigest())
+                    valid = isinstance(proof, dict) and proof.get("source") == original_source and proof.get("scope") in {
+                        "command_audit", "optional_telemetry", "pre_auth_transport", "optional_identity_introspection"}
+                    self.ledger.add(proof["scope"] if valid else "unrecognized_auxiliary", "observation" if valid else "unknown",
+                                    evidence_id=original_source + "/" + str(record.get("ordinal")))
+                return
+            body = _semantic_record_body(record)
+            candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body))
+            if not candidate and not re.search(
+                    r"Discord Service|Nickname for |Account .*deleted|account.*deleted|"
+                    r"\[esi\.(?:decorators|views):|HTTP/[0-9.]+|"
+                    r"Starting (?:update_nickname|delete_user)|Successfully refreshed|IncompleteResponseError|"
+                    r"MissingTokenError|Attempting refresh|Authenticating .+ by ownership",
+                    body, re.IGNORECASE):
+                return
+            request = re.search(r"\[Discord Service\] ([0-9a-f]{32}):", body)
+            target = re.search(r"sending (?:GET|POST|PATCH|PUT|DELETE) request to url "
+                               r"'(https://discord\.com/api[^']+/members/[0-9]+[^']*)'", body)
+            sessions = record["rows"][0].get("session_sha256", [])
+            if not sessions:
+                match = re.search(r"\bsession sha256:([0-9a-f]{64})\b", body)
+                if match:
+                    sessions = [match[1]]
+            if len(sessions) > 1:
+                self.ledger.analysis_complete = False
+            self.database.execute("INSERT INTO records(source,at,body,record,candidate,request,session,target) "
+                                  "VALUES (?,?,?,?,?,?,?,?)", (
+                record["source"], _semantic_stamp(record["first_at"]).isoformat(), body, json.dumps(record, separators=(",", ":")),
+                int(candidate), request[1] if request else None, sessions[0] if len(sessions) == 1 else None,
+                target[1] if target else None))
+        except (DeploymentError, KeyError, TypeError, ValueError, sqlite3.Error):
+            self.ledger.analysis_complete = False
+            self.ledger.add("malformed_evidence", "unknown", evidence_id="invalid-record",
+                            reason="Incomplete or malformed retained record")
+
+    def _records(self, clause="1", parameters=()):
+        for row in self.database.execute("SELECT seq,record FROM records WHERE " + clause + " ORDER BY seq", parameters):
+            yield row[0], json.loads(row[1])
+
+    def _current(self, op, *, finished, healthy=True, extra=None):
+        return {"operation": op, "observed_at": self.state["observed_at"], "healthy": healthy,
+                "identity_preserved": self.state.get("identity_preserved") is True,
+                "credentials_valid": self.state.get("credentials_valid") is True,
+                "latest_failure_at": None, **(extra or {})}
+
+    def _case(self, kind, record, op, finished, *, extra=None, current=None):
+        return {"contract": kind, "complete": self.ledger.complete_scan and self.ledger.analysis_complete,
+                "record": record, "failure": {"at": record["first_at"], "operation": op},
+                "success": {"operation": op, "finished_at": finished, "persisted": True},
+                "current": current or self._current(op, finished=finished), **(extra or {})}
+
+    def _provider_decisions(self):
+        records = []
+        for seq, record in self._records("candidate=1"):
+            event = _semantic_provider_event(record, self.state["sources"])
+            if event is not None:
+                canonical = dict(record)
+                canonical["source"] = self.state.get("capture_sources", {}).get(record["source"], record["source"])
+                records.append((seq, canonical, event))
+        records.sort(key=lambda row: _semantic_stamp(row[1]["first_at"]))
+        clusters = []
+        for row in records:
+            if not clusters or (_semantic_stamp(row[1]["first_at"]) -
+                                _semantic_stamp(clusters[-1][0][1]["first_at"])).total_seconds() > 60:
+                clusters.append([])
+            clusters[-1].append(row)
+        for cluster in clusters:
+            selected, bodies = {}, {}
+            valid = True
+            for _, record, event in cluster:
+                body = _semantic_record_body(record)
+                key = event["task_id"]
+                if key in bodies and bodies[key] != body:
+                    valid = False
+                bodies[key] = body
+                selected[key] = record
+            proven = valid and prove_systemic_provider_recovery(
+                list(selected.values()), self.state["sources"], self.state["inventory_before"],
+                self.state["owners"], complete=self.ledger.complete_scan and self.ledger.analysis_complete)
+            for seq, record, event in cluster:
+                owner = self.state.get("task_operands", {}).get(event["task_id"])
+                owner_proven = False
+                if owner is not None:
+                    rows = [row for row in self.state["owners"] if row["subsystem"] == event["subsystem"]
+                            and row["owner_pk"] == owner.get("owner_pk")]
+                    if len(rows) == 1:
+                        row = rows[0]
+                        op = {"provider": "esi", "subsystem": event["subsystem"], "family": event["task"],
+                              "identity": str(row["owner_pk"])}
+                        case = self._case("owner_transient", record, op, row["finished_at"], extra={
+                            "owner_pk": row["owner_pk"], "owner_operand_source": owner.get("source_kind"),
+                            "operand_task_id": event["task_id"], "operand_source": record["source"]},
+                            current=self._current(op, finished=row["finished_at"],
+                                                  healthy=row.get("healthy") is True, extra={
+                                "credentials_valid": row.get("credentials_valid") is True,
+                                "latest_failure_at": row.get("latest_failure_at")}))
+                        owner_proven = prove_semantic_recovery(case, self.state["sources"])
+                self.decisions[seq] = ("owner_transient" if owner_proven else "systemic_provider",
+                                       "recovered" if owner_proven or proven else "unresolved")
+
+    def _discord_request(self, source, identifier):
+        cache_key = (source, identifier)
+        if cache_key in self.request_cache:
+            return self.request_cache[cache_key]
+        rows = [record for _, record in self._records("source=? AND request=?", (source, identifier))]
+        if not rows:
+            return None
+        body = "\n".join(_semantic_record_body(row) for row in rows)
+        sent = re.findall(r"sending (GET|POST|PATCH|PUT|DELETE) request to url "
+                          r"'(https://discord\.com/api(?:/v[0-9]+)?/guilds/([0-9]+)/members/([0-9]+)([^']*))'", body)
+        sent = list(dict.fromkeys(sent))
+        if len(sent) != 1 or SEMANTIC_HARD_FAILURE.search(body):
+            return None
+        method, url, guild, member, suffix = sent[0]
+        statuses = {int(value) for value in re.findall(r"returned status code ([0-9]{3})", body)}
+        completed = False
+        tail_at = max(_semantic_stamp(row["first_at"]) for row in rows)
+        for _, record in self._records("source=? AND request IS NULL AND at>=? AND at<=?",
+                                       (source, tail_at.isoformat(), (tail_at + timedelta(seconds=3)).isoformat())):
+            at = _semantic_stamp(record["first_at"])
+            if tail_at <= at <= tail_at + timedelta(seconds=2) and re.search(
+                    r"Nickname for .+ has been updated", _semantic_record_body(record)):
+                completed = True
+        result = {"id": identifier, "rows": rows, "body": body, "method": method, "url": url,
+                "guild": guild, "member": member, "suffix": suffix, "statuses": statuses,
+                "first_at": min(row["first_at"] for row in rows),
+                "last_at": max(row["first_at"] for row in rows), "completed": completed}
+        self.request_cache[cache_key] = result
+        return result
+
+    def _discord_decision(self, record):
+        body = _semantic_record_body(record)
+        identifier = re.search(r"\[Discord Service\] ([0-9a-f]{32}):", body)
+        if identifier is None:
+            retry = re.search(r"update_nickname failed for user .+, retrying in ([1-9][0-9]{0,2}) secs", body)
+            target = re.search(r"requests\.exceptions\.HTTPError: 503 Server Error: Service Unavailable "
+                               r"for url: (https://discord\.com/api/guilds/[0-9]+/members/[0-9]+)$", body)
+            if retry is None or target is None or body.count("Traceback (most recent call last):") != 1:
+                return None
+            at = _semantic_stamp(record["first_at"])
+            identifiers = self.database.execute(
+                "SELECT DISTINCT t.request FROM records t JOIN records r "
+                "ON r.source=t.source AND r.request=t.request "
+                "WHERE t.source=? AND t.target=? AND r.at>=? AND r.at<=? "
+                "AND r.body LIKE '%returned status code 503%'",
+                (record["source"], target[1], (at - timedelta(seconds=1)).isoformat(), at.isoformat())).fetchall()
+            if len(identifiers) != 1:
+                return ("discord_retry", "unresolved")
+            identifier = (None, identifiers[0][0])
+        request = self._discord_request(record["source"], identifier[1])
+        if request is None:
+            return ("discord_unproven", "unresolved")
+        statuses = request["statuses"]
+        op = {"provider": "discord", "subsystem": "discord", "family": "update_nickname",
+              "identity": request["guild"] + "/" + request["member"]}
+        members = self.state.get("discord_members", {})
+        current_member = members.get(request["member"], {})
+        if request["guild"] != self.state.get("discord_guild_id") or current_member.get("complete") is not True:
+            return ("discord_unproven", "unresolved")
+        identifiers = self.database.execute("SELECT DISTINCT request FROM records WHERE source=? AND target=? "
+                                            "AND request IS NOT NULL AND at>?",
+                                            (record["source"], request["url"],
+                                             _semantic_stamp(request["last_at"]).isoformat())).fetchall()
+        later = []
+        for (other,) in identifiers:
+            if other == identifier[1]:
+                continue
+            item = self._discord_request(record["source"], other)
+            if (item is not None and item["guild"] == request["guild"] and item["member"] == request["member"]
+                    and _semantic_stamp(item["first_at"]) > _semantic_stamp(request["last_at"])):
+                later.append(item)
+        later.sort(key=lambda row: _semantic_stamp(row["first_at"]))
+        if statuses <= {429, 503} and statuses and request["method"] == "PATCH" and not request["suffix"]:
+            successes = [item for item in later if item["method"] == "PATCH" and not item["suffix"]
+                         and item["statuses"] == {204} and item["completed"]]
+            if not successes or current_member.get("http_status") != 200 or current_member.get("binding_present") is not True:
+                return ("discord_retry", "unresolved")
+            success = successes[0]
+            newest = [item for item in later if item["method"] == "PATCH" and not item["suffix"]]
+            if newest and newest[-1]["statuses"] != {204}:
+                return ("discord_retry", "unresolved")
+            delays = re.findall(r"Need to back off for at least ([0-9]+) ms", request["body"])
+            if not delays and statuses == {503}:
+                tail = _semantic_stamp(request["last_at"])
+                for _, row in self._records("source=? AND request IS NULL AND at>=? AND at<=?",
+                                            (record["source"], tail.isoformat(), (tail + timedelta(seconds=2)).isoformat())):
+                    text = _semantic_record_body(row)
+                    retry = re.search(r"update_nickname failed for user .+, retrying in ([1-9][0-9]{0,2}) secs", text)
+                    if (retry and text.count("Traceback (most recent call last):") == 1
+                            and text.endswith("requests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url: " + request["url"])):
+                        delays.append(str(int(retry[1]) * 1000))
+            backoff = max(map(int, delays)) if delays else None
+            # Pick the complete native API error, including the response body,
+            # when the candidate is a mirrored DEBUG response-header record.
+            errors = [row for row in request["rows"] if "Discord API returned error code" in _semantic_record_body(row)]
+            selected = errors[0] if errors else record
+            case = self._case("discord_retry", selected, op, success["last_at"], extra={
+                "http_status": min(statuses), "method": request["method"], "success_method": success["method"],
+                "guild_id": request["guild"], "success_guild_id": success["guild"],
+                "member_id": request["member"], "success_member_id": success["member"],
+                "request_id": identifier[1], "success_request_id": success["id"], "success_status": 204,
+                "native_operation_completed": success["completed"], "backoff_ms": backoff})
+            return ("discord_retry", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+        if statuses == {404} and re.search(r'"code"\s*:\s*10007\b', request["body"]):
+            deleted = [item for item in later if item["method"] == "DELETE" and not item["suffix"]
+                       and item["statuses"] == {204}]
+            errors = [row for row in request["rows"] if '"Unknown Member"' in _semantic_record_body(row)]
+            if not deleted or not errors:
+                return ("discord_unknown_member", "unresolved")
+            selected = errors[0]
+            case = self._case("discord_unknown_member", selected, op, deleted[0]["last_at"], extra={
+                "http_status": 404, "discord_code": 10007, "delete_status": 204,
+                "guild_id": request["guild"], "delete_guild_id": deleted[0]["guild"],
+                "current_guild_id": self.state["discord_guild_id"],
+                "member_id": request["member"], "delete_member_id": deleted[0]["member"],
+                "current_member_id": current_member.get("member_id"), "binding_present": current_member.get("binding_present"),
+                "current_http_status": current_member.get("http_status"),
+                "current_discord_code": current_member.get("discord_error_code")})
+            return ("discord_unknown_member", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+        return ("discord_unproven", "unresolved")
+
+    def _callback_decision(self, record):
+        body = _semantic_record_body(record)
+        if "CallbackRedirect.DoesNotExist" not in body:
+            return None
+        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+        sessions = record["rows"][0].get("session_sha256", [])
+        if header is None or len(sessions) != 1:
+            return ("handled_callback", "unresolved")
+        principal = record["rows"][0]["text"][header.end():].split(" session ", 1)[0].removeprefix("No callback for ")
+        at = _semantic_stamp(record["first_at"])
+        following = []
+        for _, row in self._records("source=? AND session=?", (record["source"], sessions[0])):
+            when = _semantic_stamp(row["first_at"])
+            if at < when <= at + timedelta(hours=4):
+                following.append(row)
+        completions = [row for row in following if "Got new token from " + principal + " session "
+                       in _semantic_record_body(row) and ". Returning to view." in _semantic_record_body(row)]
+        fallback = any("Redirecting " in _semantic_record_body(row) and " to SSO." in _semantic_record_body(row)
+                       for row in following if _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=5))
+        if not completions:
+            # Already authenticated token selection is another native successful
+            # continuation. It must include the principal and view token check.
+            choices = [row for _, row in self._records("source=?", (record["source"],))
+                       if principal + " has selected token " in _semantic_record_body(row)
+                       and at < _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=120)]
+            if len(choices) == 1:
+                chosen = _semantic_stamp(choices[0]["first_at"])
+                validated = any("Selected token fulfills requirements of view. Returning." in _semantic_record_body(row)
+                                and chosen < _semantic_stamp(row["first_at"]) <= chosen + timedelta(seconds=1)
+                                for _, row in self._records("source=?", (record["source"],)))
+                if validated:
+                    completions = choices
+                    fallback = True
+        for completion in completions:
+            finished = completion["first_at"]
+            done = _semantic_stamp(finished)
+            http_rows = [row for _, row in self._records("at>? AND at<=? AND body LIKE '%HTTP/%'",
+                         (done.isoformat(), (done + timedelta(seconds=120)).isoformat()))]
+            # Bind the ordinary return to the same proxy client and user agent
+            # as the successful SSO redirect. The destination may be any native
+            # view; a hard-coded dashboard would reject valid return-to URLs.
+            access = re.compile(r'^(?P<client>\S+) .+ "GET (?P<path>/[^ ]*) HTTP/[0-9.]+" '
+                                r'(?P<status>[0-9]{3}) [0-9]+ "[^"]*" "(?P<agent>[^"]+)"$')
+            redirects = []
+            for row in http_rows:
+                parsed = access.match(_semantic_record_body(row))
+                if (parsed and parsed["path"].startswith("/sso/login") and parsed["status"] == "302"
+                        and _semantic_stamp(row["first_at"]) <= done + timedelta(seconds=5)):
+                    redirects.append((row, parsed))
+            http_ok = False
+            for redirect, client in redirects:
+                after = _semantic_stamp(redirect["first_at"])
+                returns = []
+                for row in http_rows:
+                    parsed = access.match(_semantic_record_body(row))
+                    if (parsed and row["source"] == redirect["source"]
+                            and parsed["client"] == client["client"] and parsed["agent"] == client["agent"]
+                            and after < _semantic_stamp(row["first_at"]) <= after + timedelta(seconds=5)
+                            and not parsed["path"].startswith(("/sso/", "/static/", "/media/"))):
+                        returns.append((row, parsed))
+                if returns and min(returns, key=lambda item: _semantic_stamp(item[0]["first_at"]))[1]["status"] == "200":
+                    http_ok = True
+            if not redirects:
+                # Authenticated token selection has no SSO redirect. Its
+                # successful token/view check still needs the normal UI return.
+                http_ok = principal != "AnonymousUser" and any(
+                    re.search(r'"GET /dashboard/(?:\?[^ ]*)? HTTP/[0-9.]+" 200\b', _semantic_record_body(row))
+                    for row in http_rows)
+            op = {"provider": "application", "subsystem": "esi", "family": "callback_lookup", "identity": sessions[0]}
+            case = self._case("handled_callback", record, op, finished, extra={
+                "session_sha256": sessions[0], "success_session_sha256": sessions[0],
+                "native_fallback_completed": fallback, "authentication_completed": True,
+                "http_completion_status": 200 if http_ok else None})
+            if prove_semantic_recovery(case, self.state["sources"]):
+                return ("handled_callback", "handled")
+        return ("handled_callback", "unresolved")
+
+    def _asset_decision(self, record):
+        body = _semantic_record_body(record)
+        match = re.search(r"\(ID:([1-9][0-9]*)\): assets: Error occurred: HTTPClientError: <HTTPClientError 404\b", body)
+        selected = record
+        if match is None and re.search(r"Task memberaudit\.tasks\.assets_build_list_from_esi\[", body):
+            # The native task rethrows the immediately logged same exception.
+            # Require one unique character, same worker and identical causal
+            # application frames; never use all-character health for this task.
+            related = []
+            at = _semantic_stamp(record["first_at"])
+            filename, raises = _semantic_server_raise(self.state["sources"], "HTTPClientError")
+            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            if (body.count("Traceback (most recent call last):") != 1 or not frames
+                    or frames[-1][0] != filename or int(frames[-1][1]) not in raises
+                    or record["rows"][-2]["text"].strip() != "raise HTTPClientError("):
+                return ("asset_names", "unresolved")
+            for _, row in self._records("candidate=1 AND source=?", (record["source"],)):
+                text = _semantic_record_body(row)
+                owner = re.search(r"\(ID:([1-9][0-9]*)\): assets: Error occurred: HTTPClientError: <HTTPClientError 404\b", text)
+                if (owner is not None and "Invalid IDs in the request" in text
+                        and abs((_semantic_stamp(row["first_at"]) - at).total_seconds()) < 1
+                        and "_fetching_asset_names_from_esi" in text and "_fetching_asset_names_from_esi" in body
+                        and record["rows"][-1]["text"] == "aiopenapi3.errors.HTTPError"):
+                    related.append((owner[1], row))
+            if len({item[0] for item in related}) == 1:
+                selected = related[0][1]
+                match = re.search(r"\(ID:([1-9][0-9]*)\)", _semantic_record_body(selected))
+        if match is None:
+            return None
+        section = self.state.get("sections", {}).get(match[1] + "/assets")
+        if section is None:
+            return ("asset_names", "unresolved")
+        op = {"provider": "esi", "subsystem": "memberaudit", "family": "assets", "identity": match[1]}
+        case = self._case("asset_names", selected, op, section["run_finished_at"], extra={
+            "section": "assets", "payload_bytes_verified": section.get("payload_bytes_verified"),
+            "relationships_valid": section.get("relationships_valid")},
+            current=self._current(op, finished=section["run_finished_at"], healthy=section.get("is_success") is True,
+                                  extra=section))
+        return ("asset_names", "recovered" if prove_semantic_recovery(case, self.state["sources"]) else "unresolved")
+
+    def _section_decision(self, record):
+        body = _semantic_record_body(record)
+        match = re.search(r"\(ID:([1-9][0-9]*)\): ([a-z_]+): Error occurred: TokenDoesNotExist", body)
+        if match is None:
+            task = re.search(r"Task memberaudit\.tasks\.update_character_([a-z_]+)\[", body)
+            character = re.search(r"TokenDoesNotExist.*\(ID:([1-9][0-9]*)\)", body)
+            if (task is not None and character is not None and body.count("Traceback (most recent call last):") == 1
+                    and record["rows"][-1]["text"].startswith("memberaudit.errors.TokenDoesNotExist:")
+                    and "in _update_character_section" in body and "in fetch_token" in body):
+                match = (None, character[1], task[1])
+        if match is None:
+            return None
+        key = match[1] + "/" + match[2]
+        section = self.state.get("sections", {}).get(key)
+        incident = self._transient_section_cause(record, section)
+        if section is None or incident is None:
+            return ("memberaudit_cause_or_identity_unproven", "unresolved")
+        op = {"provider": "esi", "subsystem": "memberaudit", "family": match[2], "identity": match[1]}
+        case = self._case("memberaudit_transient", record, op, section["run_finished_at"], extra={
+            **incident, "section": match[2], "persisted_section": section.get("section"),
+            "character_pk": int(match[1]), "persisted_character_pk": section.get("character_pk")},
+            current=self._current(op, finished=section["run_finished_at"], healthy=section.get("is_success") is True,
+                                  extra=section))
+        proven = prove_semantic_recovery(case, self.state["sources"])
+        if not proven:
+            self.pending_sections[key] += 1
+        return ("memberaudit_transient", "recovered" if proven else "unresolved")
+
+    def _transient_section_cause(self, record, section):
+        """Derive an incomplete refresh from native logs and the installed branch."""
+        if not section or not isinstance(section.get("identity"), dict):
+            return None
+        identity = section["identity"]
+        tree, _ = _semantic_source(self.state["sources"], "esi.models")
+        handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
+                    and ast.unparse(node.type) == "MissingTokenError"]
+        if len(handlers) != 1 or not any(isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and ast.unparse(node.exc.func) == "IncompleteResponseError" for node in ast.walk(handlers[0])):
+            return None
+        scopes = re.search(r"with scopes: (\[[^\n]+?\])", _semantic_record_body(record))
+        if scopes is None:
+            return None
+        try:
+            required = ast.literal_eval(scopes[1])
+        except (ValueError, SyntaxError):
+            return None
+        validated = section.get("validated_required_scopes", [])
+        if not isinstance(required, list) or not required or not set(required) <= set(validated):
+            return None
+        at = _semantic_stamp(record["first_at"])
+        before = at - timedelta(seconds=5)
+        causes = []
+        token = int(identity["token_pk"])
+        character = int(identity["character_id"])
+        token_match = re.compile(r"Refresh failed for <Token\(id="+str(token)+r"\): "+str(character)
+                                 +r", [^>]+>: MissingTokenError\('\(missing_token\) Missing access token parameter\.'\)")
+        for _, row in self._records("source=? AND at>=? AND at<=? AND body LIKE '%MissingTokenError%'",
+                                   (record["source"], before.isoformat(), at.isoformat())):
+            text = _semantic_record_body(row)
+            if token_match.search(text) and not SEMANTIC_HARD_FAILURE.search(text):
+                causes.append(row)
+        later = []
+        refreshed = re.compile(r"Successfully refreshed <Token\(id="+str(token)+r"\): "+str(character)+r", [^>]+>")
+        for _, row in self._records("at>? AND body LIKE '%Successfully refreshed%'", (at.isoformat(),)):
+            if refreshed.search(_semantic_record_body(row)):
+                later.append(row)
+        if not causes or not later or identity.get("token_inventory") != [token]:
+            # Multiple possible credentials cannot be assigned to an old failure.
+            return None
+        return {"transient_exception":"IncompleteResponseError", "token_pk":token,
+                "failed_refresh_token_pk":token, "later_refresh_token_pk":token,
+                "required_scopes":required, "validated_required_scopes":required}
+
+    def _refinery_decision(self, record):
+        body = _semantic_record_body(record)
+        entity = re.search(r"Failed to fetch refinery with ID ([1-9][0-9]*) from ESI", body)
+        if entity is None:
+            return None
+        current = self.state.get("refineries", {}).get(entity[1])
+        if (current is None or SEMANTIC_HARD_FAILURE.search(body)
+                or re.search(r"(?:esi\.exceptions|aiopenapi3\.errors)\.HTTPServerError: <HTTPServerError 50[0234]\b", body) is None
+                or body.count("Traceback (most recent call last):") != 2
+                or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
+            return ("owner_specific_provider", "unresolved")
+        filename, raises = _semantic_server_raise(self.state["sources"])
+        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+        proven = (frames and frames[-1][0] == filename and int(frames[-1][1]) in raises
+                  and current.get("healthy") is True and current.get("credentials_valid") is True
+                  and current.get("operation_id") == "GetUniverseStructuresStructureId"
+                  and current.get("status_code") == 200
+                  and current.get("structure_id") == int(entity[1])
+                  and _semantic_stamp(current["observed_at"]) > _semantic_stamp(record["first_at"])
+                  and _semantic_stamp(current["owner_finished_at"]) > _semantic_stamp(record["first_at"]))
+        return ("owner_specific_provider", "recovered" if proven else "unresolved")
+
+    def finish(self):
+        self._provider_decisions()
+        for seq, record in self._records("candidate=1"):
+            body = _semantic_record_body(record)
+            decision = self.decisions.get(seq)
+            if SEMANTIC_HARD_FAILURE.search(body):
+                decision = ("auth_permission_or_permanent", "unresolved")
+            elif decision is None and len(record["rows"]) == 1 and _is_esi_error_schema_log(
+                    record["rows"][0]["text"], worker=record["source"].partition("/")[0] == self.state.get("worker_service")):
+                decision = ("esi_schema_enumeration", "non_failure")
+            elif decision is None:
+                for classifier in (self._discord_decision, self._callback_decision, self._asset_decision,
+                                   self._section_decision, self._refinery_decision):
+                    decision = classifier(record)
+                    if decision is not None:
+                        break
+            if decision is None:
+                # Auxiliary retained diagnostics are accounted for separately;
+                # their scope cannot waive a failure in an application stream.
+                if re.search(r'"GET [^ ]+ HTTP/[0-9.]+" 499\b', body) and "Traceback" not in body:
+                    decision = ("client_closed_http_request", "observation")
+                else:
+                    decision = ("unrecognized_failure", "unknown")
+            identity = str(record["source"]) + "/" + str(record.get("ordinal", seq))
+            self.ledger.add(*decision, evidence_id=identity)
+            self.decisions[seq] = decision
+        summary = self.ledger.summary()
+        summary["pending_section_recoveries"] = dict(self.pending_sections)
+        return summary
+
+
+def _semantic_log_records(lines, source, *, stats, deadline):
+    """Parse every timestamped physical line; never cap the retained interval."""
+    stamp = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z) (.*)$")
+    header = re.compile(r"^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]+\]|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4} )")
+    session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{20,64})(?=[. ]|$)")
+    rows, first_at, ordinal, size = [], None, 0, 0
+    for line in lines:
+        if time.monotonic() > deadline:
+            raise DeploymentError("Complete semantic log parsing timed out")
+        parsed = stamp.fullmatch(line)
+        if parsed is None or "\ufffd" in line:
+            raise DeploymentError("Complete semantic log stream has a malformed row")
+        at, original = parsed.groups()
+        _semantic_stamp(at)
+        stats["physical_lines"] += 1
+        stats["first_at"] = stats.get("first_at") or at
+        stats["last_at"] = at
+        if rows and (header.match(original) or not original.startswith((" ", "Traceback ", "During handling ",
+                                                                        "The above exception "))
+                     and not re.match(r"^[a-zA-Z_][a-zA-Z_0-9.]*?(?:Error|Exception|DoesNotExist)(?::|$)", original)
+                     and original != ""):
+            yield {"source": source, "first_at": first_at, "ordinal": ordinal,
+                   "record_complete": True, "rows": rows}
+            rows, size = [], 0
+        if not rows:
+            first_at = at
+            ordinal += 1
+        fingerprints = [hashlib.sha256(item["key"].encode()).hexdigest() for item in session.finditer(original)]
+        hashed = session.sub(lambda item: "session sha256:" + hashlib.sha256(item["key"].encode()).hexdigest(), original)
+        safe = redact_sensitive_text(hashed)
+        row = {"text": safe, "at": at, "raw_sha256": hashlib.sha256(original.encode()).hexdigest(),
+               "session_sha256": fingerprints}
+        rows.append(row)
+        size += len(safe.encode())
+        if len(rows) > 128 or size > 512 * 1024:
+            raise DeploymentError("Complete semantic log record exceeds its bound")
+    if rows:
+        yield {"source": source, "first_at": first_at, "ordinal": ordinal,
+               "record_complete": True, "rows": rows}
+
+
+SEMANTIC_CURRENT_READ_CODE = r'''
+import gzip
+import hashlib
+import importlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import time
+from datetime import datetime, timezone
+from django.apps import apps
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import connection, transaction
+from allianceauth.authentication.models import CharacterOwnership
+from esi.models import Token
+from memberaudit.models import Character, CharacterAsset, CharacterLocation, CharacterUpdateStatus
+
+def emit_semantic_current(expected):
+    result = {'read_only': True, 'complete': False, 'owners': [], 'sections': {}, 'refineries': {},
+              'source_hashes': {}, 'discord_members': {}, 'errors': []}
+    for name, source in expected['sources'].items():
+        if not re.fullmatch(r'(?:allianceauth|esi|memberaudit|moonmining|structures|buh_max_history|buh_structure_ops)(?:\.[a-z_][a-z_0-9]*)+', name):
+            raise ValueError('Unrecognized installed source module')
+        module = importlib.import_module(name)
+        path = Path(module.__file__)
+        raw = path.read_bytes()
+        filename=source['filename']
+        path_matches=(str(path)==filename if Path(filename).is_absolute()
+                      else filename==name.replace('.','/')+'.py' and str(path).endswith('/'+filename))
+        if len(raw) > 256 * 1024 or hashlib.sha256(raw).hexdigest() != source['sha256'] or not path_matches:
+            raise ValueError('Installed source identity differs')
+        result['source_hashes'][name] = source['sha256']
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION READ ONLY')
+    with transaction.atomic():
+        owners = {(row['subsystem'], row['owner_pk']): row for row in expected['inventory_before']}
+        for label in ('moonmining', 'structures'):
+            model = apps.get_model(label, 'Owner')
+            current = list(model.objects.order_by('pk'))
+            if {owner.pk for owner in current} != {pk for app, pk in owners if app == label}:
+                raise ValueError('Complete configured owner inventory changed')
+            for owner in current:
+                wanted = owners[(label, owner.pk)]
+                ownership = CharacterOwnership.objects.select_related('character').get(pk=wanted['auth_link_pk'])
+                token = Token.objects.get(pk=wanted['token_pk'])
+                identity = (ownership.character.character_id == wanted['character_id']
+                            and ownership.character.corporation_id == wanted['corporation_id']
+                            and owner.corporation.corporation_id == wanted['corporation_id']
+                            and token.character_id == wanted['character_id']
+                            and token.user_id == ownership.user_id
+                            and token.character_owner_hash == ownership.owner_hash)
+                scopes = set(token.scopes.values_list('name', flat=True))
+                required = set(wanted['required_scopes'])
+                credentials = identity and bool(required) and required <= scopes and bool(token.refresh_token)
+                if label == 'moonmining':
+                    healthy = owner.is_enabled is True and owner.last_update_ok is True and owner.character_ownership_id == ownership.pk
+                    completed = owner.last_update_at
+                else:
+                    link_model = apps.get_model('structures', 'OwnerCharacter')
+                    link = link_model.objects.get(owner=owner, character_ownership=ownership)
+                    healthy = owner.is_active is True and owner.is_up is True and link.is_enabled is True and link.error_count == 0
+                    completed = owner.notifications_last_update_at
+                result['owners'].append({**wanted, 'healthy': healthy, 'credentials_valid': credentials,
+                                         'native_success': healthy, 'finished_at': completed,
+                                         'latest_failure_at': None})
+        for key, wanted in expected.get('sections', {}).items():
+            character_pk, section = key.split('/')
+            member = Character.objects.select_related('eve_character').get(pk=int(character_pk))
+            status = CharacterUpdateStatus.objects.get(character=member, section=section)
+            identity = wanted['identity']
+            ownership = CharacterOwnership.objects.get(pk=identity['auth_link_pk'], user_id=identity['user_id'], character=member.eve_character)
+            token = Token.objects.get(pk=identity['token_pk'], user_id=identity['user_id'], character_id=identity['character_id'])
+            tokens = list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk', flat=True))
+            required = set(identity.get('required_scopes', ['esi-assets.read_assets.v1']))
+            if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                    or token.character_owner_hash != ownership.owner_hash or tokens != identity['token_inventory']
+                    or not required <= set(token.scopes.values_list('name', flat=True))):
+                raise ValueError('Section existing credential or Auth identity differs')
+            row = {'character_pk': member.pk, 'section': section, 'pk': status.pk,
+                   'identity': identity, 'validated_required_scopes': sorted(token.scopes.values_list('name',flat=True)),
+                   'is_success': status.is_success, 'has_token_error': status.has_token_error,
+                   'error_length': len(status.error_message), 'error_sha256':hashlib.sha256(status.error_message.encode()).hexdigest(),
+                   'run_started_at': status.run_started_at,
+                   'run_finished_at': status.run_finished_at, 'update_started_at': status.update_started_at,
+                   'update_finished_at': status.update_finished_at,
+                   'content_hashes': [status.content_hash_1, status.content_hash_2, status.content_hash_3]}
+            if section == 'location':
+                location=CharacterLocation.objects.get(character=member)
+                valid=bool(location.eve_solar_system_id)
+                for field in location._meta.fields:
+                    if field.is_relation and field.many_to_one:
+                        pk=getattr(location,field.attname)
+                        valid=valid and (pk is None and field.null or pk is not None and field.remote_field.model.objects.filter(pk=pk).exists())
+                row['location_valid']=valid
+                if not valid:
+                    raise ValueError('Current native LOCATION data is invalid')
+            if section == 'assets':
+                assets = list(CharacterAsset.objects.filter(character=member).values('pk','item_id','quantity','parent_id','eve_type_id','location_id'))
+                pks = {item['pk'] for item in assets}
+                valid = (len({item['item_id'] for item in assets}) == len(assets)
+                         and all(type(item['item_id']) is int and item['item_id'] > 0
+                                 and type(item['quantity']) is int and item['quantity'] >= 0
+                                 and (item['parent_id'] is None or item['parent_id'] in pks and item['parent_id'] != item['pk'])
+                                 for item in assets))
+                for field in ('eve_type', 'location'):
+                    ids = {item[field+'_id'] for item in assets if item[field+'_id'] is not None}
+                    related = CharacterAsset._meta.get_field(field).remote_field.model
+                    valid = valid and set(related.objects.filter(pk__in=ids).values_list('pk',flat=True)) == ids
+                from buh_max_history.capture import archive_root
+                archive = archive_root().resolve(strict=True)
+                for payload in wanted['payloads']:
+                    relative = Path(payload['relative_path'])
+                    if relative.is_absolute() or '..' in relative.parts or relative.parts[0] != 'private':
+                        raise ValueError('Asset evidence path differs')
+                    path = archive / relative
+                    for parent in (path, *path.parents):
+                        if parent == archive:
+                            break
+                        if parent.is_symlink():
+                            raise ValueError('Asset evidence contains a link')
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(descriptor, 'rb') as source:
+                        before = os.fstat(source.fileno())
+                        if not stat.S_ISREG(before.st_mode) or before.st_size != payload['stored_bytes']:
+                            raise ValueError('Asset evidence file metadata differs')
+                        with gzip.GzipFile(fileobj=source) as compressed:
+                            raw = compressed.read(32 * 1024 * 1024 + 1)
+                        after = os.fstat(source.fileno())
+                    if (len(raw) != payload['source_bytes'] or len(raw) > 32 * 1024 * 1024
+                            or hashlib.sha256(raw).hexdigest() != payload['payload_sha256']
+                            or (before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_ino,after.st_size,after.st_mtime_ns)):
+                        raise ValueError('Actual retained asset bytes differ')
+                    data = json.loads(raw)
+                    if not isinstance(data,list) or not all(isinstance(item,dict) and type(item.get('item_id')) is int for item in data):
+                        raise ValueError('Retained asset payload is malformed')
+                row.update(relationships_valid=valid, payload_bytes_verified=bool(wanted['payloads']))
+            result['sections'][key] = row
+        refinery_model = apps.get_model('moonmining','Refinery')
+        from buh_max_history.models import ArchiveStream
+        for key, wanted in expected.get('refineries',{}).items():
+            refinery = refinery_model.objects.get(pk=int(key), owner_id=wanted['owner_pk'])
+            stream = ArchiveStream.objects.get(pk=wanted['stream_pk'])
+            owner = next(row for row in result['owners'] if row['subsystem']=='moonmining' and row['owner_pk']==refinery.owner_id)
+            result['refineries'][key] = {**wanted,'healthy':owner['healthy'],'credentials_valid':owner['credentials_valid'],
+                'owner_finished_at':owner['finished_at'],'status_code':stream.last_status_code,
+                'observed_at':stream.last_seen_at,'structure_id':stream.safe_parameters.get('structure_id'),
+                'operation_id':stream.operation_id}
+        discord = apps.get_model('discord','DiscordUser')
+        bindings = {str(user.uid): user.user_id for user in discord.objects.all()}
+    # Native credentials are used only for bounded read-only membership GETs.
+    import requests
+    guild = str(settings.DISCORD_GUILD_ID)
+    if guild != expected['discord_guild_id']:
+        raise ValueError('Current Discord guild differs')
+    with requests.Session() as session:
+        session.trust_env = False
+        session.headers.update({'Authorization':'Bot '+str(settings.DISCORD_BOT_TOKEN),
+                                'User-Agent':'B-UH-semantic-recovery-read-only/1'})
+        for member in expected['discord_members']:
+            if not re.fullmatch(r'[1-9][0-9]{5,19}',member):
+                raise ValueError('Discord member identity is malformed')
+            for attempt in range(3):
+              with session.get('https://discord.com/api/v10/guilds/'+guild+'/members/'+member,
+                             timeout=15,allow_redirects=False,stream=True) as response:
+                chunks,size=[],0
+                for chunk in response.iter_content(4096):
+                    size+=len(chunk)
+                    if size>64*1024:
+                        raise ValueError('Discord read-only response exceeds its bound')
+                    chunks.append(chunk)
+                data=json.loads(b''.join(chunks))
+                if response.status_code==429 and attempt<2:
+                    retry=data.get('retry_after')
+                    if type(retry) not in (int,float) or not 0<retry<=10:
+                        raise ValueError('Discord read-only backoff is not bounded')
+                    time.sleep(retry)
+                    continue
+                complete=(response.status_code==200 and data.get('user',{}).get('id')==member
+                          or response.status_code==404 and data.get('code')==10007)
+                result['discord_members'][member]={'member_id':member,'http_status':response.status_code,
+                    'discord_error_code':data.get('code'),'complete':complete,'binding_present':member in bindings,
+                    'binding_user_pk':bindings.get(member)}
+                break
+            time.sleep(0.35)
+    result['observed_at']=datetime.now(timezone.utc).isoformat()
+    for owner in result['owners']:
+        owner['observed_at']=result['observed_at']
+    result['complete']=not result['errors'] and all(row['complete'] for row in result['discord_members'].values())
+    print('BUH_SEMANTIC_CURRENT_BEGIN')
+    print(json.dumps(result,sort_keys=True,cls=DjangoJSONEncoder))
+    print('BUH_SEMANTIC_CURRENT_END')
+'''
+
+EXISTING_LOCATION_RECOVERY_CODE = r'''
+import hashlib
+import json
+import logging
+import signal
+from datetime import datetime, timezone
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
+from django.db.models.signals import pre_delete, pre_save
+from allianceauth.authentication.models import CharacterOwnership
+from esi import app_settings
+from esi.managers import TokenManager
+from esi.models import Token
+from memberaudit.models import Character, CharacterLocation, CharacterUpdateStatus
+from memberaudit.tasks import _update_character_section
+from requests.auth import HTTPBasicAuth
+from requests_oauthlib import OAuth2Session
+
+def recover_existing_location(expected):
+    identity, wanted = expected['identity'], expected['status']
+    token_pk, character_pk = identity['token_pk'], identity['memberaudit_character_pk']
+    started = datetime.now(timezone.utc)
+    result = {'complete':False,'native_location_attempts':0,'token_refresh_attempts':0,
+              'token_pk':token_pk,'character_pk':character_pk,'started_at':started.isoformat()}
+    def abort(signum, frame):
+        raise TimeoutError('Bounded existing LOCATION recovery timed out')
+    signal.signal(signal.SIGALRM, abort)
+    signal.alarm(180)
+    # Native libraries log decoded credentials at DEBUG; this private operation
+    # emits only normalized identity/status evidence and never credential data.
+    logging.disable(logging.CRITICAL)
+    def no_delete(sender, instance, **kwargs):
+        raise ValueError('Token or Auth deletion is outside existing LOCATION recovery')
+    def save_token(sender, instance, **kwargs):
+        if instance.pk != token_pk:
+            raise ValueError('Another token save is outside existing LOCATION recovery')
+        old=Token.objects.get(pk=token_pk)
+        allowed={'access_token','refresh_token','created','sso_version'}
+        if any(getattr(instance,field.attname)!=getattr(old,field.attname)
+               for field in Token._meta.concrete_fields if field.name not in allowed):
+            raise ValueError('Existing token identity changed')
+    def save_auth(sender, instance, **kwargs):
+        raise ValueError('Auth-link mutation is outside existing LOCATION recovery')
+    def save_section(sender, instance, **kwargs):
+        if instance.character_id != character_pk or instance.section != 'location':
+            raise ValueError('Another section save is outside existing LOCATION recovery')
+    guards=((pre_delete,Token,no_delete),(pre_delete,CharacterOwnership,no_delete),
+            (pre_save,Token,save_token),(pre_save,CharacterOwnership,save_auth),
+            (pre_save,CharacterUpdateStatus,save_section))
+    for event,model,function in guards:
+        event.connect(function,sender=model,weak=False)
+    try:
+        member=Character.objects.select_related('eve_character').get(pk=character_pk)
+        ownership=CharacterOwnership.objects.get(pk=identity['auth_link_pk'],user_id=identity['user_id'],character=member.eve_character)
+        inventory=list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+        if (member.is_disabled or member.eve_character.character_id != identity['character_id']
+                or inventory != identity['token_inventory'] or inventory != [token_pk]
+                or hashlib.sha256(ownership.owner_hash.encode()).hexdigest()!=identity['owner_hash_sha256']):
+            raise ValueError('Reviewed existing LOCATION identity differs')
+        status=CharacterUpdateStatus.objects.get(pk=wanted['id'],character=member,section='location')
+        original_error=hashlib.sha256(status.error_message.encode()).hexdigest()
+        if (status.is_success is not False or status.has_token_error is not True
+                or original_error != wanted['original_error_message_sha256']
+                or status.run_finished_at.isoformat().replace('+00:00','Z')[:23]!=wanted['run_finished_at'][:23]):
+            raise ValueError('Known stale LOCATION state differs; native update was not attempted')
+        required=set(identity['required_scopes'])
+        original_scopes=set(Token.objects.get(pk=token_pk).scopes.values_list('name',flat=True))
+        verified={'claims':False}
+        class ValidatedNativeSession(OAuth2Session):
+            def request(self,*args,**kwargs):
+                kwargs['timeout']=15
+                return super().request(*args,**kwargs)
+            def refresh_token(self,*args,**kwargs):
+                payload=super().refresh_token(*args,**kwargs)
+                if not isinstance(payload,dict) or not payload.get('access_token') or not payload.get('refresh_token'):
+                    raise ValueError('Native refresh did not return complete credentials')
+                claims=TokenManager.validate_access_token(payload['access_token'])
+                if (not isinstance(claims,dict) or claims.get('character_id')!=identity['character_id']
+                        or claims.get('owner')!=ownership.owner_hash or not required<=set(claims.get('scp',[]))):
+                    raise ValueError('Native refreshed claims do not prove existing identity and required scopes')
+                verified['claims']=True
+                return payload
+        import esi.managers as managers
+        original_get=managers.requests.get
+        def bounded_get(*args,**kwargs):
+            kwargs['timeout']=15
+            return original_get(*args,**kwargs)
+        managers.requests.get=bounded_get
+        try:
+            with transaction.atomic():
+                token=Token.objects.select_for_update().get(pk=token_pk,user_id=identity['user_id'],character_id=identity['character_id'])
+                if token.character_owner_hash!=ownership.owner_hash or not required<=set(token.scopes.values_list('name',flat=True)):
+                    raise ValueError('Existing token identity or scope inventory differs')
+                result['token_refresh_attempts']=1
+                with ValidatedNativeSession(app_settings.ESI_SSO_CLIENT_ID) as native_session:
+                    token.refresh(session=native_session,auth=HTTPBasicAuth(app_settings.ESI_SSO_CLIENT_ID,app_settings.ESI_SSO_CLIENT_SECRET))
+                if not verified['claims']:
+                    raise ValueError('Native refreshed claims were not verified')
+            result['native_location_attempts']=1
+            # This is the installed native reset, real ESI update, and persisted
+            # result path. It is invoked once, without asynchronous retries.
+            _update_character_section(character_pk,Character.UpdateSection.LOCATION,force_update=True)
+        finally:
+            managers.requests.get=original_get
+        status.refresh_from_db()
+        location=CharacterLocation.objects.get(character=member)
+        foreign_keys={}
+        for field in location._meta.fields:
+            if field.is_relation and field.many_to_one:
+                pk=getattr(location,field.attname)
+                foreign_keys[field.name]=pk is None and field.null or pk is not None and field.remote_field.model.objects.filter(pk=pk).exists()
+        current_inventory=list(Token.objects.filter(character_id=identity['character_id']).order_by('pk').values_list('pk',flat=True))
+        location_valid=all(foreign_keys.values()) and bool(location.eve_solar_system_id)
+        if (status.is_success is not True or status.has_token_error is not False or status.error_message
+                or not status.run_finished_at or status.run_finished_at<=started
+                or not status.update_finished_at or status.update_finished_at<=started
+                or not status.content_hash_1 or not location_valid or current_inventory!=inventory):
+            raise ValueError('Actual native LOCATION recovery is not persisted and healthy')
+        ownership.refresh_from_db()
+        token.refresh_from_db()
+        if (token.character_id!=identity['character_id'] or token.user_id!=identity['user_id']
+                or token.character_owner_hash!=ownership.owner_hash or ownership.user_id!=identity['user_id']
+                or ownership.character_id!=member.eve_character_id
+                or set(token.scopes.values_list('name',flat=True))!=original_scopes):
+            raise ValueError('Existing token or Auth identity was not preserved')
+        result.update(complete=True,existing_token_preserved=True,auth_link_preserved=True,token_inventory_preserved=True,
+                      required_scopes_validated=True,has_token_error=status.has_token_error,is_success=status.is_success,
+                      error_length=len(status.error_message),run_started_at=status.run_started_at,run_finished_at=status.run_finished_at,
+                      update_started_at=status.update_started_at,update_finished_at=status.update_finished_at,
+                      content_hashes=[status.content_hash_1,status.content_hash_2,status.content_hash_3],
+                      location_pk=location.pk,location_foreign_keys_valid=foreign_keys,
+                      normal_token_refresh_fields_only=True)
+    except Exception as error:
+        result.update(error_type=type(error).__name__,failure_message_sha256=hashlib.sha256(str(error).encode()).hexdigest(),
+                      preserve_recovery_resources=True)
+        cause=error
+        for _ in range(8):
+            oauth_reason=getattr(cause,'error',None)
+            if oauth_reason in {'invalid_grant','invalid_client','invalid_scope','unauthorized_client','access_denied'}:
+                result['permanent_oauth_reason']=oauth_reason
+                break
+            cause=getattr(cause,'__cause__',None) or getattr(cause,'__context__',None)
+            if cause is None:
+                break
+        if isinstance(error,(ValueError,TimeoutError)):
+            result['guard_reason']=str(error) if str(error).startswith(('Reviewed ','Known ','Existing ','Native ','Another ','Auth-',
+                                  'Token or Auth','Actual native','Bounded ')) else 'Scoped native recovery failed validation'
+    finally:
+        for event,model,function in guards:
+            event.disconnect(function,sender=model)
+        signal.alarm(0)
+        result['finished_at']=datetime.now(timezone.utc).isoformat()
+    print('BUH_EXISTING_LOCATION_RECOVERY_BEGIN')
+    print(json.dumps(result,sort_keys=True,cls=DjangoJSONEncoder))
+    print('BUH_EXISTING_LOCATION_RECOVERY_END')
+'''
 
 
 MAX_STATIC_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -1131,6 +2466,7 @@ class DockerHost:
         self.retained_restart_images: dict[str, str] = {}
         self.retained_restart_started_at: dict[str, str] = {}
         self.retained_verifier_review: dict | None = None
+        self.semantic_log_analysis: dict | None = None
         self.worker_recycle_policy: dict | None = None
         self.accepted_worker_recycles: dict[str, list[dict]] = {}
         self.blocked_worker_recycles: dict[str, str] = {}
@@ -1608,9 +2944,10 @@ class DockerHost:
                   "host_observed_at", "containers", "discord_429", "verification_since"}
         if (not isinstance(review, dict)
                 or type(review.get("schema_version")) is not int
-                or review["schema_version"] not in {1, 2, 3}
+                or review["schema_version"] not in {1, 2, 3, 4}
                 or set(review) != fields | ({"worker_memory_recycles"} if review["schema_version"] >= 2 else set())
                 | ({"retained_log_findings"} if review["schema_version"] == 3 else set())
+                | ({"semantic_recovery"} if review["schema_version"] == 4 else set())
                 or review["attempt_id"] != value["attempt_id"]
                 or review["plan_sha256"] != plan_digest
                 or not isinstance(review["host_evidence_sha256"], str)
@@ -1662,6 +2999,12 @@ class DockerHost:
                     or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", proof.get("asset_task_id", "")) is None):
                 raise DeploymentError("Reviewed retained log evidence is malformed")
             _recycle_time(proof["asset_error_at"])
+        if review["schema_version"] == 4:
+            proof = review["semantic_recovery"]
+            if (not isinstance(proof, dict) or set(proof) != {"report_path", "report_sha256"}
+                    or not isinstance(proof["report_path"], str) or not Path(proof["report_path"]).is_absolute()
+                    or SHA256_RE.fullmatch(proof.get("report_sha256", "")) is None):
+                raise DeploymentError("Complete semantic recovery proof is malformed")
         self.log_since = review["verification_since"]
 
     def _verified_retained_log_findings(self) -> tuple[str, ...]:
@@ -5973,12 +7316,173 @@ class DockerHost:
                         "Retained log incident spool failed; verification incomplete"
                     ) from exc
 
+    def _recover_existing_location(self):
+        expected = self._semantic_recovery_proof()["location_recovery"]
+        code = EXISTING_LOCATION_RECOVERY_CODE + "\nrecover_existing_location(" + repr(expected) + ")"
+        if len(code.encode()) > 100 * 1024:
+            raise DeploymentError("Existing LOCATION recovery input exceeds its bound")
+        raw = self._run([*self.compose_prefix, "exec", "-T", self.config.gunicorn_service,
+                         "python3", self.config.manage_py, "shell", "--no-imports", "-c", code], timeout=195,
+                        context="One authorized native existing-token LOCATION recovery")
+        begin, end = "BUH_EXISTING_LOCATION_RECOVERY_BEGIN\n", "\nBUH_EXISTING_LOCATION_RECOVERY_END"
+        if raw.count(begin) != 1 or raw.count(end) != 1:
+            raise DeploymentError("Existing LOCATION recovery returned incomplete evidence")
+        return json.loads(raw.split(begin, 1)[1].split(end, 1)[0])
+
+    def _semantic_recovery_proof(self):
+        proof = self.retained_verifier_review["semantic_recovery"]
+        raw = self._worker_recycle_private_bytes(Path(proof["report_path"]), 16 * 1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != proof["report_sha256"]:
+            raise DeploymentError("Complete semantic recovery evidence digest differs")
+        try:
+            report = json.loads(raw)
+            summary = report["reviewed_summary"]
+            if (report["schema_version"] != 1 or summary["complete_scan"] is not True
+                    or summary["analysis_complete"] is not True or summary["total_candidate_findings"] <= 0
+                    or summary["unresolved_count"] != 0 or summary["unknown_count"] != 0
+                    or report["original_report_sha256"] != report["state"]["complete_retained_report_sha256"]):
+                raise ValueError()
+            for name in report["state"]["sources"]:
+                _semantic_source(report["state"]["sources"], name)
+            if _semantic_stamp(report["state"]["interval"]["since"]) != _semantic_stamp(self.log_since):
+                raise ValueError()
+            expected = {row["container_id"] for row in self.retained_verifier_review["containers"]}
+            reviewed = {identity for value in report["state"]["source_container_bindings"].values()
+                        for identity in value["reviewed_ids"]}
+            if expected != reviewed:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError) as error:
+            raise DeploymentError("Complete semantic recovery evidence is malformed") from error
+        return report
+
+    def _semantic_read_current(self, state):
+        expected = {key: state[key] for key in ("inventory_before", "sections", "refineries",
+                                                 "discord_guild_id", "discord_members")}
+        expected["sources"] = {name: {key: source[key] for key in ("filename", "sha256")}
+                               for name, source in state["sources"].items()}
+        code = SEMANTIC_CURRENT_READ_CODE + "\nemit_semantic_current(" + repr(expected) + ")"
+        if len(code.encode()) > 100 * 1024:
+            raise DeploymentError("Native semantic recovery read exceeds its argument bound")
+        raw = self._manage_live("shell", "--no-imports", "-c", code,
+                                context="Complete read-only native semantic recovery state")
+        begin, end = "BUH_SEMANTIC_CURRENT_BEGIN\n", "\nBUH_SEMANTIC_CURRENT_END"
+        if raw.count(begin) != 1 or raw.count(end) != 1:
+            raise DeploymentError("Native semantic recovery state is incomplete")
+        current = json.loads(raw.split(begin, 1)[1].split(end, 1)[0])
+        if (current.get("read_only") is not True or current.get("complete") is not True
+                or current.get("source_hashes") != {name: source["sha256"] for name, source in state["sources"].items()}
+                or not current.get("owners")
+                or any(row.get("healthy") is not True or row.get("credentials_valid") is not True for row in current["owners"])):
+            raise DeploymentError("Current native semantic recovery health or source proof failed")
+        return {**state, **{key: current[key] for key in ("observed_at", "owners", "sections", "refineries", "discord_members")},
+                "identity_preserved": True, "credentials_valid": True}
+
+    def _scan_semantic_logs(self, services_and_slots):
+        """Use sealed complete history, then read every source through one fresh cutoff."""
+        report = self._semantic_recovery_proof()
+        state = report["state"]
+        archive = report["signal_archive"]
+        name = archive.get("filename", "")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,150}\.ndjson\.gz", name) is None:
+            raise DeploymentError("Reviewed signal archive name is malformed")
+        path = Path(self.retained_verifier_review["semantic_recovery"]["report_path"]).parent / name
+        compressed = self._worker_recycle_private_bytes(path, 64 * 1024 * 1024)
+        if len(compressed) != archive["stored_bytes"] or hashlib.sha256(compressed).hexdigest() != archive["sha256"]:
+            raise DeploymentError("Complete reviewed signal archive identity differs")
+        cutoff = datetime.now(timezone.utc).isoformat()
+        since = state["interval"]["until"]
+        sources = {row["source"] for row in report["source_exports"]}
+        expected = {row["service"] + "/" + row["container_id"] for row in self.retained_verifier_review["containers"]}
+        for slot in services_and_slots:
+            if slot not in self.config.auth_services and slot not in {
+                    self.config.database_service, self.config.redis_service, self.config.proxy_service}:
+                matching = {identity for identity in sources if identity.startswith(slot + "/")}
+                if not matching:
+                    raise DeploymentError("Retained safety-slot semantic source is missing")
+                expected.update(matching)
+        if not expected <= sources:
+            raise DeploymentError("Complete semantic source coverage differs")
+        for service in {row["service"] for row in self.retained_verifier_review["containers"]}:
+            configured = {row["container_id"] for row in self.retained_verifier_review["containers"] if row["service"] == service}
+            if set(self._running_service_containers(service, context="Complete semantic source identities")) != configured:
+                raise DeploymentError("Complete semantic source container identity changed")
+        coverage = {}
+        with RetainedSemanticAnalyzer(state) as analyzer:
+            measured, lines, checksum = 0, 0, hashlib.sha256()
+            deadline = time.monotonic() + self.config.command_timeout_seconds * 4
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+                    while True:
+                        line = stream.readline(1024 * 1024 + 1)
+                        if not line:
+                            break
+                        if len(line) > 1024 * 1024 or time.monotonic() > deadline:
+                            raise DeploymentError("Complete reviewed signal archive read exceeded its bound")
+                        measured += len(line)
+                        lines += 1
+                        if measured > archive["source_bytes"]:
+                            raise DeploymentError("Complete reviewed signal archive expands beyond its identity")
+                        checksum.update(line)
+                        record = json.loads(line)
+                        if record["source"] not in sources or not (
+                                _semantic_stamp(state["interval"]["since"]) <= _semantic_stamp(record["first_at"])
+                                <= _semantic_stamp(since)):
+                            raise DeploymentError("Reviewed signal record is outside the retained interval")
+                        analyzer.feed(record)
+                if (measured != archive["source_bytes"] or lines != archive["record_count"]
+                        or checksum.hexdigest() != archive["uncompressed_sha256"]):
+                    raise DeploymentError("Complete reviewed signal archive EOF proof differs")
+                for capture in report["retained_captures"]:
+                    analyzer.feed(capture)
+            except (OSError, EOFError, KeyError, ValueError, DeploymentError) as error:
+                analyzer.ledger.complete_scan = analyzer.ledger.analysis_complete = False
+                analyzer.ledger.add("unreadable_retained_evidence", "unknown",
+                                    evidence_id="reviewed-signal-archive", reason=type(error).__name__)
+            for source in sorted(sources):
+                service, identity = source.split("/", 1)
+                if re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+                    raise DeploymentError("Complete semantic container identity is malformed")
+                stats = {"physical_lines": 0, "read_complete": False}
+                coverage[source] = stats
+                deadline = time.monotonic() + self.config.command_timeout_seconds
+                stream = self._stream_log_lines(["docker", "logs", "--timestamps", "--since="+since,
+                                                "--until="+cutoff, identity], deadline=deadline,
+                                                context="Complete current semantic logs for " + service)
+                try:
+                    for record in _semantic_log_records(stream, source, stats=stats, deadline=deadline):
+                        analyzer.feed(record)
+                    stats["read_complete"] = True
+                except DeploymentError as error:
+                    analyzer.ledger.complete_scan = analyzer.ledger.analysis_complete = False
+                    analyzer.ledger.add("unreadable_current_source", "unknown", evidence_id=source, reason=type(error).__name__)
+                finally:
+                    stream.close()
+            try:
+                analyzer.state = self._semantic_read_current(state)
+            except (DeploymentError, KeyError, TypeError, ValueError) as error:
+                analyzer.ledger.analysis_complete = False
+                analyzer.ledger.add("current_native_state_unproven", "unresolved",
+                                    evidence_id="native-current-read", reason=type(error).__name__)
+            summary = analyzer.finish()
+            summary.update(original_reviewed_summary=report["reviewed_summary"], original_report_sha256=report["original_report_sha256"],
+                           reviewed_signal_archive_sha256=archive["sha256"], current_interval={"since": since, "until": cutoff},
+                           source_coverage=coverage, native_observed_at=analyzer.state["observed_at"])
+            self.semantic_log_analysis = summary
+            analyzer.ledger.require_complete_recovery()
+        return tuple("recovered warning: " + family + " (" + str(counts.get("recovered", counts.get("handled", 0))) + ")"
+                     for family, counts in summary["counts_by_semantic_family"].items()
+                     if counts.get("recovered", 0) or counts.get("handled", 0))
+
     def _scan_new_logs(
         self,
         services_and_slots: Sequence[str],
         *,
         owner_transition_phase: str | None = None,
     ) -> tuple[str, ...]:
+        if self.retained_verifier_review is not None and self.retained_verifier_review.get("schema_version") == 4:
+            if owner_transition_phase is not None:
+                raise DeploymentError("Complete semantic recovery does not authorize owner transition exceptions")
+            return self._scan_semantic_logs(services_and_slots)
         infrastructure = (
             self.config.proxy_service,
             self.config.database_service,
