@@ -55,6 +55,18 @@ LOCKED_PACKAGING_HASHES = {
         "d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f",
     ),
 }
+# Generated production-lock hashes. Select by the immutable release's runtime
+# contract so a security successor cannot silently change an older payload.
+LOCKED_DJANGO_HASHES = {
+    "5.2.17": (
+        "9d4d93be539a18ab80d058eb515900e10951e04c537c5a6b394fc49528d3251f",
+        "f04fb3b36ee119e1af4fa1d397d5fd6cf12700f49321e84d4f4c642c5b1973db",
+    ),
+    "5.2.18": (
+        "461c5dd06d2ea16bd5ca37d3f46e4def1d6b0fe7588c6f4e2119517bb0af8b2d",
+        "92ed81d500be6408ecd704d7bd1366c534f30427bffcc63c5fefb129561aec7c",
+    ),
+}
 # The failed v0.8.1 candidate's pip check exposed these missing or mismatched
 # packages after every release wheel had been installed. Versions and artifact
 # hashes are copied from platform/requirements/production.lock and checked by
@@ -2207,12 +2219,25 @@ class DockerHost:
         )
 
     @staticmethod
+    def _django_version(bundle: ValidatedBundle) -> str:
+        runtime = bundle.manifest["compatibility"]["values"].get("runtime")
+        version = runtime.get("django") if isinstance(runtime, dict) else None
+        if not isinstance(version, str) or version not in LOCKED_DJANGO_HASHES:
+            raise DeploymentError("Release compatibility lacks a hash-pinned Django version")
+        return version
+
+    @staticmethod
     def _production_dependencies_install_lines(bundle: ValidatedBundle) -> list[str]:
         runtime = bundle.manifest["compatibility"]["values"].get("runtime")
         if not isinstance(runtime, dict) or runtime.get("django_esi") != "9.6.0":
             raise DeploymentError("Release compatibility lacks the locked django-esi version")
+        django_version = DockerHost._django_version(bundle)
+        dependencies = {
+            "Django": (django_version, LOCKED_DJANGO_HASHES[django_version]),
+            **LOCKED_PRODUCTION_DEPENDENCIES,
+        }
         lines = ["RUN printf '%s\\n' \\"]
-        for name, (version, hashes) in LOCKED_PRODUCTION_DEPENDENCIES.items():
+        for name, (version, hashes) in dependencies.items():
             requirement = f"{name}=={version} " + " ".join(
                 f"--hash=sha256:{digest}" for digest in hashes
             )
@@ -2289,6 +2314,7 @@ class DockerHost:
             raise DeploymentError("Release compatibility lacks an exact AllianceAuth version")
         expected["allianceauth"] = core
         expected["packaging"] = self._packaging_version(bundle)
+        expected["Django"] = self._django_version(bundle)
         expected.update(
             {name: version for name, (version, _) in LOCKED_PRODUCTION_DEPENDENCIES.items()}
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import shutil
 import subprocess
@@ -34,17 +35,19 @@ EXPECTED_SHA256 = {
 PACKAGE = "aa_buh_memberaudit_autoreg-0.1.0-py3-none-any.whl"
 PUBLISHED_RELEASE = ROOT / "releases/platform/v0.8.1"
 PUBLISHED_RELEASE_COMMIT = "93e166acaeff18e4ec1967c7c4443075aa2fab78"
+CANDIDATE_BASELINE = ROOT / "releases/platform/v0.8.3"
 OLD_INSTALL = f"RUN pip install /tmp/{PACKAGE}"
 NEW_INSTALL = f"RUN pip install --no-deps /tmp/{PACKAGE}"
 PROBE = (
-    "import allianceauth,importlib.metadata as m,json;"
+    "import allianceauth,django,importlib.metadata as m,json;"
     "print(json.dumps({'installed':m.version('allianceauth'),"
     "'imported':allianceauth.__version__,"
-    "'packaging':m.version('packaging')},sort_keys=True))"
+    "'packaging':m.version('packaging'),'django':m.version('Django'),"
+    "'imported_django':django.get_version()},sort_keys=True))"
 )
 LOCKED_PROBE = (
     "import importlib.metadata as m,json;"
-    f"names={json.dumps(sorted(LOCKED_PRODUCTION_DEPENDENCIES))};"
+    f"names={json.dumps(sorted([*LOCKED_PRODUCTION_DEPENDENCIES, 'Django']))};"
     "print(json.dumps({name:m.version(name) for name in names},sort_keys=True))"
 )
 
@@ -75,6 +78,7 @@ def main() -> None:
     expected_core = compatibility["runtime"]["allianceauth"]
     expected_packaging = compatibility["runtime"]["packaging"]
     expected_django_esi = compatibility["runtime"]["django_esi"]
+    expected_django = compatibility["runtime"]["django"]
     if expected_core != "5.4.0":
         raise SystemExit("This exact regression rehearsal expects AllianceAuth 5.4.0")
     if expected_django_esi != "9.6.0":
@@ -109,6 +113,21 @@ def main() -> None:
             ).hexdigest(),
         ),
     )
+    # A disposable build fixture, not a published release or authorization.
+    # Reuse the latest immutable wheel payload with the source's runtime pins.
+    candidate_manifest = copy.deepcopy(verify_release_dir(CANDIDATE_BASELINE))
+    candidate_manifest["compatibility"]["values"] = compatibility
+    candidate_manifest["platform_version"] = "0.0.0"
+    candidate_bundle = SimpleNamespace(
+        manifest=candidate_manifest,
+        request=SimpleNamespace(
+            platform_version="0.0.0",
+            release_commit="0" * 40,
+            manifest_sha256=hashlib.sha256(
+                json.dumps(candidate_manifest, sort_keys=True).encode()
+            ).hexdigest(),
+        ),
+    )
 
     with tempfile.TemporaryDirectory(prefix="buh-effective-build-") as temporary:
         context = Path(temporary)
@@ -121,6 +140,11 @@ def main() -> None:
         for artifact in published_manifest["artifacts"]:
             filename = artifact["filename"]
             shutil.copyfile(PUBLISHED_RELEASE / filename, release_context / filename)
+        candidate_context = conf / "buh-platform-v2/releases/v0.0.0"
+        candidate_context.mkdir(parents=True)
+        for artifact in candidate_manifest["artifacts"]:
+            filename = artifact["filename"]
+            shutil.copyfile(CANDIDATE_BASELINE / filename, candidate_context / filename)
         for mode, dockerfile in (
             ("legacy", prefix),
             (
@@ -137,6 +161,12 @@ def main() -> None:
                 + DockerHost.__new__(DockerHost)._dockerfile_block(published_bundle)
                 + "RUN python3 -m pip check\n",
             ),
+            (
+                "source-candidate",
+                prefix.replace(OLD_INSTALL, NEW_INSTALL)
+                + DockerHost.__new__(DockerHost)._dockerfile_block(candidate_bundle)
+                + "RUN python3 -m pip check\n",
+            ),
         ):
             (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
             image = f"buh-auth54-effective-build:{mode}"
@@ -147,6 +177,10 @@ def main() -> None:
                     "--tag", image, str(context),
                 )
                 actual = _probe(image)
+                mode_django = (
+                    published_manifest["compatibility"]["values"]["runtime"]["django"]
+                    if mode == "published-candidate" else expected_django
+                )
                 if mode == "legacy":
                     if actual["installed"] == expected_core:
                         raise SystemExit("Legacy helper did not reproduce the downgrade")
@@ -154,6 +188,8 @@ def main() -> None:
                     "installed": expected_core,
                     "imported": expected_core,
                     "packaging": expected_packaging,
+                    "django": mode_django,
+                    "imported_django": mode_django,
                 }:
                     raise SystemExit("Corrected effective build has wrong core or packaging")
                 if mode != "legacy":
@@ -162,6 +198,7 @@ def main() -> None:
                         name: version
                         for name, (version, _) in LOCKED_PRODUCTION_DEPENDENCIES.items()
                     }
+                    expected["Django"] = mode_django
                     if locked != expected:
                         raise SystemExit("Corrected effective build has wrong locked dependencies")
                     print(f"corrected locked dependencies: {locked}")
