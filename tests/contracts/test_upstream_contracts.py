@@ -111,6 +111,7 @@ class VersionContracts(ContractAssertions, SimpleTestCase):
             compatibility = tomllib.load(stream)
 
         expected = {
+            "Django": compatibility["runtime"]["django"],
             "allianceauth": compatibility["runtime"]["allianceauth"],
             "django-esi": compatibility["runtime"]["django_esi"],
             "aa-memberaudit": compatibility["runtime"]["memberaudit"],
