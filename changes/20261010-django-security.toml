@@ -1,0 +1,3 @@
+app = "platform"
+kind = "security"
+summary = "Update Django to 5.2.18 for the October 2026 security fixes, retaining the Auth 5.4 compatibility stack."
