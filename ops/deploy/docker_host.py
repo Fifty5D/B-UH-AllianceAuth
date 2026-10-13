@@ -541,7 +541,13 @@ def _semantic_callback_shape(record, sources):
         return False
     terminal = record["rows"][-1]["text"]
     if terminal == "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.":
-        return len(frames) == 3 and int(header["source_line"]) in catches.get("CallbackRedirect.DoesNotExist", set())
+        callback_lookups = {node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+                            and ast.unparse(node.func) == "CallbackRedirect.objects.get"
+                            and any(keyword.arg == "session_key"
+                                    and ast.unparse(keyword.value) == "request.session.session_key"
+                                    for keyword in node.keywords)}
+        return (len(frames) == 3 and int(frames[0][1]) in callback_lookups
+                and int(header["source_line"]) in catches.get("CallbackRedirect.DoesNotExist", set()))
     if terminal != "AttributeError: 'NoneType' object has no attribute 'pk'" or len(frames) != 1:
         return False
     token_lookups = {node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)

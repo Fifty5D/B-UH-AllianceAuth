@@ -35,7 +35,7 @@ def fixture(*, attribute=False, session=SESSION, principal="AnonymousUser"):
     logged = next(n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
                   and ast.unparse(n.func) == "logger.debug")
     lookup = next(n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
-                  and ast.unparse(n.func) == "Token.objects.get")
+                  and ast.unparse(n.func) == ("Token.objects.get" if attribute else "CallbackRedirect.objects.get"))
     body = (f"[01/Jan/2026 00:01:00] DEBUG [esi.decorators:{logged}] No callback for {principal} session sha256:{session}\n"
             "Traceback (most recent call last):\n"
             f'  File "/installed/esi/decorators.py", line {lookup}, in _check_callback\n'
@@ -251,6 +251,11 @@ class CallbackCorrelationTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assertNotEqual(decision, ("handled_callback", "handled"))
                 self.assertGreater(summary["unknown_count"] + summary["unresolved_count"], 0)
+
+    def test_callback_traceback_must_point_to_the_actual_session_lookup(self):
+        state, rows = fixture()
+        rows[0]["rows"][2]["text"] = '  File "/installed/esi/decorators.py", line 999, in _check_callback'
+        self.assert_unproven(state, rows)
 
     def test_wrong_client_agent_proxy_or_non_success_status_remains_unproven(self):
         for mutation in ("client", "agent", "proxy", "http", "component", "severity", "partial"):
