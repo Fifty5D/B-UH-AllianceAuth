@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Require independent same-session callback, native continuation and HTTP completion evidence; reject concurrent or later failures and preserve complete record boundaries and duplicate evidence."

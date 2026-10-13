@@ -153,6 +153,9 @@ MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
 LOG_READ_BYTES = 64 * 1024
 MAX_OWNER_RECORD_LINES = 128
 MAX_OWNER_INCIDENT_BYTES = 512 * 1024
+MAX_SEMANTIC_RECORD_LINES = MAX_OWNER_RECORD_LINES
+MAX_SEMANTIC_RECORD_BYTES = MAX_OWNER_INCIDENT_BYTES
+MAX_SEMANTIC_ROW_BYTES = 256 * 1024
 MAX_COMPOSE_FILES = 8
 MAX_SERVICE_REPLICAS = 128
 BACKUP_LOCK_SECONDS = 120
@@ -324,6 +327,91 @@ def _semantic_record_body(record):
     return "\n".join(row["text"] for row in rows)
 
 
+def _semantic_record_session(record):
+    """Read one identity from this record, rejecting contradictory annotations."""
+    body = _semantic_record_body(record)
+    sessions = set(re.findall(r"\bsession sha256:([0-9a-f]{64})\b", body))
+    for number, row in enumerate(record["rows"]):
+        provided = row.get("session_sha256", [])
+        if (not isinstance(provided, list) or len(provided) > 32
+                or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in provided)):
+            raise DeploymentError("Semantic session identity is malformed")
+        sessions.update(provided)
+        if "at" in row:
+            when = _semantic_stamp(row["at"])
+            first = _semantic_stamp(record["first_at"])
+            if when < first or number == 0 and when != first:
+                raise DeploymentError("Semantic record and physical row clocks differ")
+    if len(sessions) > 1:
+        raise DeploymentError("Semantic session identities conflict")
+    return next(iter(sessions), None)
+
+
+def _semantic_callback_message(record, event):
+    """Native continuation messages carry their own session and principal."""
+    _semantic_record_body(record)
+    header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+    if (header is None or header["level"] != "DEBUG" or header["component"] != "esi.decorators"
+            or event != "failure" and len(record["rows"]) != 1):
+        return None
+    patterns = {
+        "failure": r"No callback for (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64})",
+        "fallback": r"Redirecting (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64}) to SSO\.",
+        "continuation": r"Got new token from (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64})\. Returning to view\.",
+    }
+    parsed = re.fullmatch(patterns[event], record["rows"][0]["text"][header.end():])
+    if parsed is None or _semantic_record_session(record) != parsed["session"]:
+        return None
+    return parsed["principal"], parsed["session"]
+
+
+def _semantic_callback_http(record):
+    body = _semantic_record_body(record)
+    if len(record["rows"]) != 1:
+        return None
+    return re.fullmatch(r'(?P<client>\S+) .+ "GET (?P<path>/[^ ]*) HTTP/[0-9.]+" '
+                        r'(?P<status>[0-9]{3}) [0-9]+ "[^"]*" "(?P<agent>[^"]+)"', body)
+
+
+def _semantic_callback_proof(case, sources):
+    """Recheck actual continuation/HTTP records, never a copied success identity."""
+    failed = case["record"]
+    if not _semantic_callback_shape(failed, sources):
+        return False
+    identity = _semantic_callback_message(failed, "failure")
+    evidence = case["callback_records"]
+    if identity is None or set(evidence) != {"fallback", "continuation", "redirect", "return"}:
+        return False
+    fallback, native, redirect, returned = (evidence[name] for name in ("fallback", "continuation", "redirect", "return"))
+    if (fallback["source"] != failed["source"] or native["source"] != failed["source"]
+            or _semantic_callback_message(fallback, "fallback") != identity
+            or _semantic_callback_message(native, "continuation") != identity):
+        return False
+    sent, completed = _semantic_callback_http(redirect), _semantic_callback_http(returned)
+    returned_session = _semantic_record_session(returned)
+    if (sent is None or completed is None or _semantic_record_session(redirect) != identity[1]
+            or returned_session != identity[1] or redirect["source"] != returned["source"]
+            or redirect["source"].partition("/")[0] != case["proxy_service"]
+            or urlsplit(sent["path"]).path not in {"/sso/login", "/sso/login/"} or sent["status"] != "302"
+            or completed["status"] != "200" or completed["path"].startswith(("/sso/", "/static/", "/media/"))
+            or sent["client"] != completed["client"] or sent["agent"] != completed["agent"]):
+        return False
+    at, fallback_at, done, sent_at, returned_at = (
+        _semantic_stamp(row["first_at"]) for row in (failed, fallback, native, redirect, returned))
+    return (at < fallback_at <= at + timedelta(seconds=5) and fallback_at < done <= at + timedelta(hours=4)
+            and done < sent_at <= done + timedelta(seconds=5)
+            and sent_at < returned_at <= sent_at + timedelta(seconds=5)
+            and case["success"]["finished_at"] == returned["first_at"]
+            and case["failure"]["operation"] == {
+                "provider": "application", "subsystem": "esi", "family": "callback_lookup", "identity": identity[1]}
+            and case["success"]["operation"]["identity"] == _semantic_record_session(native)
+            and case["current"]["operation"]["identity"] == returned_session
+            and case.get("session_sha256") == identity[1]
+            and case.get("success_session_sha256") == _semantic_record_session(native)
+            and case.get("native_fallback_completed") is True and case.get("authentication_completed") is True
+            and case.get("http_completion_status") == int(completed["status"]))
+
+
 def _semantic_operation_key(operation):
     """No guessed identity, nullable operand or different-operation substitution."""
     fields = ("provider", "subsystem", "family", "identity")
@@ -420,6 +508,48 @@ def _semantic_provider_event(record, sources):
         return None
     return {"task": task[1], "task_id": task[2], "source": record["source"],
             "at": record["first_at"], "subsystem": SEMANTIC_OWNER_TASKS[task[1]][0]}
+
+
+def _semantic_callback_shape(record, sources):
+    """Only the native caught lookup branches; AttributeError is not generic."""
+    body = _semantic_record_body(record)
+    tree, source = _semantic_source(sources, "esi.decorators")
+    function = next((node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == "_check_callback"), None)
+    if function is None:
+        return False
+    catches = {}
+    for handler in ast.walk(function):
+        if not isinstance(handler, ast.ExceptHandler):
+            continue
+        types = [handler.type] if not isinstance(handler.type, ast.Tuple) else handler.type.elts
+        names = {ast.unparse(node) for node in types}
+        caught_logs = [node for node in ast.walk(handler) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == "debug"
+                       and any(keyword.arg == "exc_info" and isinstance(keyword.value, ast.Constant)
+                               and keyword.value.value is True for keyword in node.keywords)]
+        returns_none = any(isinstance(node, ast.Return) and isinstance(node.value, ast.Constant)
+                           and node.value.value is None for node in ast.walk(handler))
+        if caught_logs and returns_none:
+            for name in names:
+                catches.setdefault(name, set()).update(node.lineno for node in caught_logs)
+    header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+    frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+    if (header is None or header["level"] != "DEBUG" or header["component"] != "esi.decorators"
+            or body.count("Traceback (most recent call last):") != 1 or not frames
+            or frames[0][0] != source["filename"] or frames[0][2] != "_check_callback"):
+        return False
+    terminal = record["rows"][-1]["text"]
+    if terminal == "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.":
+        return len(frames) == 3 and int(header["source_line"]) in catches.get("CallbackRedirect.DoesNotExist", set())
+    if terminal != "AttributeError: 'NoneType' object has no attribute 'pk'" or len(frames) != 1:
+        return False
+    token_lookups = {node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
+                     and ast.unparse(node.func) == "Token.objects.get"
+                     and any(keyword.arg == "pk" and ast.unparse(keyword.value) == "model.token.pk"
+                             for keyword in node.keywords)}
+    return (int(frames[0][1]) in token_lookups
+            and int(header["source_line"]) in catches.get("AttributeError", set()))
 
 
 def prove_systemic_provider_recovery(records, sources, inventory_before, inventory_current, *, complete):
@@ -567,37 +697,7 @@ def prove_semantic_recovery(case, sources):
                     and case.get("current_http_status") == 404 and case.get("current_discord_code") == 10007
                     and '"Unknown Member"' in body and re.search(r'"code"\s*:\s*10007\b', body) is not None)
         if kind == "handled_callback":
-            tree, source = _semantic_source(sources, "esi.decorators")
-            function = next((node for node in ast.walk(tree)
-                             if isinstance(node, ast.FunctionDef) and node.name == "_check_callback"), None)
-            if function is None:
-                return False
-            catches = []
-            for handler in ast.walk(function):
-                if not isinstance(handler, ast.ExceptHandler):
-                    continue
-                types = [handler.type] if not isinstance(handler.type, ast.Tuple) else handler.type.elts
-                if not any(ast.unparse(node) == "CallbackRedirect.DoesNotExist" for node in types):
-                    continue
-                caught_logs = [node for node in ast.walk(handler) if isinstance(node, ast.Call)
-                               and isinstance(node.func, ast.Attribute) and node.func.attr == "debug"
-                               and any(keyword.arg == "exc_info" and isinstance(keyword.value, ast.Constant)
-                                       and keyword.value.value is True for keyword in node.keywords)]
-                if caught_logs and any(isinstance(node, ast.Return) and isinstance(node.value, ast.Constant)
-                                       and node.value.value is None for node in ast.walk(handler)):
-                    catches.extend(node.lineno for node in caught_logs)
-            header = ALLIANCEAUTH_LOG_HEADER_RE.match(case["record"]["rows"][0]["text"])
-            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
-            return (header is not None and header["level"] == "DEBUG" and header["component"] == "esi.decorators"
-                    and int(header["source_line"]) in catches
-                    and len(frames) == 3 and frames[0][0] == source["filename"] and frames[0][2] == "_check_callback"
-                    and case["record"]["rows"][-1]["text"]
-                    == "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
-                    and SHA256_RE.fullmatch(case.get("session_sha256", "")) is not None
-                    and case.get("session_sha256") == case.get("success_session_sha256")
-                    and case.get("native_fallback_completed") is True
-                    and case.get("authentication_completed") is True
-                    and case.get("http_completion_status") == 200)
+            return _semantic_callback_proof(case, sources)
         return False
     except (KeyError, TypeError, ValueError, DeploymentError, RecursionError):
         return False
@@ -622,16 +722,19 @@ class RetainedSemanticAnalyzer:
         self.database.execute("PRAGMA journal_mode=OFF")
         self.database.execute("PRAGMA temp_store=FILE")
         self.database.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, source TEXT, at TEXT, "
-                              "body TEXT, record TEXT, candidate INTEGER, request TEXT, session TEXT, target TEXT)")
+                              "body TEXT, record TEXT, candidate INTEGER, request TEXT, session TEXT, target TEXT, "
+                              "physical_identity TEXT UNIQUE)")
         self.database.execute("CREATE INDEX by_request ON records(source,request,seq)")
         self.database.execute("CREATE INDEX by_target ON records(source,target,at)")
         self.database.execute("CREATE INDEX by_time ON records(source,at)")
         self.database.execute("CREATE INDEX all_times ON records(at)")
         self.database.execute("CREATE INDEX by_session ON records(source,session,at)")
+        self.database.execute("CREATE INDEX all_sessions ON records(session,at)")
         self.database.execute("CREATE INDEX candidate_order ON records(candidate,seq)")
         self.decisions = {}
         self.request_cache = {}
         self.pending_sections = Counter()
+        self.duplicate_physical_views = 0
 
     def close(self):
         self.database.close()
@@ -663,6 +766,20 @@ class RetainedSemanticAnalyzer:
                                     evidence_id=original_source + "/" + str(record.get("ordinal")))
                 return
             body = _semantic_record_body(record)
+            session = _semantic_record_session(record)
+            physical_identity = None
+            if all(isinstance(row.get("at"), str) and isinstance(row.get("raw_sha256"), str)
+                   and SHA256_RE.fullmatch(row["raw_sha256"]) is not None for row in record["rows"]):
+                physical_identity = hashlib.sha256(json.dumps([
+                    record["source"], [(row["at"], row["raw_sha256"]) for row in record["rows"]]
+                    ], separators=(",", ":")).encode()).hexdigest()
+                existing = self.database.execute("SELECT at,body,session FROM records WHERE physical_identity=?",
+                                                 (physical_identity,)).fetchone()
+                if existing is not None:
+                    if existing != (_semantic_stamp(record["first_at"]).isoformat(), body, session):
+                        raise DeploymentError("Duplicate physical evidence has conflicting content or correlation")
+                    self.duplicate_physical_views += 1
+                    return
             candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body))
             if not candidate and not re.search(
                     r"Discord Service|Nickname for |Account .*deleted|account.*deleted|"
@@ -674,18 +791,11 @@ class RetainedSemanticAnalyzer:
             request = re.search(r"\[Discord Service\] ([0-9a-f]{32}):", body)
             target = re.search(r"sending (?:GET|POST|PATCH|PUT|DELETE) request to url "
                                r"'(https://discord\.com/api[^']+/members/[0-9]+[^']*)'", body)
-            sessions = record["rows"][0].get("session_sha256", [])
-            if not sessions:
-                match = re.search(r"\bsession sha256:([0-9a-f]{64})\b", body)
-                if match:
-                    sessions = [match[1]]
-            if len(sessions) > 1:
-                self.ledger.analysis_complete = False
-            self.database.execute("INSERT INTO records(source,at,body,record,candidate,request,session,target) "
-                                  "VALUES (?,?,?,?,?,?,?,?)", (
+            self.database.execute("INSERT INTO records(source,at,body,record,candidate,request,session,target,physical_identity) "
+                                  "VALUES (?,?,?,?,?,?,?,?,?)", (
                 record["source"], _semantic_stamp(record["first_at"]).isoformat(), body, json.dumps(record, separators=(",", ":")),
-                int(candidate), request[1] if request else None, sessions[0] if len(sessions) == 1 else None,
-                target[1] if target else None))
+                int(candidate), request[1] if request else None, session,
+                target[1] if target else None, physical_identity))
         except (DeploymentError, KeyError, TypeError, ValueError, sqlite3.Error):
             self.ledger.analysis_complete = False
             self.ledger.add("malformed_evidence", "unknown", evidence_id="invalid-record",
@@ -879,80 +989,77 @@ class RetainedSemanticAnalyzer:
 
     def _callback_decision(self, record):
         body = _semantic_record_body(record)
-        if "CallbackRedirect.DoesNotExist" not in body:
+        if ("CallbackRedirect.DoesNotExist" not in body
+                and "AttributeError: 'NoneType' object has no attribute 'pk'" not in body):
             return None
-        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
-        sessions = record["rows"][0].get("session_sha256", [])
-        if header is None or len(sessions) != 1:
-            return ("handled_callback", "unresolved")
-        principal = record["rows"][0]["text"][header.end():].split(" session ", 1)[0].removeprefix("No callback for ")
-        at = _semantic_stamp(record["first_at"])
-        following = []
-        for _, row in self._records("source=? AND session=?", (record["source"], sessions[0])):
-            when = _semantic_stamp(row["first_at"])
-            if at < when <= at + timedelta(hours=4):
-                following.append(row)
-        completions = [row for row in following if "Got new token from " + principal + " session "
-                       in _semantic_record_body(row) and ". Returning to view." in _semantic_record_body(row)]
-        fallback = any("Redirecting " in _semantic_record_body(row) and " to SSO." in _semantic_record_body(row)
-                       for row in following if _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=5))
-        if not completions:
-            # Already authenticated token selection is another native successful
-            # continuation. It must include the principal and view token check.
-            choices = [row for _, row in self._records("source=?", (record["source"],))
-                       if principal + " has selected token " in _semantic_record_body(row)
-                       and at < _semantic_stamp(row["first_at"]) <= at + timedelta(seconds=120)]
-            if len(choices) == 1:
-                chosen = _semantic_stamp(choices[0]["first_at"])
-                validated = any("Selected token fulfills requirements of view. Returning." in _semantic_record_body(row)
-                                and chosen < _semantic_stamp(row["first_at"]) <= chosen + timedelta(seconds=1)
-                                for _, row in self._records("source=?", (record["source"],)))
-                if validated:
-                    completions = choices
-                    fallback = True
-        for completion in completions:
-            finished = completion["first_at"]
-            done = _semantic_stamp(finished)
-            http_rows = [row for _, row in self._records("at>? AND at<=? AND body LIKE '%HTTP/%'",
-                         (done.isoformat(), (done + timedelta(seconds=120)).isoformat()))]
-            # Bind the ordinary return to the same proxy client and user agent
-            # as the successful SSO redirect. The destination may be any native
-            # view; a hard-coded dashboard would reject valid return-to URLs.
-            access = re.compile(r'^(?P<client>\S+) .+ "GET (?P<path>/[^ ]*) HTTP/[0-9.]+" '
-                                r'(?P<status>[0-9]{3}) [0-9]+ "[^"]*" "(?P<agent>[^"]+)"$')
-            redirects = []
-            for row in http_rows:
-                parsed = access.match(_semantic_record_body(row))
-                if (parsed and parsed["path"].startswith("/sso/login") and parsed["status"] == "302"
-                        and _semantic_stamp(row["first_at"]) <= done + timedelta(seconds=5)):
-                    redirects.append((row, parsed))
-            http_ok = False
-            for redirect, client in redirects:
-                after = _semantic_stamp(redirect["first_at"])
-                returns = []
-                for row in http_rows:
-                    parsed = access.match(_semantic_record_body(row))
-                    if (parsed and row["source"] == redirect["source"]
-                            and parsed["client"] == client["client"] and parsed["agent"] == client["agent"]
-                            and after < _semantic_stamp(row["first_at"]) <= after + timedelta(seconds=5)
-                            and not parsed["path"].startswith(("/sso/", "/static/", "/media/"))):
-                        returns.append((row, parsed))
-                if returns and min(returns, key=lambda item: _semantic_stamp(item[0]["first_at"]))[1]["status"] == "200":
-                    http_ok = True
-            if not redirects:
-                # Authenticated token selection has no SSO redirect. Its
-                # successful token/view check still needs the normal UI return.
-                http_ok = principal != "AnonymousUser" and any(
-                    re.search(r'"GET /dashboard/(?:\?[^ ]*)? HTTP/[0-9.]+" 200\b', _semantic_record_body(row))
-                    for row in http_rows)
-            op = {"provider": "application", "subsystem": "esi", "family": "callback_lookup", "identity": sessions[0]}
-            case = self._case("handled_callback", record, op, finished, extra={
-                "session_sha256": sessions[0], "success_session_sha256": sessions[0],
-                "native_fallback_completed": fallback, "authentication_completed": True,
-                "http_completion_status": 200 if http_ok else None})
+        unresolved = ("handled_callback", "unresolved")
+        try:
+            identity = _semantic_callback_message(record, "failure")
+            if identity is None or not _semantic_callback_shape(record, self.state["sources"]):
+                return unresolved
+            at = _semantic_stamp(record["first_at"])
+            observed = _semantic_stamp(self.state["observed_at"])
+            # Another failure for this session is an operation boundary, even
+            # if it shares the same timestamp or occurs after a successful return.
+            failures = [row for _, row in self._records("session=? AND candidate=1 AND at>=?",
+                                                       (identity[1], at.isoformat()))]
+            if len(failures) != 1 or failures[0] != record:
+                return unresolved
+            following = [row for _, row in self._records("session=? AND at>? AND at<=?",
+                         (identity[1], at.isoformat(),
+                          min(observed, at + timedelta(hours=4)).isoformat()))]
+            fallbacks = [row for row in following if _semantic_callback_message(row, "fallback") is not None]
+            completions = [row for row in following if _semantic_callback_message(row, "continuation") is not None]
+            if len(fallbacks) != 1 or len(completions) != 1:
+                return unresolved
+            fallback, completion = fallbacks[0], completions[0]
+            done = _semantic_stamp(completion["first_at"])
+            fallback_at = _semantic_stamp(fallback["first_at"])
+            if not (at < fallback_at <= at + timedelta(seconds=5)
+                    and fallback_at < done <= at + timedelta(hours=4)):
+                return unresolved
+            # Session metadata must independently identify BOTH proxy requests.
+            # A matching IP, user agent or nearby dashboard 200 supplies no identity.
+            http_rows = []
+            for _, row in self._records("session=? AND at>? AND at<=? AND body LIKE '%HTTP/%'",
+                                       (identity[1], done.isoformat(),
+                                        min(observed, done + timedelta(seconds=120)).isoformat())):
+                parsed = _semantic_callback_http(row)
+                if parsed is not None and row["source"].partition("/")[0] == self.state.get("proxy_service", "nginx"):
+                    http_rows.append((row, parsed))
+            redirects = [(row, parsed) for row, parsed in http_rows
+                         if urlsplit(parsed["path"]).path in {"/sso/login", "/sso/login/"}
+                         and parsed["status"] == "302"
+                         and _semantic_stamp(row["first_at"]) <= done + timedelta(seconds=5)]
+            if len(redirects) != 1:
+                return unresolved
+            redirect, _ = redirects[0]
+            after = _semantic_stamp(redirect["first_at"])
+            returns = [(row, parsed) for row, parsed in http_rows
+                       if after < _semantic_stamp(row["first_at"]) <= after + timedelta(seconds=5)
+                       and not parsed["path"].startswith(("/sso/", "/static/", "/media/"))]
+            if len(returns) != 1 or returns[0][1]["status"] != "200":
+                return unresolved
+            returned, completed = returns[0]
+            failure_op = {"provider": "application", "subsystem": "esi", "family": "callback_lookup",
+                          "identity": _semantic_record_session(record)}
+            success_op = {**failure_op, "identity": _semantic_record_session(completion)}
+            current_op = {**failure_op, "identity": _semantic_record_session(returned)}
+            finished = returned["first_at"]
+            case = self._case("handled_callback", record, failure_op, finished, extra={
+                "success": {"operation": success_op, "finished_at": finished, "persisted": True},
+                "current": self._current(current_op, finished=finished),
+                "session_sha256": failure_op["identity"], "success_session_sha256": success_op["identity"],
+                "native_fallback_completed": True, "authentication_completed": True,
+                "http_completion_status": int(completed["status"]),
+                "proxy_service": self.state.get("proxy_service", "nginx"),
+                "callback_records": {"fallback": fallback, "continuation": completion,
+                                     "redirect": redirect, "return": returned}})
             if prove_semantic_recovery(case, self.state["sources"]):
                 return ("handled_callback", "handled")
-        return ("handled_callback", "unresolved")
+        except (DeploymentError, KeyError, TypeError, ValueError):
+            pass
+        return unresolved
 
     def _asset_decision(self, record):
         body = _semantic_record_body(record)
@@ -1120,48 +1227,135 @@ class RetainedSemanticAnalyzer:
             self.decisions[seq] = decision
         summary = self.ledger.summary()
         summary["pending_section_recoveries"] = dict(self.pending_sections)
+        summary["exact_duplicate_physical_views"] = self.duplicate_physical_views
         return summary
 
 
-def _semantic_log_records(lines, source, *, stats, deadline):
-    """Parse every timestamped physical line; never cap the retained interval."""
-    stamp = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z) (.*)$")
+class SemanticRecordError(DeploymentError):
+    """A bounded partial record is evidence, never an implicitly complete read."""
+
+    def __init__(self, message, partial_record):
+        super().__init__(message)
+        self.partial_record = partial_record
+
+
+def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
+    """One lossless framing contract for retained rows and live transport.
+
+    A traceback includes every causal chain, schema detail and terminal class
+    through its next native header. In particular, ReadTimeout is a terminal
+    exception even though its name does not end in Error. Bounds apply to the
+    whole record; crossing one retains a partial record and blocks collection.
+    """
     header = re.compile(r"^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]+\]|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4} )")
-    session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{20,64})(?=[. ]|$)")
+    terminal = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
+    session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{5,64})(?=[. ]|$)")
+    existing_session = re.compile(r"\bsession sha256:([0-9a-f]{64})\b")
     rows, first_at, ordinal, size = [], None, 0, 0
-    for line in lines:
+    in_traceback = False
+    last_traceback = last_terminal = -1
+    stats.setdefault("physical_lines", 0)
+    stats.setdefault("complete_records", 0)
+    stats["read_complete"] = False
+
+    def frame(complete):
+        return {"source": source, "first_at": first_at, "ordinal": ordinal,
+                "record_complete": complete, "rows": rows}
+
+    def fail(message):
+        stats["read_complete"] = False
+        stats["partial_record_rows"] = len(rows)
+        stats["partial_record_bytes"] = size
+        raise SemanticRecordError(message, frame(False))
+
+    def completed():
+        if in_traceback and last_terminal < last_traceback:
+            fail("Semantic traceback has no complete terminal cause")
+        stats["complete_records"] += 1
+        return frame(True)
+
+    physical = iter(physical_rows)
+    while True:
+        try:
+            supplied = next(physical)
+        except StopIteration:
+            break
+        except (DeploymentError, UnicodeError, OSError) as error:
+            stats["input_stream_failure"] = type(error).__name__
+            fail("Complete semantic input stream failed: " + str(error))
         if time.monotonic() > deadline:
-            raise DeploymentError("Complete semantic log parsing timed out")
-        parsed = stamp.fullmatch(line)
-        if parsed is None or "\ufffd" in line:
-            raise DeploymentError("Complete semantic log stream has a malformed row")
-        at, original = parsed.groups()
-        _semantic_stamp(at)
-        stats["physical_lines"] += 1
-        stats["first_at"] = stats.get("first_at") or at
-        stats["last_at"] = at
-        if rows and (header.match(original) or not original.startswith((" ", "Traceback ", "During handling ",
-                                                                        "The above exception "))
-                     and not re.match(r"^[a-zA-Z_][a-zA-Z_0-9.]*?(?:Error|Exception|DoesNotExist)(?::|$)", original)
-                     and original != ""):
-            yield {"source": source, "first_at": first_at, "ordinal": ordinal,
-                   "record_complete": True, "rows": rows}
-            rows, size = [], 0
+            fail("Complete semantic log parsing timed out")
+        if (not isinstance(supplied, dict) or not isinstance(supplied.get("text"), str)
+                or "\ufffd" in supplied["text"]):
+            fail("Complete semantic log stream has a malformed row")
+        at, original = supplied.get("at"), supplied["text"]
+        try:
+            _semantic_stamp(at)
+        except DeploymentError:
+            fail("Complete semantic row timestamp is malformed")
+        continuation = original.startswith((" ", "\t", "Traceback ", "During handling ", "The above exception "))
+        if rows and (header.match(original) or not in_traceback and not continuation
+                     and not terminal.fullmatch(original) and original != ""):
+            yield completed()
+            rows, size, in_traceback = [], 0, False
+            last_traceback = last_terminal = -1
         if not rows:
             first_at = at
             ordinal += 1
-        fingerprints = [hashlib.sha256(item["key"].encode()).hexdigest() for item in session.finditer(original)]
+        # Bound untrusted input before regex redaction or hashing. A bounded
+        # complete record must not cause unbounded preprocessing work.
+        if len(original.encode()) > MAX_SEMANTIC_ROW_BYTES:
+            stats["record_limit_exceeded"] = True
+            stats["next_row_at"] = at
+            stats["next_row_bytes"] = len(original.encode())
+            fail("Semantic physical row exceeds its preprocessing bound")
+        provided = supplied.get("session_sha256", [])
+        if (not isinstance(provided, list) or len(provided) > 32
+                or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in provided)):
+            fail("Semantic session identity is malformed")
+        fingerprints = list(dict.fromkeys([*provided, *existing_session.findall(original),
+            *(hashlib.sha256(item["key"].encode()).hexdigest() for item in session.finditer(original))]))
         hashed = session.sub(lambda item: "session sha256:" + hashlib.sha256(item["key"].encode()).hexdigest(), original)
         safe = redact_sensitive_text(hashed)
-        row = {"text": safe, "at": at, "raw_sha256": hashlib.sha256(original.encode()).hexdigest(),
+        original_hash = supplied.get("raw_sha256", hashlib.sha256(original.encode()).hexdigest())
+        if not isinstance(original_hash, str) or SHA256_RE.fullmatch(original_hash) is None:
+            fail("Semantic original row digest is malformed")
+        row = {**supplied, "text": safe, "at": at, "raw_sha256": original_hash,
                "session_sha256": fingerprints}
+        row_bytes = len(safe.encode())
+        if len(rows) + 1 > MAX_SEMANTIC_RECORD_LINES or size + row_bytes > MAX_SEMANTIC_RECORD_BYTES:
+            stats["record_limit_exceeded"] = True
+            stats["next_row_at"] = at
+            stats["next_row_raw_sha256"] = original_hash
+            fail("Complete semantic log record exceeds its preservation bound")
         rows.append(row)
-        size += len(safe.encode())
-        if len(rows) > 128 or size > 512 * 1024:
-            raise DeploymentError("Complete semantic log record exceeds its bound")
+        size += row_bytes
+        if original.startswith("Traceback (most recent call last):"):
+            in_traceback = True
+            last_traceback = len(rows) - 1
+        elif terminal.fullmatch(original):
+            last_terminal = len(rows) - 1
+        stats["physical_lines"] += 1
+        stats["first_at"] = stats.get("first_at") or at
+        stats["last_at"] = at
     if rows:
-        yield {"source": source, "first_at": first_at, "ordinal": ordinal,
-               "record_complete": True, "rows": rows}
+        yield completed()
+    stats["read_complete"] = True
+
+
+def _semantic_log_records(lines, source, *, stats, deadline):
+    """Frame live timestamped lines using the retained-row contract."""
+    stamp = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z) (.*)$")
+
+    def physical_rows():
+        for line in lines:
+            parsed = stamp.fullmatch(line)
+            if parsed is None:
+                raise DeploymentError("Complete semantic log stream has a malformed transport row")
+            at, original = parsed.groups()
+            yield {"at": at, "text": original}
+
+    yield from _semantic_records_from_rows(physical_rows(), source, stats=stats, deadline=deadline)
 
 
 SEMANTIC_CURRENT_READ_CODE = r'''

@@ -449,37 +449,27 @@ class StreamingSemanticTests(unittest.TestCase):
                         analyzer.ledger.require_complete_recovery()
 
     def test_caught_callback_requires_same_session_native_fallback_and_http_completion(self):
-        item=case('handled_callback')
+        from tests.deploy.test_semantic_callback_correlation import fixture
         session='a'*64
+        state,rows=fixture(session=session)
+        item=case('handled_callback')
         op=operation('application','esi','callback_lookup',session)
         for side in ('failure','success','current'):
             item[side]['operation']=deepcopy(op)
-        item['record']=record('[01/Jan/2026 00:01:00] DEBUG [esi.decorators:7] No callback for AnonymousUser session sha256:'+session+'\n'
-                              'Traceback (most recent call last):\n'
-                              '  File "/installed/esi/decorators.py", line 4, in _check_callback\n'
-                              '    model = get()\n'
-                              '  File "/django/manager.py", line 1, in manager_method\n'
-                              '    return get()\n'
-                              '  File "/django/query.py", line 1, in get\n'
-                              '    raise DoesNotExist()\n'
-                              'esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.')
+        item['record']=rows[0]
+        item['success']['finished_at']=rows[4]['first_at']
+        item['callback_records']=dict(zip(('fallback','continuation','redirect','return'),rows[1:],strict=True))
+        item['proxy_service']='nginx'
         item.update(session_sha256=session,success_session_sha256=session,native_fallback_completed=True,
                     authentication_completed=True,http_completion_status=200)
-        # The log call's line is derived from this source rather than a deployed
-        # application's fixed line number.
-        import ast
-        tree=ast.parse(SOURCES['esi.decorators']['text'])
-        line=next(node.lineno for node in ast.walk(tree) if isinstance(node,ast.Call)
-                  and isinstance(node.func,ast.Attribute) and node.func.attr=='debug')
-        item['record']['rows'][0]['text']=item['record']['rows'][0]['text'].replace('esi.decorators:7',f'esi.decorators:{line}')
-        self.assertTrue(prove_semantic_recovery(item,SOURCES))
+        self.assertTrue(prove_semantic_recovery(item,state['sources']))
         for key,value in (('success_session_sha256','b'*64),('native_fallback_completed',False),
                           ('authentication_completed',False),('http_completion_status',500)):
             other=deepcopy(item)
             other[key]=value
-            self.assertFalse(prove_semantic_recovery(other,SOURCES))
+            self.assertFalse(prove_semantic_recovery(other,state['sources']))
         item['record']['rows'].append({'text':'RuntimeError: unhandled new failure'})
-        self.assertFalse(prove_semantic_recovery(item,SOURCES))
+        self.assertFalse(prove_semantic_recovery(item,state['sources']))
 
     def test_complete_records_keep_terminal_causes_hash_sessions_and_do_not_expose_secrets(self):
         session='q'*32

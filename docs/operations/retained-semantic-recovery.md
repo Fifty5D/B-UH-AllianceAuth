@@ -37,6 +37,29 @@ The contracts recognize:
 - DEBUG callback lookup exceptions caught by the installed native fallback,
   with same-session token/view continuation and a successful normal HTTP return.
 
+## October 13 callback correlation correction (F02)
+
+Callback clearance requires a complete, source-proven caught lookup, one native
+SSO fallback and token/view continuation, and one proxy redirect/normal return.
+Each record must independently identify the same session. Matching user, client
+IP, user agent, timing or an unrelated dashboard HTTP 200 cannot supply a missing
+session. Existing access logs without authoritative session correlation leave
+that recovery claim unproven; this change adds no production logging fields.
+The success operation and completion time come from its own native/HTTP evidence.
+
+A new same-session failure or fallback bounds the continuation. Multiple native
+completions or normal returns are ambiguous, including concurrent requests from
+another client in that session. Later relevant failures remain blocking. Exact
+physical copies are counted separately from independent records; contradictory
+copies block analysis. Retained rows and fresh transport use the same bounded,
+lossless traceback framing, and incomplete causal tails never become complete.
+
+This is source qualification only. Receiver installation, retained application
+recovery, historical closure and deployment readiness require their own evidence
+and authorizations. Immutable v0.8.3, the existing incident hold, exclusions,
+exception bindings and attempt limits remain in force. The independently reported
+Prepare Release/host-hold mismatch remains a separate gate before any future merge.
+
 Worker memory recycle thresholds, restart baselines, OOM rejection, daemon/boot
 identity and graceful drain requirements are unchanged. Scoped auxiliary
 diagnostics cannot waive a failure in an application stream. Historical capture
