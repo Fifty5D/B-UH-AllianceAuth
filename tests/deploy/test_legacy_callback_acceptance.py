@@ -15,7 +15,7 @@ from unittest import mock
 from ops.deploy import docker_host as dh
 from ops.deploy.recovered_logs import ReviewedDockerHost
 from tests.deploy.test_callback_producer_proof import analyze_raw
-from tests.deploy.test_docker_host import make_config
+from tests.deploy.test_docker_host import make_config, simulated_root_owned_lstat
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -54,6 +54,7 @@ class LegacyCallbackAcceptanceTests(unittest.TestCase):
         self.review = json.loads((FIXTURES / "legacy-schema3-review.json").read_text(encoding="utf-8"))
         self.report_path = self.root / "legacy-report.json"
         self.review_path = self.root / "schema3-review.json"
+        self.enterContext(simulated_root_owned_lstat(self.review_path))
         self.host = dh.DockerHost(self.config)
         self.host.backup_path = self.root
         self.host.auth_replica_counts = {service: 1 for service in self.config.auth_services}
@@ -71,6 +72,7 @@ class LegacyCallbackAcceptanceTests(unittest.TestCase):
         if schema == 4:
             review["semantic_recovery"] = {"report_path": str(self.root / "semantic.json"), "report_sha256": "f" * 64}
         self.review_path.write_text(json.dumps(review), encoding="ascii")
+        self.review_path.chmod(0o600)
         self.host._load_retained_verifier_review({"attempt_id": review["attempt_id"]}, review["plan_sha256"],
                                                review_path=self.review_path)
         return review
@@ -195,6 +197,7 @@ class LegacyCallbackAcceptanceTests(unittest.TestCase):
                 self.host._load_retained_verifier_review({"attempt_id": "gh-123-1"}, "a" * 64, review_path=self.review_path)
             else:
                 self.review_path.write_bytes(raw)
+                self.review_path.chmod(0o600)
                 with self.assertRaises(dh.DeploymentError):
                     self.host._load_retained_verifier_review({"attempt_id": "gh-123-1"}, "a" * 64, review_path=self.review_path)
             self.assertEqual(self.host.recovered_retained_log_records, {})
