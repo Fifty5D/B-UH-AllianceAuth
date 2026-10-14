@@ -448,7 +448,7 @@ class StreamingSemanticTests(unittest.TestCase):
                     with self.assertRaises(LogScanError):
                         analyzer.ledger.require_complete_recovery()
 
-    def test_caught_callback_requires_same_session_native_fallback_and_http_completion(self):
+    def test_caught_callback_shape_is_not_operation_completion(self):
         from tests.deploy.test_semantic_callback_correlation import fixture
         session='a'*64
         state,rows=fixture(session=session)
@@ -462,7 +462,7 @@ class StreamingSemanticTests(unittest.TestCase):
         item['proxy_service']='nginx'
         item.update(session_sha256=session,success_session_sha256=session,native_fallback_completed=True,
                     authentication_completed=True,http_completion_status=200)
-        self.assertTrue(prove_semantic_recovery(item,state['sources']))
+        self.assertFalse(prove_semantic_recovery(item,state['sources']))
         for key,value in (('success_session_sha256','b'*64),('native_fallback_completed',False),
                           ('authentication_completed',False),('http_completion_status',500)):
             other=deepcopy(item)
@@ -484,7 +484,7 @@ class StreamingSemanticTests(unittest.TestCase):
         self.assertEqual(len(rows),2)
         self.assertEqual(rows[0]['rows'][-1]['text'],'RuntimeError: complete terminal cause')
         self.assertNotIn(session,str(rows))
-        self.assertEqual(rows[0]['rows'][0]['session_sha256'],[hashlib.sha256(session.encode()).hexdigest()])
+        self.assertEqual(rows[0]['rows'][0]['session_sha256'],[])
         self.assertEqual(stats['physical_lines'],6)
 
     def test_malformed_truncated_and_oversized_streams_cannot_pass(self):

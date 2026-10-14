@@ -1,4 +1,7 @@
-"""Synthetic F02 regressions through the actual callback verifier entry point."""
+"""Abstract legacy callback fixtures: annotations are NOT production completion proof.
+
+Raw production-format integration evidence is in test_callback_producer_proof.
+"""
 import ast
 from copy import deepcopy
 import hashlib
@@ -104,22 +107,22 @@ class CallbackCorrelationTests(unittest.TestCase):
         change_session(rows[5], OTHER)
         self.assert_unproven(state, rows)
 
-    def test_sufficient_same_session_recovery_and_handled_error_still_pass(self):
+    def test_same_session_annotations_do_not_prove_actual_operation_completion(self):
         for attribute in (False, True):
             for principal in ("AnonymousUser", "SyntheticUser"):
                 with self.subTest(attribute=attribute, principal=principal):
                     state, rows = fixture(attribute=attribute, principal=principal)
                     decision, summary = analyze(state, rows)
-                    self.assertEqual(decision, ("handled_callback", "handled"))
-                    self.assertEqual(summary["handled_count"], 1)
-                    self.assertEqual(summary["unknown_count"] + summary["unresolved_count"], 0)
+                    self.assertEqual(decision, ("handled_callback", "unresolved"))
+                    self.assertEqual(summary["unresolved_count"], 1)
+                    self.assertEqual(summary["unknown_count"], 0)
 
-    def test_independent_concurrent_sessions_with_authoritative_returns_pass(self):
+    def test_independent_concurrent_session_annotations_are_not_operation_proof(self):
         state, rows = fixture()
         _, other_rows = fixture(session=OTHER)
         decision, summary = analyze(state, rows + other_rows)
-        self.assertEqual(decision, ("handled_callback", "handled"))
-        self.assertEqual(summary["handled_count"], 2)
+        self.assertEqual(decision, ("handled_callback", "unresolved"))
+        self.assertEqual(summary["unresolved_count"], 2)
 
     def test_missing_and_ambiguous_correlation_never_borrows_identity(self):
         for position in range(5):
@@ -186,9 +189,9 @@ class CallbackCorrelationTests(unittest.TestCase):
                 row["at"] = event["first_at"]
                 row["raw_sha256"] = hashlib.sha256(row["text"].encode()).hexdigest()
         decision, summary = analyze(state, rows + deepcopy(rows))
-        self.assertEqual(decision, ("handled_callback", "handled"))
+        self.assertEqual(decision, ("handled_callback", "unresolved"))
         self.assertEqual(summary["exact_duplicate_physical_views"], 5)
-        self.assertEqual(summary["handled_count"], 1)
+        self.assertEqual(summary["unresolved_count"], 1)
 
     def test_conflicting_duplicate_views_cannot_hide_another_session(self):
         state, rows = fixture()
@@ -232,7 +235,7 @@ class CallbackCorrelationTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assert_unproven(state, rows)
 
-    def test_only_the_proven_native_caught_failure_shape_is_handled(self):
+    def test_recognizing_native_caught_failure_does_not_prove_its_completion(self):
         for mutation in ("attribute", "frame", "severity", "extra_error", "changed_source", "uncaught"):
             state, rows = fixture(attribute=True)
             if mutation == "attribute":
@@ -277,10 +280,10 @@ class CallbackCorrelationTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assert_unproven(state, rows)
 
-    def test_any_native_return_view_is_supported_without_dashboard_allowlist(self):
+    def test_arbitrary_view_path_is_not_callback_operation_proof(self):
         state, rows = fixture()
         rows[4]["rows"][0]["text"] = rows[4]["rows"][0]["text"].replace("/dashboard/", "/synthetic-view/?page=1")
-        self.assertEqual(analyze(state, rows)[0], ("handled_callback", "handled"))
+        self.assertEqual(analyze(state, rows)[0], ("handled_callback", "unresolved"))
 
     def test_principal_only_token_selection_and_nearby_dashboard_cannot_clear(self):
         state, rows = fixture(principal="SyntheticUser")
@@ -291,32 +294,28 @@ class CallbackCorrelationTests(unittest.TestCase):
         rows.pop(3)
         self.assert_unproven(state, rows)
 
-    def test_direct_contract_derives_identities_from_its_own_completion_evidence(self):
+    def test_direct_contract_annotations_and_prefilled_flags_are_not_causal_proof(self):
+        from tests.deploy.test_semantic_recovery import case, operation
         state, rows = fixture()
+        item = case("handled_callback")
+        item["record"] = rows[0]
+        item["success"]["finished_at"] = rows[4]["first_at"]
+        for side in ("failure", "success", "current"):
+            item[side]["operation"] = operation("application", "esi", "callback_lookup", SESSION)
+        item.update(session_sha256=SESSION, success_session_sha256=SESSION,
+                    native_fallback_completed=True, authentication_completed=True, http_completion_status=200,
+                    proxy_service="nginx", callback_records=dict(zip(
+                        ("fallback", "continuation", "redirect", "return"), rows[1:], strict=True)))
+        self.assertFalse(prove_semantic_recovery(item, state["sources"]))
+        # The analyzer must not construct a success/current observation from
+        # these records at all. This catches R1 independently of marker parsing.
         with RetainedSemanticAnalyzer(state) as analyzer:
             for row in rows:
                 analyzer.feed(row)
-            captured = []
-            original = analyzer._case
-
-            def capture(*args, **kwargs):
-                value = original(*args, **kwargs)
-                captured.append(value)
-                return value
-
-            analyzer._case = capture
-            self.assertEqual(analyzer._callback_decision(rows[0]), ("handled_callback", "handled"))
-        self.assertEqual(len(captured), 1)
-        valid = captured[0]
-        self.assertTrue(prove_semantic_recovery(valid, state["sources"]))
-        for name in ("fallback", "continuation", "redirect", "return"):
-            changed = deepcopy(valid)
-            change_session(changed["callback_records"][name], OTHER)
-            with self.subTest(name=name):
-                self.assertFalse(prove_semantic_recovery(changed, state["sources"]))
-        changed = deepcopy(valid)
-        changed.pop("callback_records")
-        self.assertFalse(prove_semantic_recovery(changed, state["sources"]))
+            def forbidden_case(*args, **kwargs):
+                raise AssertionError("Unsupported callback evidence fabricated a success")
+            analyzer._case = forbidden_case
+            self.assertEqual(analyzer._callback_decision(rows[0]), ("handled_callback", "unresolved"))
 
     def test_live_and_retained_normalization_keep_session_hashes_and_missing_http_proof(self):
         from ops.deploy.docker_host import _semantic_records_from_rows
@@ -333,7 +332,7 @@ class CallbackCorrelationTests(unittest.TestCase):
                         source_name, stats={}, deadline=time.monotonic() + 5))
             retained.extend(_semantic_records_from_rows(selected, source_name, stats={}, deadline=time.monotonic() + 5))
         self.assertEqual(live, retained)
-        self.assertEqual(live[0]["rows"][0]["session_sha256"], [SESSION])
+        self.assertEqual(live[0]["rows"][0]["session_sha256"], [])
         self.assert_unproven(state, live)
         self.assert_unproven(state, retained)
 
@@ -381,8 +380,8 @@ class CallbackRecordBoundaryTests(unittest.TestCase):
             physical = [{**row, "at": event["first_at"]} for event in rows
                         if event["source"] == source_name for row in event["rows"]]
             normalized.extend(_semantic_records_from_rows(physical, source_name, stats={}, deadline=time.monotonic() + 5))
-        self.assertEqual(analyze(state, rows)[0], ("handled_callback", "handled"))
-        self.assertEqual(analyze(state, normalized)[0], ("handled_callback", "handled"))
+        self.assertEqual(analyze(state, rows)[0], ("handled_callback", "unresolved"))
+        self.assertEqual(analyze(state, normalized)[0], ("handled_callback", "unresolved"))
 
 
 if __name__ == "__main__":

@@ -4,13 +4,16 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
 from ops.deploy import collect_retained_log_findings as collector
 from ops.deploy.contracts import DeploymentError, redact_sensitive_text
-from ops.deploy.docker_host import ALLIANCEAUTH_LOG_HEADER_RE, CELERY_LOG_HEADER_RE
+from ops.deploy.docker_host import (ALLIANCEAUTH_LOG_HEADER_RE, CELERY_LOG_HEADER_RE,
+                                    _semantic_records_from_rows, _semantic_record_session,
+                                    _semantic_session_prefix)
 
 
 class LogEvidenceTests(unittest.TestCase):
@@ -35,19 +38,62 @@ class LogEvidenceTests(unittest.TestCase):
             ['docker', 'logs', 'fixture'], web=web, since='2026-10-04T00:00:00+00:00',
             until='2026-10-04T00:10:00+00:00', target=self.target())
 
-    def test_callback_session_correlates_without_exposing_session_or_query(self):
+    def test_callback_prefix_is_diagnostic_without_exposing_session_or_query(self):
         lines = [
-            '2026-10-04T00:00:01.000Z [04/Oct/2026 00:00:01] DEBUG [esi.decorators:39] No callback for AnonymousUser session test123',
-            '2026-10-04T00:00:02.000Z [04/Oct/2026 00:00:02] DEBUG [esi.views:91] Processed callback for AnonymousUser session test123. Redirecting to /sso/login?code=private-code&state=private-state',
+            '2026-10-04T00:00:01.000Z [04/Oct/2026 00:00:01] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde',
+            '2026-10-04T00:00:02.000Z [04/Oct/2026 00:00:02] DEBUG [esi.views:91] Processed callback for AnonymousUser session abcde. Redirecting to /sso/login?code=private-code&state=private-state',
         ]
         result = self.collect(lines)
         self.assertTrue(result['complete'])
-        self.assertEqual(result['rows'][0]['session_sha256'], result['rows'][1]['session_sha256'])
+        self.assertEqual(result['rows'][0]['session_sha256'], [])
+        self.assertEqual(result['rows'][1]['session_sha256'], [])
+        self.assertEqual(result['rows'][0]['session_prefix_sha256'], [hashlib.sha256(b'abcde').hexdigest()])
+        self.assertEqual(result['rows'][0]['session_prefix_sha256'], result['rows'][1]['session_prefix_sha256'])
         self.assertEqual(result['rows'][0]['raw_sha256'], hashlib.sha256(lines[0].partition(' ')[2].encode()).hexdigest())
         for row in result['rows']:
-            self.assertNotIn('test123', row['text'])
+            self.assertNotIn('abcde', row['text'])
             self.assertNotIn('private-code', row['text'])
             self.assertNotIn('private-state', row['text'])
+
+    def test_collector_and_verifier_preserve_partial_provenance_through_normalization(self):
+        native = '[04/Oct/2026 00:00:01] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde'
+        samples = (
+            native, native.replace(':39] ', ':39]\t'),
+            native.replace('04/Oct/2026', 'not-a-date'), native.replace(':39]', ':1234567]'),
+            native.replace('AnonymousUser', 'user session vwxyz'),
+            native.replace('session abcde', 'session sha256:' + hashlib.sha256(b'abcde').hexdigest()),
+            '192.0.2.10 - - [04/Oct/2026:00:00:01 +0000] "GET /api/ HTTP/1.1" 200 0 "-" "session abcde"',
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                collected = collector.safe_log(text, redact_sensitive_text)
+                self.assertEqual(collected['session_prefix_sha256'], _semantic_session_prefix(text))
+                normalized = collector.safe_log(collected['text'], redact_sensitive_text)
+                self.assertEqual(normalized['text'], collected['text'])
+                self.assertEqual(normalized['session_prefix_sha256'], collected['session_prefix_sha256'])
+                records = list(_semantic_records_from_rows(
+                    [{**collected, 'at': '2026-10-04T00:00:01Z'}], 'worker/' + 'a' * 64,
+                    stats={}, deadline=time.monotonic() + 5))
+                row = records[0]['rows'][0]
+                self.assertEqual(row['raw_sha256'], hashlib.sha256(text.encode()).hexdigest())
+                self.assertEqual(row['session_prefix_sha256'], collected['session_prefix_sha256'])
+                self.assertEqual(row['session_sha256'], [])
+                self.assertIsNone(_semantic_record_session(records[0]))
+
+    def test_redaction_cannot_upgrade_ambiguous_native_payload_on_retained_replay(self):
+        text = ('[04/Oct/2026 00:00:01] DEBUG [esi.views:91] '
+                'Processed callback for AnonymousUser session abcde. Redirecting to /next/?note=session vwxyz')
+        collected = collector.safe_log(text, redact_sensitive_text)
+        self.assertEqual(collected['session_prefix_sha256'], [])
+        self.assertEqual(collector.safe_log(collected['text'], redact_sensitive_text)['text'], collected['text'])
+        rows = [{**collected, 'at': '2026-10-04T00:00:01Z'}]
+        for _ in range(2):
+            records = list(_semantic_records_from_rows(rows, 'worker/' + 'a' * 64,
+                           stats={}, deadline=time.monotonic() + 5))
+            rows = records[0]['rows']
+            self.assertEqual(rows[0]['session_prefix_sha256'], [])
+            self.assertEqual(rows[0]['raw_sha256'], hashlib.sha256(text.encode()).hexdigest())
+            self.assertIsNone(_semantic_record_session(records[0]))
 
     def test_complete_debug_traceback_is_retained(self):
         result = self.collect([

@@ -38,20 +38,59 @@ def sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _session_prefix(text):
+    """A diagnostic marker in a native field, never a unique operation identity.
+
+    ESI 9.6.0 emits session_key[:5]. A normalized hash of that field remains
+    partial. Access headers/URLs and legacy annotations supply no native field.
+    """
+    # Match the verifier's native header grammar without importing a newer
+    # verifier into this independently staged read-only collector.
+    header = re.match(
+        r"^\[[0-9]{2}/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/"
+        r"[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}\] (?P<level>DEBUG) "
+        r"\[(?P<component>esi\.(?:decorators|views)):[0-9]{1,6}\](?:[ \t]+|$)", text)
+    if header is None or header["level"] != "DEBUG":
+        return []
+    patterns = {
+        "esi.decorators": (
+            r"No callback for .+ session {value}",
+            r"Retrieved new token from callback for .+ session {value}",
+            r"Got new token from .+ session {value}\. Returning to view\.",
+            r"Redirecting .+ session {value} to SSO\.",
+        ),
+        "esi.views": (
+            r"Received callback for .+ session {value}",
+            r"Processed callback for .+ session {value}\. Redirecting to .+",
+            r"Initiating redirect of .+ session {value}",
+            r"Redirecting .+ session {value} to SSO\. Callback will be redirected to .+",
+        ),
+    }
+    value = r"(?P<value>[A-Za-z0-9]{5}|sha256:[0-9a-f]{64})"
+    message = text[header.end():]
+    if len(re.findall(r"\bsession (?:[A-Za-z0-9]+|sha256:[0-9a-f]{64})", message)) != 1:
+        return []
+    for pattern in patterns.get(header["component"], ()):
+        matched = re.fullmatch(pattern.format(value=value), message)
+        if matched:
+            token = matched["value"]
+            return [token[7:] if token.startswith("sha256:") else hashlib.sha256(token.encode()).hexdigest()]
+    return []
+
+
 def safe_log(line: str, redact) -> dict:
     """Preserve complete traceback structure; hash session and request secrets."""
     original = line
-    # These loggers include short session identifiers. Preserve correlation by
-    # hashing even these partial IDs rather than copying them to public output.
-    sessions = re.findall(r"\bsession ([A-Za-z0-9]{1,128})", line)
-    line = re.sub(r"\bsession ([A-Za-z0-9]{1,128})",
+    # Redaction does not make client payload or a native prefix an identity.
+    prefixes = _session_prefix(line)
+    line = re.sub(r"\bsession (?!sha256:[0-9a-f]{64}\b)([A-Za-z0-9]{1,128})",
                   lambda match: "session sha256:" + sha(match[1].encode()), line)
     # Access logs can contain an SSO code or state in their query string.
-    line = re.sub(r"(https?://[^\s\"'<>?]+|/[A-Za-z0-9_./%+-]+)\?[^\s\"'<>]*",
+    line = re.sub(r"(https?://[^\s\"'<>?]+|/[A-Za-z0-9_./%+-]+)\?(?!<query-redacted>)[^\s\"'<>]*",
                   r"\1?<query-redacted>", line)
     line = redact(line)
     return {"text": line, "raw_sha256": sha(original.encode()),
-            "session_sha256": sorted({sha(value.encode()) for value in sessions})}
+            "session_sha256": [], "session_prefix_sha256": prefixes}
 
 
 def log_line_selected(line: str, *, web: bool, active_record: bool, target: dict) -> bool:

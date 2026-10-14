@@ -327,89 +327,84 @@ def _semantic_record_body(record):
     return "\n".join(row["text"] for row in rows)
 
 
+def _semantic_session_prefix(text):
+    """A diagnostic marker in a native field, never a unique operation identity.
+
+    ESI 9.6.0 emits session_key[:5]. A normalized hash of that field remains
+    partial. Access headers/URLs and legacy annotations supply no native field.
+    """
+    header = ALLIANCEAUTH_LOG_HEADER_RE.match(text)
+    if header is None or header["level"] != "DEBUG":
+        return []
+    patterns = {
+        "esi.decorators": (
+            r"No callback for .+ session {value}",
+            r"Retrieved new token from callback for .+ session {value}",
+            r"Got new token from .+ session {value}\. Returning to view\.",
+            r"Redirecting .+ session {value} to SSO\.",
+        ),
+        "esi.views": (
+            r"Received callback for .+ session {value}",
+            r"Processed callback for .+ session {value}\. Redirecting to .+",
+            r"Initiating redirect of .+ session {value}",
+            r"Redirecting .+ session {value} to SSO\. Callback will be redirected to .+",
+        ),
+    }
+    value = r"(?P<value>[A-Za-z0-9]{5}|sha256:[0-9a-f]{64})"
+    message = text[header.end():]
+    # A username or redirect URL may itself contain marker-like payload. The
+    # native field is ambiguous in that representation; retain no attribution.
+    if len(re.findall(r"\bsession (?:[A-Za-z0-9]+|sha256:[0-9a-f]{64})", message)) != 1:
+        return []
+    for pattern in patterns.get(header["component"], ()):
+        matched = re.fullmatch(pattern.format(value=value), message)
+        if matched:
+            token = matched["value"]
+            return [token[7:] if token.startswith("sha256:") else hashlib.sha256(token.encode()).hexdigest()]
+    return []
+
+
 def _semantic_record_session(record):
-    """Read one identity from this record, rejecting contradictory annotations."""
-    body = _semantic_record_body(record)
-    sessions = set(re.findall(r"\bsession sha256:([0-9a-f]{64})\b", body))
+    """Current producers do not emit an authoritative full session identity.
+
+    Native fields contain only a prefix; access-log marker text is payload.
+    Neither hashes nor supplied legacy annotations can upgrade that evidence.
+    Keep clock validation independent from the absence of identity proof.
+    """
+    _semantic_record_body(record)
+    first = _semantic_stamp(record["first_at"])
     for number, row in enumerate(record["rows"]):
-        provided = row.get("session_sha256", [])
-        if (not isinstance(provided, list) or len(provided) > 32
-                or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in provided)):
-            raise DeploymentError("Semantic session identity is malformed")
-        sessions.update(provided)
         if "at" in row:
             when = _semantic_stamp(row["at"])
-            first = _semantic_stamp(record["first_at"])
             if when < first or number == 0 and when != first:
                 raise DeploymentError("Semantic record and physical row clocks differ")
-    if len(sessions) > 1:
-        raise DeploymentError("Semantic session identities conflict")
-    return next(iter(sessions), None)
+    return None
 
 
-def _semantic_callback_message(record, event):
-    """Native continuation messages carry their own session and principal."""
-    _semantic_record_body(record)
-    header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
-    if (header is None or header["level"] != "DEBUG" or header["component"] != "esi.decorators"
-            or event != "failure" and len(record["rows"]) != 1):
-        return None
-    patterns = {
-        "failure": r"No callback for (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64})",
-        "fallback": r"Redirecting (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64}) to SSO\.",
-        "continuation": r"Got new token from (?P<principal>.+) session sha256:(?P<session>[0-9a-f]{64})\. Returning to view\.",
-    }
-    parsed = re.fullmatch(patterns[event], record["rows"][0]["text"][header.end():])
-    if parsed is None or _semantic_record_session(record) != parsed["session"]:
-        return None
-    return parsed["principal"], parsed["session"]
-
-
-def _semantic_callback_http(record):
+def _semantic_callback_failure(record):
+    """Recognize a native caught failure even if its entire traceback is lost."""
     body = _semantic_record_body(record)
-    if len(record["rows"]) != 1:
-        return None
-    return re.fullmatch(r'(?P<client>\S+) .+ "GET (?P<path>/[^ ]*) HTTP/[0-9.]+" '
-                        r'(?P<status>[0-9]{3}) [0-9]+ "[^"]*" "(?P<agent>[^"]+)"', body)
+    header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+    if header is None or header["component"] != "esi.decorators":
+        return False
+    message = record["rows"][0]["text"][header.end():]
+    # ESI 9.6.0 emits this message only in _check_callback's except handler,
+    # with exc_info=True. Missing exception rows cannot make it a clean record.
+    caught = header["level"] == "DEBUG" and re.fullmatch(r"No callback for .+ session .+", message)
+    return bool(caught or "CallbackRedirect.DoesNotExist" in body
+                or "AttributeError: 'NoneType' object has no attribute 'pk'" in body)
 
 
 def _semantic_callback_proof(case, sources):
-    """Recheck actual continuation/HTTP records, never a copied success identity."""
-    failed = case["record"]
-    if not _semantic_callback_shape(failed, sources):
-        return False
-    identity = _semantic_callback_message(failed, "failure")
-    evidence = case["callback_records"]
-    if identity is None or set(evidence) != {"fallback", "continuation", "redirect", "return"}:
-        return False
-    fallback, native, redirect, returned = (evidence[name] for name in ("fallback", "continuation", "redirect", "return"))
-    if (fallback["source"] != failed["source"] or native["source"] != failed["source"]
-            or _semantic_callback_message(fallback, "fallback") != identity
-            or _semantic_callback_message(native, "continuation") != identity):
-        return False
-    sent, completed = _semantic_callback_http(redirect), _semantic_callback_http(returned)
-    returned_session = _semantic_record_session(returned)
-    if (sent is None or completed is None or _semantic_record_session(redirect) != identity[1]
-            or returned_session != identity[1] or redirect["source"] != returned["source"]
-            or redirect["source"].partition("/")[0] != case["proxy_service"]
-            or urlsplit(sent["path"]).path not in {"/sso/login", "/sso/login/"} or sent["status"] != "302"
-            or completed["status"] != "200" or completed["path"].startswith(("/sso/", "/static/", "/media/"))
-            or sent["client"] != completed["client"] or sent["agent"] != completed["agent"]):
-        return False
-    at, fallback_at, done, sent_at, returned_at = (
-        _semantic_stamp(row["first_at"]) for row in (failed, fallback, native, redirect, returned))
-    return (at < fallback_at <= at + timedelta(seconds=5) and fallback_at < done <= at + timedelta(hours=4)
-            and done < sent_at <= done + timedelta(seconds=5)
-            and sent_at < returned_at <= sent_at + timedelta(seconds=5)
-            and case["success"]["finished_at"] == returned["first_at"]
-            and case["failure"]["operation"] == {
-                "provider": "application", "subsystem": "esi", "family": "callback_lookup", "identity": identity[1]}
-            and case["success"]["operation"]["identity"] == _semantic_record_session(native)
-            and case["current"]["operation"]["identity"] == returned_session
-            and case.get("session_sha256") == identity[1]
-            and case.get("success_session_sha256") == _semantic_record_session(native)
-            and case.get("native_fallback_completed") is True and case.get("authentication_completed") is True
-            and case.get("http_completion_status") == int(completed["status"]))
+    """The supported log contract cannot prove callback-operation completion.
+
+    Returning-to-view is emitted BEFORE view_func executes. A normal HTTP 200
+    has no originating-operation/response relationship, even if session identity
+    were independently available. Do not manufacture a success observation from
+    case flags, partial markers, legacy metadata, URL, client or timing.
+    A future completion contract needs its own versioned producer and tests.
+    """
+    return False
 
 
 def _semantic_operation_key(operation):
@@ -786,7 +781,8 @@ class RetainedSemanticAnalyzer:
                         raise DeploymentError("Duplicate physical evidence has conflicting content or correlation")
                     self.duplicate_physical_views += 1
                     return
-            candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body))
+            candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body)
+                             or _semantic_callback_failure(record))
             if not candidate and not re.search(
                     r"Discord Service|Nickname for |Account .*deleted|account.*deleted|"
                     r"\[esi\.(?:decorators|views):|HTTP/[0-9.]+|"
@@ -994,78 +990,13 @@ class RetainedSemanticAnalyzer:
         return ("discord_unproven", "unresolved")
 
     def _callback_decision(self, record):
-        body = _semantic_record_body(record)
-        if ("CallbackRedirect.DoesNotExist" not in body
-                and "AttributeError: 'NoneType' object has no attribute 'pk'" not in body):
+        if not _semantic_callback_failure(record):
             return None
-        unresolved = ("handled_callback", "unresolved")
-        try:
-            identity = _semantic_callback_message(record, "failure")
-            if identity is None or not _semantic_callback_shape(record, self.state["sources"]):
-                return unresolved
-            at = _semantic_stamp(record["first_at"])
-            observed = _semantic_stamp(self.state["observed_at"])
-            # Another failure for this session is an operation boundary, even
-            # if it shares the same timestamp or occurs after a successful return.
-            failures = [row for _, row in self._records("session=? AND candidate=1 AND at>=?",
-                                                       (identity[1], at.isoformat()))]
-            if len(failures) != 1 or failures[0] != record:
-                return unresolved
-            following = [row for _, row in self._records("session=? AND at>? AND at<=?",
-                         (identity[1], at.isoformat(),
-                          min(observed, at + timedelta(hours=4)).isoformat()))]
-            fallbacks = [row for row in following if _semantic_callback_message(row, "fallback") is not None]
-            completions = [row for row in following if _semantic_callback_message(row, "continuation") is not None]
-            if len(fallbacks) != 1 or len(completions) != 1:
-                return unresolved
-            fallback, completion = fallbacks[0], completions[0]
-            done = _semantic_stamp(completion["first_at"])
-            fallback_at = _semantic_stamp(fallback["first_at"])
-            if not (at < fallback_at <= at + timedelta(seconds=5)
-                    and fallback_at < done <= at + timedelta(hours=4)):
-                return unresolved
-            # Session metadata must independently identify BOTH proxy requests.
-            # A matching IP, user agent or nearby dashboard 200 supplies no identity.
-            http_rows = []
-            for _, row in self._records("session=? AND at>? AND at<=? AND body LIKE '%HTTP/%'",
-                                       (identity[1], done.isoformat(),
-                                        min(observed, done + timedelta(seconds=120)).isoformat())):
-                parsed = _semantic_callback_http(row)
-                if parsed is not None and row["source"].partition("/")[0] == self.state.get("proxy_service", "nginx"):
-                    http_rows.append((row, parsed))
-            redirects = [(row, parsed) for row, parsed in http_rows
-                         if urlsplit(parsed["path"]).path in {"/sso/login", "/sso/login/"}
-                         and parsed["status"] == "302"
-                         and _semantic_stamp(row["first_at"]) <= done + timedelta(seconds=5)]
-            if len(redirects) != 1:
-                return unresolved
-            redirect, _ = redirects[0]
-            after = _semantic_stamp(redirect["first_at"])
-            returns = [(row, parsed) for row, parsed in http_rows
-                       if after < _semantic_stamp(row["first_at"]) <= after + timedelta(seconds=5)
-                       and not parsed["path"].startswith(("/sso/", "/static/", "/media/"))]
-            if len(returns) != 1 or returns[0][1]["status"] != "200":
-                return unresolved
-            returned, completed = returns[0]
-            failure_op = {"provider": "application", "subsystem": "esi", "family": "callback_lookup",
-                          "identity": _semantic_record_session(record)}
-            success_op = {**failure_op, "identity": _semantic_record_session(completion)}
-            current_op = {**failure_op, "identity": _semantic_record_session(returned)}
-            finished = returned["first_at"]
-            case = self._case("handled_callback", record, failure_op, finished, extra={
-                "success": {"operation": success_op, "finished_at": finished, "persisted": True},
-                "current": self._current(current_op, finished=finished),
-                "session_sha256": failure_op["identity"], "success_session_sha256": success_op["identity"],
-                "native_fallback_completed": True, "authentication_completed": True,
-                "http_completion_status": int(completed["status"]),
-                "proxy_service": self.state.get("proxy_service", "nginx"),
-                "callback_records": {"fallback": fallback, "continuation": completion,
-                                     "redirect": redirect, "return": returned}})
-            if prove_semantic_recovery(case, self.state["sources"]):
-                return ("handled_callback", "handled")
-        except (DeploymentError, KeyError, TypeError, ValueError):
-            pass
-        return unresolved
+        # Recognizing the native caught lookup does not establish that its
+        # continuation completed. Available producer records have neither a
+        # complete identity nor a causal completion event. Keep this specific
+        # recovery claim unresolved; do not synthesize success/current flags.
+        return ("handled_callback", "unresolved")
 
     def _asset_decision(self, record):
         body = _semantic_record_body(record)
@@ -1256,7 +1187,6 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
     header = re.compile(r"^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]+\]|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4} )")
     terminal = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
     session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{5,64})(?=[. ]|$)")
-    existing_session = re.compile(r"\bsession sha256:([0-9a-f]{64})\b")
     rows, first_at, ordinal, size = [], None, 0, 0
     in_traceback = False
     last_traceback = last_terminal = -1
@@ -1315,19 +1245,20 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
             stats["next_row_at"] = at
             stats["next_row_bytes"] = len(original.encode())
             fail("Semantic physical row exceeds its preprocessing bound")
-        provided = supplied.get("session_sha256", [])
-        if (not isinstance(provided, list) or len(provided) > 32
-                or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in provided)):
-            fail("Semantic session identity is malformed")
-        fingerprints = list(dict.fromkeys([*provided, *existing_session.findall(original),
-            *(hashlib.sha256(item["key"].encode()).hexdigest() for item in session.finditer(original))]))
+        prefixes = _semantic_session_prefix(original)
+        # Redaction may remove a conflicting marker from a payload. A retained
+        # diagnostic can narrow visible-text attribution, never supply it or
+        # promote it to identity. Preserve an earlier refusal through replay.
+        if "session_prefix_sha256" in supplied:
+            previous = supplied["session_prefix_sha256"]
+            prefixes = [value for value in prefixes if isinstance(previous, list) and value in previous]
         hashed = session.sub(lambda item: "session sha256:" + hashlib.sha256(item["key"].encode()).hexdigest(), original)
         safe = redact_sensitive_text(hashed)
         original_hash = supplied.get("raw_sha256", hashlib.sha256(original.encode()).hexdigest())
         if not isinstance(original_hash, str) or SHA256_RE.fullmatch(original_hash) is None:
             fail("Semantic original row digest is malformed")
         row = {**supplied, "text": safe, "at": at, "raw_sha256": original_hash,
-               "session_sha256": fingerprints}
+               "session_sha256": [], "session_prefix_sha256": prefixes}
         row_bytes = len(safe.encode())
         if len(rows) + 1 > MAX_SEMANTIC_RECORD_LINES or size + row_bytes > MAX_SEMANTIC_RECORD_BYTES:
             stats["record_limit_exceeded"] = True
@@ -1336,7 +1267,9 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
             fail("Complete semantic log record exceeds its preservation bound")
         rows.append(row)
         size += row_bytes
-        if original.startswith("Traceback (most recent call last):"):
+        if original.startswith(("Traceback (most recent call last):",
+                                "During handling of the above exception, another exception occurred:",
+                                "The above exception was the direct cause of the following exception:")):
             in_traceback = True
             last_traceback = len(rows) - 1
         elif terminal.fullmatch(original):

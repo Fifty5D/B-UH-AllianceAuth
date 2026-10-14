@@ -34,25 +34,53 @@ The contracts recognize:
   native backoff, distinct request identities, later 204/native completion and
   current membership. Unknown Member cleanup instead requires same-target
   successful deletion, absent binding and current native 404/10007.
-- DEBUG callback lookup exceptions caught by the installed native fallback,
-  with same-session token/view continuation and a successful normal HTTP return.
+- DEBUG callback lookup exceptions remain unresolved: recognizing the native
+  caught fallback does not prove completion of its operation or continuation.
 
-## October 13 callback correlation correction (F02)
+## October 14 callback proof correction (F02, R1 and R2)
 
-Callback clearance requires a complete, source-proven caught lookup, one native
-SSO fallback and token/view continuation, and one proxy redirect/normal return.
-Each record must independently identify the same session. Matching user, client
-IP, user agent, timing or an unrelated dashboard HTTP 200 cannot supply a missing
-session. Existing access logs without authoritative session correlation leave
-that recovery claim unproven; this change adds no production logging fields.
-The success operation and completion time come from its own native/HTTP evidence.
+The October 13 implementation was rejected by independent review. It treated
+same-session annotations and a nearby normal HTTP 200 as callback completion.
+Neither establishes that the response completed the failed callback's actual
+operation. Matching user, client IP, user agent, session, timing or path cannot
+supply that missing causal relationship. No path allowlist grants clearance.
 
-A new same-session failure or fallback bounds the continuation. Multiple native
-completions or normal returns are ambiguous, including concurrent requests from
-another client in that session. Later relevant failures remain blocking. Exact
-physical copies are counted separately from independent records; contradictory
-copies block analysis. Retained rows and fresh transport use the same bounded,
-lossless traceback framing, and incomplete causal tails never become complete.
+Bounded inspection of the pinned `django-esi` 9.6.0 producer establishes that
+native callback messages emit only `request.session.session_key[:5]`. The token
+decorator logs "Returning to view" before calling the view. Callback receipt and
+redirect messages also precede completion of the destination operation. Combined
+proxy access records supply no server-owned operation or continuation identifier
+linking a completed response to the original failure. There is consequently no
+supported positive callback-completion example in the current record formats.
+
+Both fresh and retained adapters preserve hashes of unambiguous native prefix
+fields as `session_prefix_sha256` diagnostics only. A five-character prefix, or
+its hash, is never a complete session identity. Marker-like text in client
+headers, URLs and other payloads, pre-hashed text and legacy `session_sha256`
+annotations cannot become authoritative correlation. Normalization clears the
+legacy identity field, preserves original row digests and retains the distinction
+between a partial diagnostic and proof. Unsupported markers on otherwise harmless
+records do not themselves create an application failure.
+Previously retained partial diagnostics can only narrow what the visible text
+supports, preserving a refusal when redaction has removed a conflicting payload
+marker. Supplied metadata cannot add attribution or grant identity authority.
+
+Callback failures remain unresolved even when all nearby observations look
+successful. The analyzer does not synthesize success, authentication or current
+health from them; direct contract flags cannot waive the missing producer proof.
+Other supported recovery contracts and their positive controls remain in force.
+Exact physical copies are counted separately from independent records;
+contradictory copies block analysis. Both adapters use the same bounded traceback
+framing, and incomplete causal tails never become complete.
+The native caught-failure header remains unresolved even when its entire expected
+traceback is absent; losing all exception rows cannot erase the finding.
+
+A future callback-completion contract would require a separately versioned,
+server-owned operation/continuation identifier and a completion event emitted
+after the actual operation succeeds, with an independently bound response. It
+must distinguish concurrent operations and sessions without exposing session
+keys, cookies, OAuth state or tokens. That prospective logging work is separate;
+this correction adds or installs no logging system.
 
 This is source qualification only. Receiver installation, retained application
 recovery, historical closure and deployment readiness require their own evidence
