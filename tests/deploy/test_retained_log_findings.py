@@ -95,6 +95,18 @@ class LogEvidenceTests(unittest.TestCase):
             self.assertEqual(rows[0]['raw_sha256'], hashlib.sha256(text.encode()).hexdigest())
             self.assertIsNone(_semantic_record_session(records[0]))
 
+    def test_client_query_placeholder_cannot_bypass_secret_redaction(self):
+        for query in ('<query-redacted>&code=private-code&state=private-state',
+                      'code=private-code<query-redacted>&state=private-state'):
+            text = ('192.0.2.10 - - [04/Oct/2026:00:00:01 +0000] "GET /api/ HTTP/1.1" '
+                    '200 0 "https://synthetic.invalid/?' + query + '" "SyntheticBrowser"')
+            collected = collector.safe_log(text, redact_sensitive_text)
+            self.assertNotIn('private-code', collected['text'])
+            self.assertNotIn('private-state', collected['text'])
+            self.assertEqual(collector.safe_log(collected['text'], redact_sensitive_text)['text'], collected['text'])
+            self.assertEqual(collected['session_sha256'], [])
+            self.assertEqual(collected['session_prefix_sha256'], [])
+
     def test_complete_debug_traceback_is_retained(self):
         result = self.collect([
             '2026-10-04T00:00:01.000Z [04/Oct/2026 00:00:01] DEBUG [esi.decorators:39] No callback for AnonymousUser session fixture',

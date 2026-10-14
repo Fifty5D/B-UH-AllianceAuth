@@ -86,7 +86,7 @@ def safe_log(line: str, redact) -> dict:
     line = re.sub(r"\bsession (?!sha256:[0-9a-f]{64}\b)([A-Za-z0-9]{1,128})",
                   lambda match: "session sha256:" + sha(match[1].encode()), line)
     # Access logs can contain an SSO code or state in their query string.
-    line = re.sub(r"(https?://[^\s\"'<>?]+|/[A-Za-z0-9_./%+-]+)\?(?!<query-redacted>)[^\s\"'<>]*",
+    line = re.sub(r"(https?://[^\s\"'<>?]+|/[A-Za-z0-9_./%+-]+)\?[^\s\"']*",
                   r"\1?<query-redacted>", line)
     line = redact(line)
     return {"text": line, "raw_sha256": sha(original.encode()),
