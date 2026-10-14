@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Reject unsupported callback recovery from legacy schema-3 reports, cached record hashes and rollback filtering while preserving valid legacy asset proof and historical receipts."

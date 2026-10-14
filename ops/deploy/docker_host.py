@@ -381,18 +381,27 @@ def _semantic_record_session(record):
     return None
 
 
-def _semantic_callback_failure(record):
-    """Recognize a native caught failure even if its entire traceback is lost."""
-    body = _semantic_record_body(record)
-    header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
+CALLBACK_RECOVERY_UNRESOLVED = (
+    "Unresolved callback: supported producer records do not prove callback-operation completion; "
+    "legacy report hashes and annotations cannot qualify recovery"
+)
+
+
+def _callback_failure_body(body):
+    """Recognize native callback failure text without accepting recovery proof."""
+    header = ALLIANCEAUTH_LOG_HEADER_RE.match(body)
     if header is None or header["component"] != "esi.decorators":
         return False
-    message = record["rows"][0]["text"][header.end():]
-    # ESI 9.6.0 emits this message only in _check_callback's except handler,
-    # with exc_info=True. Missing exception rows cannot make it a clean record.
+    message = body.split("\n", 1)[0][header.end():]
+    # The native producer emits this caught-failure header with exc_info=True.
+    # Losing every traceback row cannot turn the failure into a clean record.
     caught = header["level"] == "DEBUG" and re.fullmatch(r"No callback for .+ session .+", message)
     return bool(caught or "CallbackRedirect.DoesNotExist" in body
                 or "AttributeError: 'NoneType' object has no attribute 'pk'" in body)
+
+
+def _semantic_callback_failure(record):
+    return _callback_failure_body(_semantic_record_body(record))
 
 
 def _semantic_callback_proof(case, sources):
@@ -2285,6 +2294,8 @@ def _retained_log_records(rows):
             record = []
         if record or ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
             record.append(row)
+        elif row["text"]:
+            raise DeploymentError("Retained finding record has no native header; evidence is incomplete")
     if record:
         yield record
 
@@ -2328,11 +2339,10 @@ def _asset_trace_frames(text):
 
 
 def _prove_retained_findings(report, review, config, proof):
-    """Only digest-pinned historical records with later/current success qualify.
+    """Qualify exact legacy asset records, never legacy callback conclusions.
 
-    A handled DEBUG lookup is distinct from an OAuth failure. Its normal redirect
-    or token-selection continuation and eventual successful authentication must
-    both be present; an initial login redirect alone cannot qualify a traceback.
+    Historical reports remain readable. Their digest binds bytes, not the
+    validity of a recovery conclusion under the current producer contract.
     """
     if (report.get("schema_version") != 1 or report.get("scan_complete") is not True
             or report.get("read_only") is not True or report.get("diagnostic_only") is not True
@@ -2390,18 +2400,23 @@ def _prove_retained_findings(report, review, config, proof):
         service, separator, container = stream["source"].partition("/")
         if not separator or containers.get(container) != service:
             raise DeploymentError("Retained finding log container differs")
+    for stream in streams:
+        for record in _retained_log_records(stream["rows"]):
+            if _callback_failure_body("\n".join(row["text"] for row in record)):
+                # The current interval has not been scanned yet. Retain the
+                # known unresolved finding without claiming a complete scan.
+                raise LogScanError([CALLBACK_RECOVERY_UNRESOLVED], complete=False)
     web = [stream for stream in streams if stream["source"].partition("/")[0] == config.gunicorn_service]
-    if len(web) != 1:
+    if len(web) > 1:
         raise DeploymentError("Retained callback source is ambiguous")
     http_sources = report.get("login_http", [])
-    if (len(http_sources) != 1 or http_sources[0].get("complete") is not True
+    if not isinstance(http_sources, list) or http_sources and (
+            len(http_sources) != 1 or http_sources[0].get("complete") is not True
             or containers.get(http_sources[0].get("container_id")) != config.proxy_service):
         raise DeploymentError("Retained callback HTTP evidence is incomplete")
-    http = http_sources[0]["rows"]
-    if any(row["status"] >= 400 for row in http):
+    if http_sources and any(row["status"] >= 400 for row in http_sources[0]["rows"]):
         raise DeploymentError("Retained login HTTP failure remains unresolved")
-    web_rows = web[0]["rows"]
-    if any(re.search(r"\b(?:ERROR|CRITICAL)\b", row["text"]) for row in web_rows):
+    if any(re.search(r"\b(?:ERROR|CRITICAL)\b", row["text"]) for stream in web for row in stream["rows"]):
         raise DeploymentError("Retained login application failure remains unresolved")
     records, warnings = {}, []
     def add(source, record, warning):
@@ -2454,71 +2469,6 @@ def _prove_retained_findings(report, review, config, proof):
                      f"later assets update {status['update_finished_at']} and run {status['run_finished_at']}")
     for record, source in [(row[0], row[2]) for row in asset_errors] + task_errors:
         add(source, record, asset_warning)
-    callbacks = 0
-    lookup = selected.get("installed_sources", {}).get("callback_lookup", {})
-    if (selected.get("versions", {}).get("django-esi") != "9.6.0"
-            or lookup.get("sha256") != CALLBACK_LOOKUP_SHA256):
-        raise DeploymentError("Installed handled callback lookup source differs")
-    for record in _retained_log_records(web_rows):
-        header = ALLIANCEAUTH_LOG_HEADER_RE.match(record[0]["text"])
-        if header is None or "No callback for " not in record[0]["text"]:
-            continue
-        text = "\n".join(row["text"] for row in record)
-        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', text)
-        expected_frames = [(lookup["filename"], "29", "_check_callback"),
-            ("/usr/local/lib/python3.12/site-packages/django/db/models/manager.py", "87", "manager_method"),
-            ("/usr/local/lib/python3.12/site-packages/django/db/models/query.py", "635", "get")]
-        if (header.group("level") != "DEBUG" or header.group("component") != "esi.decorators"
-                or header.group("source_line") != "39" or len(record) != 11 or frames != expected_frames
-                or record[1]["text"] != "Traceback (most recent call last):"
-                or record[-1]["text"] != "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
-                or len(record[0].get("session_sha256", [])) != 1):
-            raise DeploymentError("Handled callback traceback shape differs")
-        at = _recycle_time(record[0]["at"])
-        session = record[0]["session_sha256"]
-        following = [row for row in web_rows if row.get("session_sha256") == session
-            and at < _recycle_time(row["at"]) <= at + timedelta(hours=4)]
-        immediate = [row for row in following if _recycle_time(row["at"]) - at <= timedelta(seconds=5)]
-        redirected = any("Redirecting " in row["text"] and " to SSO." in row["text"] for row in immediate)
-        principal = record[0]["text"][header.end():].split(" session sha256:", 1)[0].removeprefix("No callback for ")
-        returned = any("Retrieved 2 tokens for " + principal + " session " in row["text"] for row in immediate)
-        choices = [row for row in web_rows if principal + " has selected token " in row["text"]
-                   and at < _recycle_time(row["at"]) <= at + timedelta(seconds=120 if returned else 1)]
-        selected_token = False
-        if len(choices) == 1:
-            choice_at = _recycle_time(choices[0]["at"])
-            selected_token = (any("[esi.decorators:159] Selected token fulfills requirements of view. Returning." in row["text"]
-                for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
-                and any("INFO [allianceauth.authentication.views:172] Changed user " + principal + " main character to " in row["text"]
-                    for row in web_rows if choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=1))
-                and any(row["path"] == "/dashboard/" and row["status"] == 200
-                    and choice_at < _recycle_time(row["at"]) <= choice_at + timedelta(seconds=10) for row in http))
-        complete = [row for row in following if "Got new token from " + principal + " session " in row["text"]
-            and ". Returning to view." in row["text"]]
-        redirect_http = any(row["path"] == "/sso/login" and row["status"] == 302
-            and at < _recycle_time(row["at"]) <= at + timedelta(seconds=1) for row in http)
-        login_complete = False
-        for completion in complete:
-            done = _recycle_time(completion["at"])
-            processed = any("[esi.views:91] Processed callback for " + principal + " session " in row["text"]
-                            and done - timedelta(seconds=2) <= _recycle_time(row["at"]) < done for row in following)
-            callback_http = any(row["path"] == "/sso/callback/" and row["status"] == 302
-                                and abs((_recycle_time(row["at"]) - done).total_seconds()) <= 2 for row in http)
-            dashboard = any(row["path"] == "/dashboard/" and row["status"] == 200
-                            and done < _recycle_time(row["at"]) <= done + timedelta(seconds=120) for row in http)
-            login_complete = login_complete or (processed and callback_http and dashboard
-                and (redirect_http or done - at < timedelta(seconds=120)))
-        # Initial auth and already-authenticated token selection are distinct.
-        # A delayed browser continuation is accepted only for this exact pinned
-        # historical record, with both its immediate normal redirect and its
-        # later same-session token return and successful HTTP completion.
-        if not ((redirected and login_complete) or selected_token):
-            raise DeploymentError("Handled callback successful continuation is incomplete")
-        add(web[0]["source"], record, "recovered warning: exact handled DEBUG CallbackRedirect lookup; "
-            f"original header {record[0]['raw_sha256']} at {record[0]['at']}; successful continuation retained")
-        callbacks += 1
-    if callbacks == 0:
-        raise DeploymentError("No exact handled callback recovery evidence")
     return records, tuple(warnings)
 
 
@@ -3057,6 +3007,8 @@ class DockerHost:
 
     def _load_retained_verifier_review(self, value, plan_digest, *, review_path=None) -> None:
         """Legacy plans require separately reviewed, private, attempt-bound evidence."""
+        self.recovered_retained_log_records = {}
+        self.recovered_retained_log_seen = {}
         assert self.backup_path is not None
         path = review_path or self.backup_path / "VERIFIER-REVIEW.json"
         if not path.exists() and not path.is_symlink():
@@ -3074,6 +3026,8 @@ class DockerHost:
 
     def _apply_retained_verifier_review(self, review, value, plan_digest) -> None:
         """Validate the private reviewed document before any exception is usable."""
+        self.recovered_retained_log_records = {}
+        self.recovered_retained_log_seen = {}
         if self.retained_verifier_review != review:
             self.accepted_worker_recycles = {}
         fields = {"schema_version", "attempt_id", "plan_sha256", "host_evidence_sha256",
@@ -3160,7 +3114,7 @@ class DockerHost:
             code = (RETAINED_ASSETS_READ_CODE + "\nverify_retained_assets(" + repr(selected["identity"]) + ","
                     + repr(selected["assets_status"]) + "," + repr(CALLBACK_LOOKUP_SHA256) + ")")
             current = self._manage_live("shell", "--no-imports", "-c", code,
-                                        context="Read-only current retained assets and handled callback proof")
+                                        context="Read-only current retained assets and installed-source proof")
             begin, end = "BUH_RETAINED_FINDINGS_CURRENT_BEGIN\n", "\nBUH_RETAINED_FINDINGS_CURRENT_END"
             if current.count(begin) != 1 or current.count(end) != 1:
                 raise DeploymentError("Current retained log recovery proof is incomplete")
@@ -7615,6 +7569,8 @@ class DockerHost:
         *,
         owner_transition_phase: str | None = None,
     ) -> tuple[str, ...]:
+        self.recovered_retained_log_records = {}
+        self.recovered_retained_log_seen = {}
         if self.retained_verifier_review is not None and self.retained_verifier_review.get("schema_version") == 4:
             if owner_transition_phase is not None:
                 raise DeploymentError("Complete semantic recovery does not authorize owner transition exceptions")
@@ -8111,6 +8067,12 @@ class DockerHost:
                       if ALLIANCEAUTH_LOG_HEADER_RE.match(line) or CELERY_LOG_HEADER_RE.match(line)]
             for start, stop in zip(starts, [*starts[1:], len(source_lines)]):
                 hashes = tuple(hashlib.sha256(line.encode()).hexdigest() for line in source_lines[start:stop])
+                # Recheck semantics before consulting any cached byte acceptance.
+                # This also blocks schema/report transitions and direct callers
+                # carrying acceptance produced by an older verifier.
+                if _callback_failure_body("\n".join(source_lines[start:stop])):
+                    reject(CALLBACK_RECOVERY_UNRESOLVED)
+                    continue
                 key = (source, hashes[0])
                 expected = self.recovered_retained_log_records.get(key, [])
                 if not expected or hashes not in expected:

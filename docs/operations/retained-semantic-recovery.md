@@ -82,6 +82,31 @@ must distinguish concurrent operations and sessions without exposing session
 keys, cookies, OAuth state or tokens. That prospective logging work is separate;
 this correction adds or installs no logging system.
 
+## Legacy/schema-3 callback acceptance compatibility
+
+Review documents and original receipts remain readable as historical evidence.
+Their hashes bind unchanged bytes; they do not renew an old recovery conclusion
+under the current semantics. Schema-3 reports may still qualify the exact legacy
+asset incident with its existing identity, byte, preservation and current-state
+checks. Callback acceptance based on session annotations, token-selection/login
+messages and nearby HTTP success is no longer supported.
+
+A legacy report containing a native caught callback failure is rejected for
+current qualification with an explicit unresolved callback-operation-completion
+reason, even if the current transport returns no rows. No callback hashes become
+active acceptance. Loading/reapplying a review or starting a scan clears prior
+record acceptance, including schema-3/schema-4 transitions. The final scanner
+checks native callback failures before consulting matching cached hashes, so a
+cache produced by an older verifier cannot suppress them.
+
+The retained rollback adapter also preserves callback records for the strict
+scanner instead of removing the historical `caught-ESI-callback-miss` shape.
+Benign schema-model metadata and valid non-callback recovery stay supported.
+Schema-3 repair reports/receipts explicitly mark callback recovery unaccepted;
+their installed-source verification is not callback-operation completion.
+The pre-cleanup path rereads and revalidates the report rather than reusing an
+earlier conclusion. Original reports and acceptance receipts are not rewritten.
+
 This is source qualification only. Receiver installation, retained application
 recovery, historical closure and deployment readiness require their own evidence
 and authorizations. Immutable v0.8.3, the existing incident hold, exclusions,

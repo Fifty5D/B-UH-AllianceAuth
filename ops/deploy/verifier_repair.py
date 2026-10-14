@@ -569,15 +569,14 @@ def main(argv=None):
                    for warning in report["recovered_log_warnings"]):
             raise DeploymentError("The exact original Discord recovery warning was not retained")
         if "retained_log_findings" in review:
-            if any(not any(prefix in warning for warning in report["recovered_log_warnings"]) for prefix in (
-                    "recovered warning: exact historical asset-name Invalid IDs 404",
-                    "recovered warning: exact handled DEBUG CallbackRedirect lookup")):
-                raise DeploymentError("Exact historical finding recovery warnings were not retained")
+            if not any("recovered warning: exact historical asset-name Invalid IDs 404" in warning
+                       for warning in report["recovered_log_warnings"]):
+                raise DeploymentError("Exact historical asset recovery warning was not retained")
             report["retained_log_findings"] = {
                 "report_sha256": review["retained_log_findings"]["report_sha256"],
                 "report_path": review["retained_log_findings"]["report_path"],
                 "exact_records": sum(len(rows) for rows in host.recovered_retained_log_records.values()),
-                "current_assets_and_callback_source_verified": True}
+                "current_assets_and_callback_source_verified": True, "callback_recovery_accepted": False}
         if review["schema_version"] == 4:
             if (report["complete_scan"] is not True or report["analysis_complete"] is not True
                     or report["unresolved_count"] != 0 or report["unknown_count"] != 0):
@@ -632,6 +631,7 @@ def main(argv=None):
                     "plan_sha256": assessment["hold_sha256"], "review_sha256": digest(private_read(review_path)),
                     "proof": review["retained_log_findings"],
                     "recovered_warnings": current._verified_retained_log_findings(),
+                    "callback_recovery_accepted": False,
                     "records": [{"source": source, "header_sha256": header,
                                  "ordered_original_line_sha256": rows}
                                 for (source, header), rows in sorted(current.recovered_retained_log_records.items())]}

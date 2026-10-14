@@ -1,0 +1,86 @@
+{
+  "attempt_id": "gh-123-1",
+  "plan_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "verification_since": "2026-10-03T18:56:59+00:00",
+  "containers": [
+    {
+      "service": "allianceauth_worker",
+      "container_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "allianceauth_gunicorn",
+      "container_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "nginx",
+      "container_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "allianceauth_worker_services",
+      "container_id": "b63e5c9283ad0f18afe495b24e266bdf8a46dfc4d2f8c97fe155a920bc79c29d",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "allianceauth_beat",
+      "container_id": "f59af33c2c8671297672ed2e2dc3aaf6d897381aef639270778ea7d6717d1948",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "auth_mysql",
+      "container_id": "337b6fba9373c9f47cef5a82384a8587049f845cbae749c00aa55728c8caca12",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    },
+    {
+      "service": "redis",
+      "container_id": "34fb46c847bb9df96e5205a39d382f648a6e8dce1e014cd85b4ca6a88d88ed03",
+      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "restart_count": 0,
+      "started_at": "2026-10-03T18:00:00Z"
+    }
+  ],
+  "schema_version": 3,
+  "host_evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "host_observed_at": "2026-10-04T02:00:00+00:00",
+  "discord_429": null,
+  "retained_log_findings": {
+    "report_path": "REBOUND_TO_PRIVATE_SYNTHETIC_TEST_FILE",
+    "report_sha256": "d4b46194a9f35f513e720f6bef449932ee5b5271c5a7c864d0b8210032b27ca4",
+    "asset_task_id": "00000000-0000-0000-0000-000000000001",
+    "asset_error_at": "2026-10-04T00:00:01.000Z"
+  },
+  "worker_memory_recycles": {
+    "schema_version": 1,
+    "reviewed_evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "script_sha256": "ca060b5f6e55108d3c4a82ea97eb521e02515f98bcba613d3bb1da23423c3438",
+    "host_boot_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diagnostics_store_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "workers": {
+      "1111111111111111111111111111111111111111111111111111111111111111": "fixture-worker"
+    },
+    "daemons": {
+      "docker.service": {
+        "MainPID": "915",
+        "ExecMainStartTimestampMonotonic": "6116073"
+      },
+      "containerd.service": {
+        "MainPID": "915",
+        "ExecMainStartTimestampMonotonic": "6116073"
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Exact historical records qualify only with byte evidence and successful continuation."""
+"""Legacy assets retain exact proof; historical callback conclusions cannot qualify."""
 import copy
 import hashlib
 import json
@@ -31,7 +31,7 @@ def finding_case(config):
               "containers": [{"container_id": identity, "service": service}
                 for identity, service in ((worker, config.worker_service), (web, config.gunicorn_service),
                                           (proxy, config.proxy_service))]}
-    proof = {"report_path": "/root/fixture/report.json", "report_sha256": "b" * 64,
+    proof = {"report_path": str(config.state_dir / "fixture-report.json"), "report_sha256": "b" * 64,
              "asset_task_id": task, "asset_error_at": "2026-10-04T00:00:01.000Z"}
     asset_message = ("FixtureCharacter (ID:9): assets: Error occurred: HTTPClientError: "
         "<HTTPClientError 404 details=None error='Invalid IDs in the request' Headers("
@@ -104,16 +104,18 @@ class RetainedFindingProofTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.config = make_config(Path(self.temp.name))
         self.report, self.review, self.proof = finding_case(self.config)
+        self.callback_report = copy.deepcopy(self.report)
+        self.report["logs"] = self.report["logs"][:1]
+        self.report.pop("login_http")
 
     def prove(self):
         return _prove_retained_findings(self.report, self.review, self.config, self.proof)
 
-    def test_exact_recovered_asset_records_and_handled_callback_retain_original_evidence(self):
+    def test_exact_recovered_asset_records_retain_original_legacy_evidence(self):
         records, warnings = self.prove()
-        self.assertEqual(sum(map(len, records.values())), 4)
-        self.assertEqual(len(warnings), 2)
+        self.assertEqual(sum(map(len, records.values())), 3)
+        self.assertEqual(len(warnings), 1)
         self.assertIn(self.proof['asset_error_at'], warnings[0])
-        self.assertIn(self.report['logs'][1]['rows'][0]['raw_sha256'], warnings[1])
         self.assertTrue(all('/' in source for source, header in records))
 
     def test_asset_identity_state_byte_or_actual_update_mismatch_blocks(self):
@@ -160,7 +162,7 @@ class RetainedFindingProofTests(unittest.TestCase):
             self.prove()
 
     def test_callback_severity_frame_exception_source_or_continuation_near_misses_block(self):
-        original = copy.deepcopy(self.report)
+        original = copy.deepcopy(self.callback_report)
         cases = [(0, 'DEBUG', 'ERROR'), (0, 'esi.decorators:39', 'esi.decorators:40'),
                  (2, '_check_callback', '_unexpected_callback'), (8, 'line 635', 'line 636'),
                  (10, 'CallbackRedirect.DoesNotExist', 'Token.DoesNotExist')]
@@ -182,17 +184,20 @@ class RetainedFindingProofTests(unittest.TestCase):
         with self.assertRaises(DeploymentError):
             self.prove()
 
-    def test_delayed_same_session_requires_immediate_normal_redirect_and_later_authentication(self):
+    def test_delayed_legacy_callback_conclusion_remains_unresolved(self):
+        self.report = copy.deepcopy(self.callback_report)
         self.report['logs'][1]['rows'][-1]['at'] = '2026-10-04T03:35:00.000Z'
         self.report['logs'][1]['rows'][-2]['at'] = '2026-10-04T03:34:59.500Z'
         self.report['login_http'][0]['rows'][1]['at'] = '2026-10-04T03:35:00.100Z'
         self.report['login_http'][0]['rows'][2]['at'] = '2026-10-04T03:35:01.100Z'
-        self.assertTrue(self.prove()[0])
+        with self.assertRaisesRegex(DeploymentError, "Unresolved callback"):
+            self.prove()
         self.report['login_http'][0]['rows'].pop(0)
         with self.assertRaises(DeploymentError):
             self.prove()
 
-    def test_existing_token_selection_requires_successful_choice_view_and_http_completion(self):
+    def test_legacy_token_selection_conclusion_remains_unresolved(self):
+        self.report = copy.deepcopy(self.callback_report)
         stream = self.report['logs'][1]
         session = stream['rows'][0]['session_sha256'][0]
         stream['rows'] = stream['rows'][:11] + [
@@ -204,7 +209,8 @@ class RetainedFindingProofTests(unittest.TestCase):
                 '2026-10-04T00:00:02.010Z'),
             row('[04/Oct/2026 00:00:02] INFO [allianceauth.authentication.views:172] Changed user AnonymousUser main character to Fixture',
                 '2026-10-04T00:00:02.020Z')]
-        self.assertTrue(self.prove()[0])
+        with self.assertRaisesRegex(DeploymentError, "Unresolved callback"):
+            self.prove()
         stream['rows'].pop()
         with self.assertRaises(DeploymentError):
             self.prove()
@@ -231,7 +237,7 @@ class RetainedFindingProofTests(unittest.TestCase):
         for stream in self.report['logs']:
             text = '\n'.join(entry['text'] for entry in stream['rows'])
             self.assertEqual(host._classify_log_batch([(stream['source'], text)], set(), None), ())
-        callback = self.report['logs'][1]
+        callback = self.callback_report['logs'][1]
         text = '\n'.join(entry['text'] for entry in callback['rows'][:11])
         with self.assertRaises(LogScanError):
             host._classify_log_batch([(callback['source'], text)], set(), None)
@@ -242,29 +248,38 @@ class RetainedFindingProofTests(unittest.TestCase):
             host._classify_log_batch([(self.config.gunicorn_service + '/' + 'f' * 64, text)], set(), None)
         with self.assertRaises(LogScanError):
             host._classify_log_batch([(callback['source'], text + '\nTraceback unexpected appended failure')], set(), None)
-        self.assertEqual(len(warnings), 2)
+        self.assertEqual(len(warnings), 1)
 
-    def test_identical_same_second_records_are_counted_not_globally_ignored(self):
+    def test_identical_callback_copies_cannot_reuse_legacy_acceptance(self):
+        self.report = copy.deepcopy(self.callback_report)
         stream = self.report['logs'][1]
-        duplicate = copy.deepcopy(stream['rows'][:11])
-        duplicate[0]['at'] = '2026-10-04T00:00:01.001Z'
-        stream['rows'][11:11] = duplicate
+        stream['rows'][11:11] = copy.deepcopy(stream['rows'][:11])
+        with self.assertRaisesRegex(DeploymentError, "Unresolved callback"):
+            self.prove()
         host = DockerHost(self.config)
-        host.recovered_retained_log_records, _ = self.prove()
-        text = '\n'.join(entry['text'] for entry in stream['rows'][:11])
-        self.assertEqual(host._classify_log_batch([(stream['source'], text + '\n' + text)], set(), None), ())
-        with self.assertRaises(LogScanError):
-            host._classify_log_batch([(stream['source'], text)], set(), None)
+        first = stream['rows'][:11]
+        hashes = tuple(row['raw_sha256'] for row in first)
+        host.recovered_retained_log_records = {(stream['source'], hashes[0]): [hashes, hashes]}
+        text = '\n'.join(row['text'] for row in first)
+        with self.assertRaisesRegex(LogScanError, "Unresolved callback"):
+            host._classify_log_batch([(stream['source'], text + '\n' + text)], set(), None)
 
     def test_large_log_batches_preserve_whole_callback_record(self):
         host = DockerHost(self.config)
         host.recovered_retained_log_records, _ = self.prove()
-        stream = self.report['logs'][1]
+        stream = self.callback_report['logs'][1]
         lines = ['[04/Oct/2026 00:00:00] INFO [fixture:1] ' + 'x' * 60000]
         lines += [entry['text'] for entry in stream['rows'][:11]]
         lines += ['[04/Oct/2026 00:00:02] INFO [fixture:1] ' + 'x' * 10000]
+        blocked = 0
         for batch in host._log_batches(iter(lines), owner_scoped=True, deadline=time.monotonic()+30):
-            self.assertEqual(host._classify_log_batch([(stream['source'], batch)], set(), None), ())
+            if 'No callback for ' in batch:
+                with self.assertRaisesRegex(LogScanError, "Unresolved callback"):
+                    host._classify_log_batch([(stream['source'], batch)], set(), None)
+                blocked += 1
+            else:
+                self.assertEqual(host._classify_log_batch([(stream['source'], batch)], set(), None), ())
+        self.assertEqual(blocked, 1)
 
     def test_runtime_report_digest_and_current_success_gate_before_any_exception_is_active(self):
         host = DockerHost(self.config)
@@ -277,7 +292,7 @@ class RetainedFindingProofTests(unittest.TestCase):
             return 'BUH_RETAINED_FINDINGS_CURRENT_BEGIN\n'+json.dumps(value)+'\nBUH_RETAINED_FINDINGS_CURRENT_END'
         with mock.patch.object(host, '_worker_recycle_private_bytes', return_value=raw), mock.patch.object(
                 host, '_manage_live', return_value=output(good)) as current:
-            self.assertEqual(len(host._verified_retained_log_findings()), 2)
+            self.assertEqual(len(host._verified_retained_log_findings()), 1)
             self.assertIn('SET TRANSACTION READ ONLY', current.call_args.args[-1])
         with mock.patch.object(host, '_worker_recycle_private_bytes', return_value=raw), mock.patch.object(
                 host, '_manage_live', return_value=output({**good, 'assets_successful': False})):
