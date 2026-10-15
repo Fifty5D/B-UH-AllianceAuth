@@ -128,8 +128,10 @@ outside that proven traceback's boundary remain unverified.
 
 Asset and reviewed HTTP recovery share a complete-record boundary check. Every
 recognized native frame must be complete and occur inside an open traceback;
-each terminal closes that traceback, and a causal separator requires a new,
-completed traceback. Extra frames or terminals after closure, cut path/function
+each terminal closes its cause, and a causal separator requires a completed
+linked cause. Python may render an unraised cause without its own traceback;
+HTTP recovery still requires an actual traceback in the complete record.
+Extra frames or terminals after closure, cut path/function
 fields and unfinished chains cannot enter acceptance or qualification receipts.
 The asset frame extractor refuses incomplete records before comparing expected
 frames. Both semantic adapters and the cached final filter retain the same
