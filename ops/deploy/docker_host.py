@@ -8159,8 +8159,25 @@ class DockerHost:
                 key = (source, hashes[0])
                 expected = self.recovered_retained_log_records.get(key, [])
                 native = ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]) or CELERY_LOG_HEADER_RE.match(lines[0])
-                if _native_exception_evidence(lines) and (native["level"] not in {"ERROR", "CRITICAL"}
-                        or expected and not _legacy_asset_trace_shape(lines)):
+                owner_record = bool(owner_indexes.intersection(range(start, stop)))
+                owner_trace = False
+                if owner_record:
+                    trace_starts = [index for index in range(start, stop) if index in owner_indexes
+                                    and source_lines[index] == "Traceback (most recent call last):"]
+                    trace_ends = [index for index in range(start, stop) if index in owner_indexes
+                                  and (traceback_denied.fullmatch(source_lines[index])
+                                       or denied.search(source_lines[index]))]
+                    # Honor the existing exact owner contract, including its
+                    # WARNING retry trace. Only frames INSIDE its own proven
+                    # traceback/terminal boundary belong to that recovery.
+                    owner_trace = bool(trace_starts and trace_ends) and all(
+                        not _native_exception_evidence([line]) or index in owner_indexes
+                        or min(trace_starts) < index < min(trace_ends) and NATIVE_TRACEBACK_FRAME_RE.fullmatch(line)
+                        for index, line in enumerate(lines, start))
+                if _native_exception_evidence(lines) and (
+                        native["level"] not in {"ERROR", "CRITICAL"} and not owner_trace
+                        or expected and not _legacy_asset_trace_shape(lines)
+                        or owner_record and not owner_trace):
                     reject("Unverified native exception fragment; original header/boundaries or recovery "
                            "are not established")
                     evidence_incomplete = True

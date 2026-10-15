@@ -10,6 +10,7 @@ from unittest import mock
 from ops.deploy import docker_host as dh
 from ops.deploy.recovered_logs import ReviewedDockerHost
 from tests.deploy.test_callback_producer_proof import parse_rows, state
+from tests.deploy.test_docker_host import container_id, discord_nickname_record, owner_log_environment
 from tests.deploy import test_legacy_callback_acceptance as legacy
 from tests.deploy.test_legacy_callback_acceptance import raw_streams
 
@@ -282,6 +283,26 @@ class RetainedPartialTraceTests(unittest.TestCase):
                 web["rows"][0]["at"] = None
             with self.subTest(change=change):
                 self.refuse_scan(report)
+
+    def test_exact_non_callback_owner_recovery_contract_remains_supported(self):
+        c = self.case
+        for phase in ("candidate-health", "worker-cutover", "rollback"):
+            with self.subTest(phase=phase), owner_log_environment(
+                    c.host, {container_id(20): discord_nickname_record(frames=40)}, rollback=phase == "rollback"):
+                warnings = c.host._scan_new_logs(c.config.auth_services, owner_transition_phase=phase)
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("expected Discord guild-owner nickname", warnings[0])
+
+    def test_unrelated_terminal_or_frame_cannot_borrow_exact_owner_recovery(self):
+        c = self.case
+        for phase in ("candidate-health", "worker-cutover", "rollback"):
+            for tail in ("RuntimeError: unrelated synthetic failure\n",
+                         "esi.models.CallbackRedirect.DoesNotExist: unrelated synthetic failure\n",
+                         '  File "/unrelated.py", line 1, in unrelated\n'):
+                record = discord_nickname_record(frames=40) + tail
+                with self.subTest(phase=phase, tail=tail), owner_log_environment(
+                        c.host, {container_id(20): record}, rollback=phase == "rollback"), self.assertRaises(dh.LogScanError):
+                    c.host._scan_new_logs(c.config.auth_services, owner_transition_phase=phase)
 
 
 if __name__ == "__main__":

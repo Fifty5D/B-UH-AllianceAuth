@@ -122,6 +122,9 @@ records retain their existing proof, but an extra exception tail cannot borrow
 that recovery. The final cached-row filter and rollback adapter preserve uncertain
 fragments. Fresh pre-cleanup retained proof runs before qualification receipts are
 written; an older digest-bound receipt is historical evidence, not a substitute.
+The existing exact Discord owner-transition contract still qualifies its own
+bounded traceback, including WARNING retry records. Additional terminals or frames
+outside that proven traceback's boundary remain unverified.
 
 This is source qualification only. Receiver installation, retained application
 recovery, historical closure and deployment readiness require their own evidence
