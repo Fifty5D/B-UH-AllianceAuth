@@ -1,0 +1,648 @@
+{
+  "schema_version": 1,
+  "attempt_id": "gh-123-1",
+  "scan_complete": true,
+  "read_only": true,
+  "diagnostic_only": true,
+  "errors": [],
+  "protected_state_unchanged": true,
+  "before_host": {
+    "hold_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "platform_version": "0.8.2",
+    "public_smoke_passed": true,
+    "traffic_only_verified_previous_image": true
+  },
+  "after_host": {
+    "hold_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "platform_version": "0.8.2",
+    "public_smoke_passed": true,
+    "traffic_only_verified_previous_image": true
+  },
+  "memberaudit_preserved": {
+    "characters": 87,
+    "successful_sections": 348,
+    "auth_and_token_inventory_preserved": true,
+    "older_sections_unchanged": true,
+    "older_section_count": 61
+  },
+  "memberaudit_preserved_after": {
+    "characters": 87,
+    "successful_sections": 348,
+    "auth_and_token_inventory_preserved": true,
+    "older_sections_unchanged": true,
+    "older_section_count": 61
+  },
+  "selected_character": {
+    "scan_complete": true,
+    "errors": [],
+    "later_successful_assets_run": true,
+    "identity": {
+      "character_name": "FixtureCharacter",
+      "character_id": 1000001,
+      "memberaudit_character_pk": 9,
+      "token_pk": 12,
+      "auth_link_pk": 7,
+      "user_id": 3,
+      "token_inventory": [
+        12
+      ],
+      "is_disabled": false,
+      "same_token_character": true,
+      "same_token_owner": true,
+      "same_token_user": true,
+      "required_assets_scope_present": true
+    },
+    "assets_status": {
+      "pk": 44,
+      "section": "assets",
+      "is_success": true,
+      "has_token_error": false,
+      "error_length": 0,
+      "content_hashes": [
+        "dddddddddddddddddddddddddddddddd"
+      ],
+      "run_finished_at": "2026-10-04T01:00:00+00:00",
+      "update_finished_at": "2026-10-04T00:10:00+00:00"
+    },
+    "current_assets": {
+      "all_rows_metadata_valid": true,
+      "relationship_issues": {
+        "invalid_item_ids": 0
+      }
+    },
+    "historical_asset_payloads": [
+      {
+        "actual_hash_matches": true,
+        "actual_size_matches": true,
+        "format_valid": true
+      }
+    ],
+    "later_asset_payloads": [
+      {
+        "actual_hash_matches": true,
+        "actual_size_matches": true,
+        "format_valid": true
+      }
+    ],
+    "versions": {
+      "django-esi": "9.6.0"
+    },
+    "installed_sources": {
+      "callback_lookup": {
+        "filename": "/installed/esi/decorators.py",
+        "sha256": "3cb440117225d96aac40de9d417dc4481a9f5691480327eb383c8d4ccde2b681"
+      }
+    }
+  },
+  "logs": [
+    {
+      "source": "allianceauth_worker/1111111111111111111111111111111111111111111111111111111111111111",
+      "complete": true,
+      "since": "2026-10-03T18:56:59+00:00",
+      "rows": [
+        {
+          "text": "[04/Oct/2026 00:00:01] ERROR [memberaudit.models.characters:551] FixtureCharacter (ID:9): assets: Error occurred: HTTPClientError: <HTTPClientError 404 details=None error='Invalid IDs in the request' Headers([('x-esi-request-id', '00000000-0000-0000-0000-000000000002')])>",
+          "raw_sha256": "e6e78197cd8c56d9d049963332d70d8a04069ab770c186a2db4b32cc2ca5afcd",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "Traceback (most recent call last):",
+          "raw_sha256": "5dd94ced5a2afb4af3a0a9521dc8f9306236b23b01882c52a80e482ae00be37f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in result",
+          "raw_sha256": "40dc9a6e7324f95e8e99819e7b96d21539cea85e48d6a32b4297f9d707ad3e21",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in _make_request",
+          "raw_sha256": "ccee2cbcdcb9659b83231182c1df4b9912d1f75571943beeaa4dd639df5772f7",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in __call__",
+          "raw_sha256": "ebe4da9e6a200736f97a215a0ea3dc3439d0c2a91da0d30eb95650aedfa2251a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in iter",
+          "raw_sha256": "47eee699ab571d56e9642d74f7bd7b917a45c77b5a2cb56bdd865428cc51a0dd",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in <lambda>",
+          "raw_sha256": "e9a1f7a2b2539e4c1f74c3e774d1ef8da31529e2a681b4c57c98877548c526ca",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/concurrent/futures/_base.py\", line 123, in result",
+          "raw_sha256": "fb9ca23c05d09d942308fc6c253c5932fb61c8961fde92a611db660335b63d8d",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/concurrent/futures/_base.py\", line 123, in __get_result",
+          "raw_sha256": "73c42816bdf052b4566c66c41ba80b0b64c47c117902346a008523276e14e86c",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in __call__",
+          "raw_sha256": "ebe4da9e6a200736f97a215a0ea3dc3439d0c2a91da0d30eb95650aedfa2251a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in __func",
+          "raw_sha256": "46136635fd6bab09678acb349e4a53cb3ece57b1672051000e13a5466164668a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/request.py\", line 123, in request",
+          "raw_sha256": "84c7e91fa02ecd0ffd7660b2d1a459252d7f82a1767ce27deeb33d70ee3d4911",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/v30/glue.py\", line 123, in _process_request",
+          "raw_sha256": "237e48f54aee3d4b19f5e5c217ddab0e69ea59be3a48e9deb439a02e9e619a95",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/request.py\", line 123, in _raise_on_http_status",
+          "raw_sha256": "1d4db7d17f3c95d282bfcfb870fd014370c6ca623711fe079f5ecefd37ce4ce4",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in perform_update_with_error_logging",
+          "raw_sha256": "d2f4be8bfe96237108f9c25e866220b2a15b4da6d1fa421385d612ae77de17c6",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in assets_build_list_from_esi",
+          "raw_sha256": "c675a513ce8efeca304d4672908ea5ad85c7d9b8bf203d695fb8b2986a7d4da7",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in fetch_from_esi",
+          "raw_sha256": "bcb1ee10368a6396af41602e3e03ec88bc3bd4286ead7f0a48bf8d97077a2a41",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in update_section_if_changed",
+          "raw_sha256": "483828dfcca4f3baa985acf25a318c42718fc46b8e3307e409f00d73399c1dac",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/decorators.py\", line 123, in _wrapped_view",
+          "raw_sha256": "4eb184ba495f03af2a1276662445400958e7fcf21b908d6fc9ff3390b06e5470",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetch_data_from_esi",
+          "raw_sha256": "fb2841e5257d49734bbc245089ef560314082d185e4c24acf72086f444f94a80",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetching_asset_names_from_esi",
+          "raw_sha256": "94e58c37d47e8d68d07b6770b5c89274f793538a0fd1e3a616c45640d160c47a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in results",
+          "raw_sha256": "76a69f792481b02f1072d2467d2c30294eef812cacb870167686b5edfc43addb",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/buh_max_history/capture.py\", line 123, in result",
+          "raw_sha256": "0bbf8b92471980be677e6b42751dcefbe0da31e38027bd01e557bd7bf453c2f1",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in result",
+          "raw_sha256": "40dc9a6e7324f95e8e99819e7b96d21539cea85e48d6a32b4297f9d707ad3e21",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "aiopenapi3.errors.HTTPError",
+          "raw_sha256": "6b1c337ea112cb05711ef75aea757b6443c62f039e7abacb23c2727b22676eaf",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "[2026-10-04 00:00:01,001: ERROR/MainProcess] FixtureCharacter (ID:9): assets: Error occurred: HTTPClientError: <HTTPClientError 404 details=None error='Invalid IDs in the request' Headers([('x-esi-request-id', '00000000-0000-0000-0000-000000000002')])>",
+          "raw_sha256": "ae53487db400eb49c78b1ce6a75ba3970b67918582a8dc71a14869d551cdf31a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "Traceback (most recent call last):",
+          "raw_sha256": "5dd94ced5a2afb4af3a0a9521dc8f9306236b23b01882c52a80e482ae00be37f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in result",
+          "raw_sha256": "40dc9a6e7324f95e8e99819e7b96d21539cea85e48d6a32b4297f9d707ad3e21",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in _make_request",
+          "raw_sha256": "ccee2cbcdcb9659b83231182c1df4b9912d1f75571943beeaa4dd639df5772f7",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in __call__",
+          "raw_sha256": "ebe4da9e6a200736f97a215a0ea3dc3439d0c2a91da0d30eb95650aedfa2251a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in iter",
+          "raw_sha256": "47eee699ab571d56e9642d74f7bd7b917a45c77b5a2cb56bdd865428cc51a0dd",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in <lambda>",
+          "raw_sha256": "e9a1f7a2b2539e4c1f74c3e774d1ef8da31529e2a681b4c57c98877548c526ca",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/concurrent/futures/_base.py\", line 123, in result",
+          "raw_sha256": "fb9ca23c05d09d942308fc6c253c5932fb61c8961fde92a611db660335b63d8d",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/concurrent/futures/_base.py\", line 123, in __get_result",
+          "raw_sha256": "73c42816bdf052b4566c66c41ba80b0b64c47c117902346a008523276e14e86c",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/tenacity/__init__.py\", line 123, in __call__",
+          "raw_sha256": "ebe4da9e6a200736f97a215a0ea3dc3439d0c2a91da0d30eb95650aedfa2251a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in __func",
+          "raw_sha256": "46136635fd6bab09678acb349e4a53cb3ece57b1672051000e13a5466164668a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/request.py\", line 123, in request",
+          "raw_sha256": "84c7e91fa02ecd0ffd7660b2d1a459252d7f82a1767ce27deeb33d70ee3d4911",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/v30/glue.py\", line 123, in _process_request",
+          "raw_sha256": "237e48f54aee3d4b19f5e5c217ddab0e69ea59be3a48e9deb439a02e9e619a95",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/aiopenapi3/request.py\", line 123, in _raise_on_http_status",
+          "raw_sha256": "1d4db7d17f3c95d282bfcfb870fd014370c6ca623711fe079f5ecefd37ce4ce4",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in perform_update_with_error_logging",
+          "raw_sha256": "d2f4be8bfe96237108f9c25e866220b2a15b4da6d1fa421385d612ae77de17c6",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in assets_build_list_from_esi",
+          "raw_sha256": "c675a513ce8efeca304d4672908ea5ad85c7d9b8bf203d695fb8b2986a7d4da7",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in fetch_from_esi",
+          "raw_sha256": "bcb1ee10368a6396af41602e3e03ec88bc3bd4286ead7f0a48bf8d97077a2a41",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in update_section_if_changed",
+          "raw_sha256": "483828dfcca4f3baa985acf25a318c42718fc46b8e3307e409f00d73399c1dac",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/decorators.py\", line 123, in _wrapped_view",
+          "raw_sha256": "4eb184ba495f03af2a1276662445400958e7fcf21b908d6fc9ff3390b06e5470",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetch_data_from_esi",
+          "raw_sha256": "fb2841e5257d49734bbc245089ef560314082d185e4c24acf72086f444f94a80",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetching_asset_names_from_esi",
+          "raw_sha256": "94e58c37d47e8d68d07b6770b5c89274f793538a0fd1e3a616c45640d160c47a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in results",
+          "raw_sha256": "76a69f792481b02f1072d2467d2c30294eef812cacb870167686b5edfc43addb",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/buh_max_history/capture.py\", line 123, in result",
+          "raw_sha256": "0bbf8b92471980be677e6b42751dcefbe0da31e38027bd01e557bd7bf453c2f1",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in result",
+          "raw_sha256": "40dc9a6e7324f95e8e99819e7b96d21539cea85e48d6a32b4297f9d707ad3e21",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "aiopenapi3.errors.HTTPError",
+          "raw_sha256": "6b1c337ea112cb05711ef75aea757b6443c62f039e7abacb23c2727b22676eaf",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "[2026-10-04 00:00:01,010: ERROR/MainProcess] Task memberaudit.tasks.assets_build_list_from_esi[00000000-0000-0000-0000-000000000001] raised unexpected: HTTPError()",
+          "raw_sha256": "42232001240234ac05b1c303c860e99ab58809de184f0d36d94104d14eaec74a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "Traceback (most recent call last):",
+          "raw_sha256": "5dd94ced5a2afb4af3a0a9521dc8f9306236b23b01882c52a80e482ae00be37f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/celery/app/trace.py\", line 123, in trace_task",
+          "raw_sha256": "f34fe1fdc1b92f7e4da899ed1e6e29e32541eb7650887f036fa46820271193f3",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/celery_once/tasks.py\", line 123, in __call__",
+          "raw_sha256": "001cdd9b4907bc32e7ef22c2cdb2620658f861eaded14979a91f07a1f526440f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/celery/app/trace.py\", line 123, in __protected_call__",
+          "raw_sha256": "b8be7e052cbe7fde842a2d8143124233b68ce66e90e728435a2d115ea8df464d",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/decorators.py\", line 123, in wrapper",
+          "raw_sha256": "29e54aaacfa151dec66230aa64f07727343ac8156b3e5ac96aaa15f08d934e72",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/tasks.py\", line 123, in assets_build_list_from_esi",
+          "raw_sha256": "63264372c44d2b78e0545a755d83c6b1218679e54c56e2ec01025f2151298aaa",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in perform_update_with_error_logging",
+          "raw_sha256": "d2f4be8bfe96237108f9c25e866220b2a15b4da6d1fa421385d612ae77de17c6",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in perform_update_with_error_logging",
+          "raw_sha256": "d2f4be8bfe96237108f9c25e866220b2a15b4da6d1fa421385d612ae77de17c6",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in assets_build_list_from_esi",
+          "raw_sha256": "c675a513ce8efeca304d4672908ea5ad85c7d9b8bf203d695fb8b2986a7d4da7",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in fetch_from_esi",
+          "raw_sha256": "bcb1ee10368a6396af41602e3e03ec88bc3bd4286ead7f0a48bf8d97077a2a41",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/models/characters.py\", line 123, in update_section_if_changed",
+          "raw_sha256": "483828dfcca4f3baa985acf25a318c42718fc46b8e3307e409f00d73399c1dac",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/decorators.py\", line 123, in _wrapped_view",
+          "raw_sha256": "4eb184ba495f03af2a1276662445400958e7fcf21b908d6fc9ff3390b06e5470",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetch_data_from_esi",
+          "raw_sha256": "fb2841e5257d49734bbc245089ef560314082d185e4c24acf72086f444f94a80",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/memberaudit/managers/character_sections_1.py\", line 123, in _fetching_asset_names_from_esi",
+          "raw_sha256": "94e58c37d47e8d68d07b6770b5c89274f793538a0fd1e3a616c45640d160c47a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in results",
+          "raw_sha256": "76a69f792481b02f1072d2467d2c30294eef812cacb870167686b5edfc43addb",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/buh_max_history/capture.py\", line 123, in result",
+          "raw_sha256": "0bbf8b92471980be677e6b42751dcefbe0da31e38027bd01e557bd7bf453c2f1",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/site-packages/esi/openapi_clients.py\", line 123, in result",
+          "raw_sha256": "40dc9a6e7324f95e8e99819e7b96d21539cea85e48d6a32b4297f9d707ad3e21",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "aiopenapi3.errors.HTTPError",
+          "raw_sha256": "6b1c337ea112cb05711ef75aea757b6443c62f039e7abacb23c2727b22676eaf",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        }
+      ]
+    },
+    {
+      "source": "allianceauth_gunicorn/2222222222222222222222222222222222222222222222222222222222222222",
+      "complete": true,
+      "since": "2026-10-03T18:56:59+00:00",
+      "rows": [
+        {
+          "text": "[04/Oct/2026 00:00:01] DEBUG [esi.decorators:39] No callback for AnonymousUser session sha256:36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c",
+          "raw_sha256": "03d3fb128cd5c14487566e4d5ff24739d093ddb02e6d8aea08b03b55d020844c",
+          "session_sha256": [
+            "36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c"
+          ],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "Traceback (most recent call last):",
+          "raw_sha256": "5dd94ced5a2afb4af3a0a9521dc8f9306236b23b01882c52a80e482ae00be37f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback",
+          "raw_sha256": "803b48faf775d5970e934fafb79302d767a97fdc14bddaa017d288804eff1240",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "    CallbackRedirect.objects.get(session_key=redacted)",
+          "raw_sha256": "8651ece6df811521baf64ca412d91600e4672df9d0b5ec3d31c9113b273dc153",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "    ^^^^^^^^^^^",
+          "raw_sha256": "bf0e365e6eec12cbf202b48659596c233c851a5df8b2a8ffc828f0073302670a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/usr/local/lib/python3.12/site-packages/django/db/models/manager.py\", line 87, in manager_method",
+          "raw_sha256": "4036d981ace7750cd06389339365b6ae9300125b19dc76d079e6176ed20f4f3f",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "    return getattr(self.get_queryset(), name)(*args, **kwargs)",
+          "raw_sha256": "e1afca00e103e9b2fbfada72ade837edf713ecd0568afe88333086a45cbb608a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "    ^^^^^^^^^^^",
+          "raw_sha256": "bf0e365e6eec12cbf202b48659596c233c851a5df8b2a8ffc828f0073302670a",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "  File \"/usr/local/lib/python3.12/site-packages/django/db/models/query.py\", line 635, in get",
+          "raw_sha256": "507e16bff024fdd4c8e040994b846373d5671adf0154c32e2f8e966fdfeedef1",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "    raise self.model.DoesNotExist(",
+          "raw_sha256": "d36cb8828c2807c6b218a58c67b468a322116c51d0a6ea3700571f62ae53d543",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.",
+          "raw_sha256": "1c8a83d151e30b6c83be19f9ac82ece2c7d9f94f4a615a409a82f5fff23ce8a3",
+          "session_sha256": [],
+          "at": "2026-10-04T00:00:01.000Z"
+        },
+        {
+          "text": "[04/Oct/2026 00:00:01] DEBUG [esi.decorators:191] Redirecting AnonymousUser session sha256:36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c to SSO.",
+          "raw_sha256": "2dcd7b78729dc367f082d1ea00c5171bcd81d4484335d0e231f89db1ad05ee49",
+          "session_sha256": [
+            "36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c"
+          ],
+          "at": "2026-10-04T00:00:01.010Z"
+        },
+        {
+          "text": "[04/Oct/2026 00:00:09] DEBUG [esi.views:91] Processed callback for AnonymousUser session sha256:36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c. Redirecting to /sso/login",
+          "raw_sha256": "748aa36ac2a8292ce94be3627fa1b97b797f91da271efebf35a03d6e4e307565",
+          "session_sha256": [
+            "36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c"
+          ],
+          "at": "2026-10-04T00:00:09.500Z"
+        },
+        {
+          "text": "[04/Oct/2026 00:00:10] DEBUG [esi.decorators:122] Got new token from AnonymousUser session sha256:36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c. Returning to view.",
+          "raw_sha256": "d493d89db28b080c189e0c8b7068ee74f2fb9515de69223def0aa8ddd09cfb6f",
+          "session_sha256": [
+            "36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c"
+          ],
+          "at": "2026-10-04T00:00:10.000Z"
+        }
+      ]
+    }
+  ],
+  "login_http": [
+    {
+      "complete": true,
+      "container_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "rows": [
+        {
+          "path": "/sso/login",
+          "status": 302,
+          "at": "2026-10-04T00:00:01.100Z"
+        },
+        {
+          "path": "/sso/callback/",
+          "status": 302,
+          "at": "2026-10-04T00:00:10.100Z"
+        },
+        {
+          "path": "/dashboard/",
+          "status": 200,
+          "at": "2026-10-04T00:00:11.100Z"
+        }
+      ]
+    }
+  ],
+  "deployment_attempted": false,
+  "tooling_installation_attempted": false,
+  "supported_recovery_attempted": false,
+  "token_refresh_attempted": false,
+  "memberaudit_mutation_attempted": false,
+  "structures_mutation_attempted": false
+}

@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Account for retained native exception fragments despite missing headers or quiet current logs, preserve incomplete evidence across cached filtering and rollback, and revalidate before qualification receipts."

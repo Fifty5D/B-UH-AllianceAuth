@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Preserve complete callback record boundaries and duplicate evidence while requiring independently supported recovery proof."

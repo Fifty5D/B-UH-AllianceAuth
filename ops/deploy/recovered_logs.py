@@ -18,6 +18,9 @@ from .docker_host import (
     CELERY_LOG_HEADER_RE,
     DockerHost,
     FATAL_LOG_RE,
+    _callback_failure_body,
+    _complete_native_traceback,
+    _native_exception_evidence,
 )
 from .recovery_sync import stamp
 
@@ -59,9 +62,8 @@ HTTP_EXCEPTIONS = {
     "esi.exceptions.HTTPClientError",
     "aiopenapi3.errors.HTTPClientError",
 }
-# Installed ESI middleware catches this missing callback lookup at DEBUG and
-# continues its token/SSO flow. Match the observed traceback exactly; another
-# exception, frame, or trailing line remains a fatal log finding.
+# Historical receipt shape retained for readability and fixture compatibility.
+# Recognizing this caught lookup does not qualify callback-operation recovery.
 CAUGHT_CALLBACK_MISS_TRACE = (
     "Traceback (most recent call last):",
     '  File "/usr/local/lib/python3.12/site-packages/esi/decorators.py", line 29, in _check_callback',
@@ -132,17 +134,15 @@ def records(text):
 def http_traceback(lines):
     if len(lines) > 128 or any(HARD_FAILURE.search(line) for line in lines):
         return False
-    terminals = []
+    terminals = _complete_native_traceback(lines)
+    if terminals is None:
+        return False
     for line in lines[1:]:
-        match = re.match(
-            r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception))(?::|$)", line
-        )
-        if match:
-            terminals.append(match[1])
-        elif (
+        if (
             line
             and not line[0].isspace()
-            and line
+            and line.partition(":")[0] not in terminals
+            and line.rstrip()
             not in {
                 "Traceback (most recent call last):",
                 "During handling of the above exception, another exception occurred:",
@@ -150,11 +150,7 @@ def http_traceback(lines):
             }
         ):
             return False
-    return (
-        "Traceback (most recent call last):" in lines
-        and bool(terminals)
-        and set(terminals) <= HTTP_EXCEPTIONS
-    )
+    return set(terminals) <= HTTP_EXCEPTIONS
 
 
 class RecoveredLogReview:
@@ -212,7 +208,7 @@ class RecoveredLogReview:
         ]
 
     def classify_web_debug(self, lines):
-        """Recognize two observed, bounded ESI DEBUG shapes on the retained web slot."""
+        """Recognize benign schema metadata; callback recovery remains unproven."""
         if not lines or not ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]):
             return None
         event, level, logger, message = header(lines[0])
@@ -226,21 +222,6 @@ class RecoveredLogReview:
             and len(lines) == 1
         ):
             return "ESI-schema-model-name"
-        if (
-            logger == "esi.decorators"
-            and source_line == "39"
-            and re.fullmatch(
-                r"No callback for [A-Za-z0-9_.-]{1,64} session [a-z0-9]{5}", message
-            )
-        ):
-            tail = tuple(lines[1:])
-            mirrored = (
-                CAUGHT_CALLBACK_MISS_TRACE
-                + ("DEBUG:esi.decorators:" + message,)
-                + CAUGHT_CALLBACK_MISS_TRACE
-            )
-            if tail == CAUGHT_CALLBACK_MISS_TRACE or tail == mirrored:
-                return "caught-ESI-callback-miss"
         return None
 
     def classify(self, lines, *, services_worker, source):
@@ -463,6 +444,12 @@ class ReviewedDockerHost(DockerHost):
                 continue
             remaining = []
             for record in records(text):
+                # A legacy review object or cached category cannot remove a
+                # callback before the current strict scanner sees it.
+                if (_callback_failure_body("\n".join(record))
+                        or _native_exception_evidence(record) and (reviewed_web or not http_traceback(record))):
+                    remaining.extend(record)
+                    continue
                 try:
                     kind = (
                         review.classify_web_debug(record)

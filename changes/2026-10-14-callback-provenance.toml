@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Keep callback recovery unresolved without producer-supported operation completion; prevent client markers, truncated session prefixes and legacy annotations from becoming correlation proof."

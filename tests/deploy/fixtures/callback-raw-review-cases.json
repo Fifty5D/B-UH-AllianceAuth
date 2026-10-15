@@ -1,0 +1,666 @@
+[
+  {
+    "name": "plain-access-logs-without-session-proof",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "same-session-unrelated-api-200",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": "One browser session; native return-to-view has not proven completion of its destination. A concurrent tab/API returns 200. Only the UA string supplies HTTP session markers. No request/continuation identifier exists.",
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "same-session-unrelated-dashboard-200",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": "Replacing the API path with dashboard must not turn absent operation correlation into proof.",
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /dashboard/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "different-raw-session-marker",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session vwxyz probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session vwxyz probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "two-distinct-sessions-sharing-logged-prefix",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": "Synthetic true session keys abcde11111111111111111111111111111 and abcde22222222222222222222222222222 both log abcde via actual ESI session_key[:5]. Failure/fallback belong to the first; continuation/HTTP belong to the second. No full keys are passed to the verifier.",
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "missing-native-continuation",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "native-success-before-failure",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:00:59Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "two-concurrent-normal-returns",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:04Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "later-http-failure",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:04:00Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 500 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        }
+      ]
+    }
+  },
+  {
+    "name": "conflicting-origin-markers",
+    "expected": [
+      "handled_callback",
+      "unresolved"
+    ],
+    "meaning": null,
+    "raw": {
+      "worker/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "[01/Jan/2026 00:01:00] DEBUG [esi.decorators:39] No callback for AnonymousUser session abcde"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "Traceback (most recent call last):"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/installed/esi/decorators.py\", line 29, in _check_callback"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    model = CallbackRedirect.objects.get(session_key=request.session.session_key)"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/manager.py\", line 1, in manager_method"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    return get()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "  File \"/django/query.py\", line 1, in get"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "    raise DoesNotExist()"
+        },
+        {
+          "at": "2026-01-01T00:01:00Z",
+          "text": "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist."
+        },
+        {
+          "at": "2026-01-01T00:01:02Z",
+          "text": "[01/Jan/2026 00:01:02] DEBUG [esi.decorators:191] Redirecting AnonymousUser session abcde to SSO."
+        },
+        {
+          "at": "2026-01-01T00:02:00Z",
+          "text": "[01/Jan/2026 00:02:00] DEBUG [esi.decorators:122] Got new token from AnonymousUser session abcde. Returning to view."
+        }
+      ],
+      "nginx/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "at": "2026-01-01T00:02:02Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:02 +0000] \"GET /sso/login HTTP/1.1\" 302 0 \"-\" \"SyntheticBrowser/1.0 session abcde probe\""
+        },
+        {
+          "at": "2026-01-01T00:02:03Z",
+          "text": "192.0.2.10 - - [01/Jan/2026:00:02:03 +0000] \"GET /api/ping/ HTTP/1.1\" 200 0 \"-\" \"SyntheticBrowser/1.0 session abcde session vwxyz probe\""
+        }
+      ]
+    }
+  }
+]
