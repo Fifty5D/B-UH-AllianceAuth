@@ -391,7 +391,7 @@ NATIVE_TRACEBACK_MARKERS = frozenset({
     "During handling of the above exception, another exception occurred:",
     "The above exception was the direct cause of the following exception:",
 })
-NATIVE_TRACEBACK_FRAME_RE = re.compile(r'^  File "[^"\n]+", line [0-9]+, in \S[^\n]*$')
+NATIVE_TRACEBACK_FRAME_RE = re.compile(r'^  File "(?P<path>[^"\n]+)", line (?P<line>[0-9]+), in (?P<function>\S[^\n]*)$')
 NATIVE_EXCEPTION_TERMINAL_RE = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
 BUILTIN_EXCEPTION_NAMES = frozenset(name for name, value in vars(builtins).items()
                                   if isinstance(value, type) and issubclass(value, BaseException))
@@ -458,6 +458,12 @@ def _complete_native_traceback(lines, *, require_frames=False):
 def _incomplete_native_traceback(lines):
     return bool(lines and (ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]) or CELERY_LOG_HEADER_RE.match(lines[0]))
                 and _native_exception_evidence(lines) and _complete_native_traceback(lines) is None)
+
+
+def _native_traceback_frames(text):
+    """Only whole native physical lines can supply a required stack frame."""
+    return tuple(match.groups() for line in text.splitlines()
+                 if (match := NATIVE_TRACEBACK_FRAME_RE.fullmatch(line)) is not None)
 
 
 def _callback_failure_body(body):
@@ -576,7 +582,7 @@ def _semantic_provider_event(record, sources):
             or record["rows"][-1]["text"] != "aiopenapi3.errors.HTTPError"):
         return None
     filename, raises = _semantic_server_raise(sources)
-    frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+    frames = _native_traceback_frames(body)
     if (not frames or frames[-1][0] != filename or int(frames[-1][1]) not in raises
             or frames[-1][2] != "result" or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
         return None
@@ -611,7 +617,7 @@ def _semantic_callback_shape(record, sources):
             for name in names:
                 catches.setdefault(name, set()).update(node.lineno for node in caught_logs)
     header = ALLIANCEAUTH_LOG_HEADER_RE.match(record["rows"][0]["text"])
-    frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+    frames = _native_traceback_frames(body)
     if (header is None or header["level"] != "DEBUG" or header["component"] != "esi.decorators"
             or body.count("Traceback (most recent call last):") != 1 or not frames
             or frames[0][0] != source["filename"] or frames[0][2] != "_check_callback"):
@@ -735,7 +741,7 @@ def prove_semantic_recovery(case, sources):
                     and "TokenDoesNotExist" in body)
         if kind == "asset_names":
             filename, raises = _semantic_server_raise(sources, "HTTPClientError")
-            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            frames = _native_traceback_frames(body)
             return (body.count("Traceback (most recent call last):") == 2
                     and bool(frames) and frames[-1][0] == filename and int(frames[-1][1]) in raises
                     and re.match(r"esi\.exceptions\.HTTPClientError: <HTTPClientError 404\b",
@@ -1098,7 +1104,7 @@ class RetainedSemanticAnalyzer:
             related = []
             at = _semantic_stamp(record["first_at"])
             filename, raises = _semantic_server_raise(self.state["sources"], "HTTPClientError")
-            frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+            frames = _native_traceback_frames(body)
             if (body.count("Traceback (most recent call last):") != 1 or not frames
                     or frames[-1][0] != filename or int(frames[-1][1]) not in raises
                     or record["rows"][-2]["text"].strip() != "raise HTTPClientError("):
@@ -1212,7 +1218,7 @@ class RetainedSemanticAnalyzer:
                 or record["rows"][-2]["text"].strip() != "raise HTTPServerError("):
             return ("owner_specific_provider", "unresolved")
         filename, raises = _semantic_server_raise(self.state["sources"])
-        frames = re.findall(r'  File "([^"]+)", line ([0-9]+), in ([^\n]+)', body)
+        frames = _native_traceback_frames(body)
         proven = (frames and frames[-1][0] == filename and int(frames[-1][1]) in raises
                   and current.get("healthy") is True and current.get("credentials_valid") is True
                   and current.get("operation_id") == "GetUniverseStructuresStructureId"
@@ -2416,9 +2422,8 @@ CALLBACK_LOOKUP_SHA256 = "3cb440117225d96aac40de9d417dc4481a9f5691480327eb383c8d
 def _asset_trace_frames(text):
     if _complete_native_traceback(text.splitlines(), require_frames=True) is None:
         return ()
-    frames = re.findall(r'  File "([^"]+)", line [0-9]+, in ([^\n]+)', text)
     return tuple([path.split("site-packages/", 1)[-1].split("lib/python3.12/", 1)[-1], function]
-                 for path, function in frames)
+                 for path, _, function in _native_traceback_frames(text))
 
 
 def _legacy_asset_trace_shape(lines):

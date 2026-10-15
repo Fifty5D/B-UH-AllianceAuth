@@ -133,6 +133,8 @@ linked cause. Python may render an unraised cause without its own traceback;
 HTTP recovery still requires an actual traceback in the complete record.
 Extra frames or terminals after closure, cut path/function
 fields and unfinished chains cannot enter acceptance or qualification receipts.
+Required stack frames must occupy whole native physical lines. Frame-like text
+inside a literal message cannot replace a missing asset/provider frame in proof.
 The asset frame extractor refuses incomplete records before comparing expected
 frames. Both semantic adapters and the cached final filter retain the same
 uncertainty; reviewed rollback cannot prestrip it as an HTTP recovery. Supported

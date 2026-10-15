@@ -7,6 +7,7 @@ import unittest
 from ops.deploy import docker_host as dh
 from ops.deploy.recovered_logs import RecoveredLogReview, ReviewedDockerHost, TASK_CLOCKS, http_traceback
 from tests.deploy import test_retained_partial_trace as partial
+from tests.deploy import test_semantic_recovery as semantic
 from tests.deploy.test_callback_producer_proof import parse_rows, state
 from tests.deploy.test_legacy_callback_acceptance import raw_streams
 
@@ -124,6 +125,59 @@ class CompleteRetainedTracebackTests(unittest.TestCase):
         self.assertEqual(receipts, [])
         self.assertEqual(c.host.recovered_retained_log_records, {})
         self.assertEqual(old.read_bytes(), b'{"schema_version":1,"historical":true}\n')
+
+    def test_literal_message_frame_cannot_supply_legacy_asset_proof_or_cache(self):
+        c = self.case
+        for prefix in ("    literal client text: ", "literal message says: "):
+            report = c.asset_only()
+            stream = report["logs"][0]
+            stream["rows"][2] = partial.native_row(prefix + stream["rows"][2]["text"])
+            streams = raw_streams(report)
+            for current in ({}, streams):
+                with self.subTest(prefix=prefix, quiet=not current):
+                    c.load(report)
+                    with c.boundaries(current) as (native, logs), self.assertRaises(dh.DeploymentError):
+                        c.host._scan_new_logs(c.config.auth_services)
+                    native.assert_not_called()
+                    logs.assert_not_called()
+                    self.assertEqual(c.host.recovered_retained_log_records, {})
+                    gate, receipts, _ = self.harness.cleanup_gate()
+                    with c.boundaries(current), self.assertRaises(dh.DeploymentError):
+                        gate()
+                    self.assertEqual(receipts, [])
+            c.host.recovered_retained_log_records = {}
+            c.host.recovered_retained_log_seen = {}
+            for record in dh._retained_log_records(stream["rows"]):
+                hashes = tuple(row["raw_sha256"] for row in record)
+                c.host.recovered_retained_log_records.setdefault((stream["source"], hashes[0]), []).append(hashes)
+            with self.assertRaises(dh.LogScanError):
+                c.host._classify_log_batch([(stream["source"], "\n".join(row["text"] for row in streams[stream["source"]]))], set(), None)
+
+    def test_literal_message_frame_cannot_supply_semantic_provider_or_asset_proof(self):
+        fixture = semantic.ProviderRecoveryTests().fixture
+        records, before, current = fixture()
+        self.assertTrue(dh.prove_systemic_provider_recovery(records, semantic.SOURCES, before, current, complete=True))
+        asset = semantic.AssetRecoveryTests().asset_case()
+        self.assertTrue(dh.prove_semantic_recovery(asset, semantic.SOURCES))
+        for frame_index in (2, 4):
+            for prefix in ("    literal client text: ", "literal message says: "):
+                records, before, current = fixture()
+                records[0]["rows"][frame_index]["text"] = prefix + records[0]["rows"][frame_index]["text"]
+                with self.subTest(frame=frame_index, prefix=prefix):
+                    self.assertFalse(dh.prove_systemic_provider_recovery(records, semantic.SOURCES, before, current, complete=True))
+                    evidence = {"sources": semantic.SOURCES, "inventory_before": before, "owners": current,
+                                "observed_at": "2026-01-01T00:03:00Z", "identity_preserved": True, "credentials_valid": True}
+                    with dh.RetainedSemanticAnalyzer(evidence) as analyzer:
+                        for record in records:
+                            analyzer.feed(record)
+                        result = analyzer.finish()
+                    self.assertEqual(result["recovered_count"], 0)
+                    self.assertGreater(result["unresolved_count"] + result["unknown_count"], 0)
+                other = deepcopy(asset)
+                index = next(i for i, row in enumerate(other["record"]["rows"])
+                             if row["text"].startswith('  File "/installed/esi/openapi_clients.py'))
+                other["record"]["rows"][index]["text"] = prefix + other["record"]["rows"][index]["text"]
+                self.assertFalse(dh.prove_semantic_recovery(other, semantic.SOURCES))
 
     def test_both_semantic_adapters_and_normalized_reuse_preserve_incomplete_frames(self):
         c = self.case
