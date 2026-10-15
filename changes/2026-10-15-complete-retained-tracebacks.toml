@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Require every native exception fragment to belong to a complete traceback before legacy asset acceptance, cached filtering or reviewed HTTP recovery can qualify."

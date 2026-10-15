@@ -126,6 +126,17 @@ The existing exact Discord owner-transition contract still qualifies its own
 bounded traceback, including WARNING retry records. Additional terminals or frames
 outside that proven traceback's boundary remain unverified.
 
+Asset and reviewed HTTP recovery share a complete-record boundary check. Every
+recognized native frame must be complete and occur inside an open traceback;
+each terminal closes that traceback, and a causal separator requires a new,
+completed traceback. Extra frames or terminals after closure, cut path/function
+fields and unfinished chains cannot enter acceptance or qualification receipts.
+The asset frame extractor refuses incomplete records before comparing expected
+frames. Both semantic adapters and the cached final filter retain the same
+uncertainty; reviewed rollback cannot prestrip it as an HTTP recovery. Supported
+complete HTTP chains, valid asset recovery and literal multiline text remain
+supported. Historical hashes and receipts are unchanged evidence, not renewed proof.
+
 This is source qualification only. Receiver installation, retained application
 recovery, historical closure and deployment readiness require their own evidence
 and authorizations. Immutable v0.8.3, the existing incident hold, exclusions,

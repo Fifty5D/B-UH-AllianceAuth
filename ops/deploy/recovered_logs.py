@@ -19,6 +19,7 @@ from .docker_host import (
     DockerHost,
     FATAL_LOG_RE,
     _callback_failure_body,
+    _complete_native_traceback,
     _native_exception_evidence,
 )
 from .recovery_sync import stamp
@@ -133,17 +134,15 @@ def records(text):
 def http_traceback(lines):
     if len(lines) > 128 or any(HARD_FAILURE.search(line) for line in lines):
         return False
-    terminals = []
+    terminals = _complete_native_traceback(lines)
+    if terminals is None:
+        return False
     for line in lines[1:]:
-        match = re.match(
-            r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception))(?::|$)", line
-        )
-        if match:
-            terminals.append(match[1])
-        elif (
+        if (
             line
             and not line[0].isspace()
-            and line
+            and line.partition(":")[0] not in terminals
+            and line.rstrip()
             not in {
                 "Traceback (most recent call last):",
                 "During handling of the above exception, another exception occurred:",
@@ -151,11 +150,7 @@ def http_traceback(lines):
             }
         ):
             return False
-    return (
-        "Traceback (most recent call last):" in lines
-        and bool(terminals)
-        and set(terminals) <= HTTP_EXCEPTIONS
-    )
+    return set(terminals) <= HTTP_EXCEPTIONS
 
 
 class RecoveredLogReview:

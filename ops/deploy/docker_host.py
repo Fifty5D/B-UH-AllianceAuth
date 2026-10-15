@@ -391,7 +391,7 @@ NATIVE_TRACEBACK_MARKERS = frozenset({
     "During handling of the above exception, another exception occurred:",
     "The above exception was the direct cause of the following exception:",
 })
-NATIVE_TRACEBACK_FRAME_RE = re.compile(r'^  File "[^"\n]+", line [0-9]+, in [^\n]+$')
+NATIVE_TRACEBACK_FRAME_RE = re.compile(r'^  File "[^"\n]+", line [0-9]+, in \S[^\n]*$')
 NATIVE_EXCEPTION_TERMINAL_RE = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
 BUILTIN_EXCEPTION_NAMES = frozenset(name for name, value in vars(builtins).items()
                                   if isinstance(value, type) and issubclass(value, BaseException))
@@ -413,6 +413,51 @@ def _native_exception_evidence(lines):
             if "." in name or name in BUILTIN_EXCEPTION_NAMES or name.endswith(("Error", "Exception")):
                 return True
     return False
+
+
+def _complete_native_traceback(lines, *, require_frames=False):
+    """Return terminal classes only when every native fragment is accounted for.
+
+    Callers supply one logical record, including its header. A closed terminal
+    cannot lend recovery to another frame/terminal or an unfinished chain.
+    Literal multiline message content is not native exception structure.
+    """
+    phase, frames, terminals, saw_trace = "start", 0, [], False
+    for line in lines[1:]:
+        if not isinstance(line, str) or any(value in line for value in ("\n", "\r", "\ufffd")):
+            return None
+        if ALLIANCEAUTH_LOG_HEADER_RE.match(line) or CELERY_LOG_HEADER_RE.match(line):
+            return None
+        marker = next((value for value in NATIVE_TRACEBACK_MARKERS if line.startswith(value)), None)
+        if marker is not None:
+            if line.rstrip() != marker:
+                return None
+            if marker == "Traceback (most recent call last):":
+                if phase not in {"start", "chain"}:
+                    return None
+                phase, frames = "trace", 0
+                saw_trace = True
+            else:
+                if phase != "closed":
+                    return None
+                phase = "chain"
+        elif line.startswith('  File "'):
+            if phase != "trace" or NATIVE_TRACEBACK_FRAME_RE.fullmatch(line) is None:
+                return None
+            frames += 1
+        elif NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
+            # Python can print an unraised cause without its own traceback.
+            # It must still be linked by an explicit separator to a real trace.
+            if phase not in ({"trace"} if require_frames else {"start", "trace", "chain"}) or require_frames and not frames:
+                return None
+            terminals.append(line.partition(":")[0])
+            phase = "closed"
+    return tuple(terminals) if phase == "closed" and terminals and saw_trace else None
+
+
+def _incomplete_native_traceback(lines):
+    return bool(lines and (ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]) or CELERY_LOG_HEADER_RE.match(lines[0]))
+                and _native_exception_evidence(lines) and _complete_native_traceback(lines) is None)
 
 
 def _callback_failure_body(body):
@@ -521,7 +566,7 @@ def _semantic_current_success(failure, success, current):
 
 def _semantic_provider_event(record, sources):
     body = _semantic_record_body(record)
-    if SEMANTIC_HARD_FAILURE.search(body):
+    if SEMANTIC_HARD_FAILURE.search(body) or _incomplete_native_traceback(body.splitlines()):
         return None
     task = re.search(r"Task ([A-Za-z0-9_.]+)\[([0-9a-f-]{36})\] raised unexpected: HTTPError\(\)$",
                      record["rows"][0]["text"])
@@ -651,7 +696,7 @@ def prove_semantic_recovery(case, sources):
         if not isinstance(case, dict) or case.get("complete") is not True:
             return False
         body = _semantic_record_body(case["record"])
-        if SEMANTIC_HARD_FAILURE.search(body):
+        if SEMANTIC_HARD_FAILURE.search(body) or _incomplete_native_traceback(body.splitlines()):
             return False
         kind, failure = case["contract"], case["failure"]
         if failure["at"] != case["record"]["first_at"]:
@@ -805,6 +850,12 @@ class RetainedSemanticAnalyzer:
                                     evidence_id=original_source + "/" + str(record.get("ordinal")))
                 return
             body = _semantic_record_body(record)
+            if _incomplete_native_traceback([row["text"] for row in record["rows"]]):
+                self.ledger.analysis_complete = False
+                # Preserve the native callback's explicit unresolved contract,
+                # including its extra evidence. It can never grant recovery.
+                if not _callback_failure_body(body):
+                    raise DeploymentError("Recovery native exception boundaries are incomplete or conflicting")
             session = _semantic_record_session(record)
             physical_identity = None
             if all(isinstance(row.get("at"), str) and isinstance(row.get("raw_sha256"), str)
@@ -2363,6 +2414,8 @@ CALLBACK_LOOKUP_SHA256 = "3cb440117225d96aac40de9d417dc4481a9f5691480327eb383c8d
 
 
 def _asset_trace_frames(text):
+    if _complete_native_traceback(text.splitlines(), require_frames=True) is None:
+        return ()
     frames = re.findall(r'  File "([^"]+)", line [0-9]+, in ([^\n]+)', text)
     return tuple([path.split("site-packages/", 1)[-1].split("lib/python3.12/", 1)[-1], function]
                  for path, function in frames)
@@ -2370,25 +2423,9 @@ def _asset_trace_frames(text):
 
 def _legacy_asset_trace_shape(lines):
     """Do not let an extra or partial exception ride an accepted asset tuple."""
-    terminals, in_trace, frames = [], False, 0
-    for line in lines[1:]:
-        if line == "Traceback (most recent call last):":
-            if in_trace:
-                return False
-            in_trace, frames = True, 0
-        elif NATIVE_TRACEBACK_FRAME_RE.fullmatch(line):
-            if not in_trace:
-                return False
-            frames += 1
-        elif NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
-            if not in_trace or not frames:
-                return False
-            terminals.append(line.partition(":")[0].rsplit(".", 1)[-1])
-            in_trace = False
-        elif line in NATIVE_TRACEBACK_MARKERS and in_trace:
-            return False
-    return (not in_trace and bool(terminals)
-            and set(terminals) <= {"HTTPError", "HTTPClientError"}
+    terminals = _complete_native_traceback(lines, require_frames=True)
+    return (terminals is not None
+            and {name.rsplit(".", 1)[-1] for name in terminals} <= {"HTTPError", "HTTPClientError"}
             and _asset_trace_frames("\n".join(lines)) in (ASSET_ERROR_FRAMES, ASSET_TASK_FRAMES))
 
 
@@ -2470,6 +2507,10 @@ def _prove_retained_findings(report, review, config, proof):
                 except SemanticRecordError as error:
                     raise LogScanError([f"Incomplete retained native exception evidence: "
                                         f"{stream['source']} record {ordinal}; {error}"], complete=False) from error
+                if _complete_native_traceback([row["text"] for row in record]) is None:
+                    raise LogScanError([f"Unverified retained native exception evidence: "
+                                        f"{stream['source']} record {ordinal}; incomplete or conflicting "
+                                        "traceback boundaries"], complete=False)
     web = [stream for stream in streams if stream["source"].partition("/")[0] == config.gunicorn_service]
     if len(web) > 1:
         raise DeploymentError("Retained callback source is ambiguous")
@@ -8174,10 +8215,10 @@ class DockerHost:
                         not _native_exception_evidence([line]) or index in owner_indexes
                         or min(trace_starts) < index < min(trace_ends) and NATIVE_TRACEBACK_FRAME_RE.fullmatch(line)
                         for index, line in enumerate(lines, start))
-                if _native_exception_evidence(lines) and (
+                if (expected and not _legacy_asset_trace_shape(lines) or _native_exception_evidence(lines) and (
                         native["level"] not in {"ERROR", "CRITICAL"} and not owner_trace
-                        or expected and not _legacy_asset_trace_shape(lines)
-                        or owner_record and not owner_trace):
+                        or not owner_trace and _complete_native_traceback(lines) is None
+                        or owner_record and not owner_trace)):
                     reject("Unverified native exception fragment; original header/boundaries or recovery "
                            "are not established")
                     evidence_incomplete = True
