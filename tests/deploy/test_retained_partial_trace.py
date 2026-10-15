@@ -108,7 +108,7 @@ class RetainedPartialTraceTests(unittest.TestCase):
 
     def test_incomplete_exception_chains_at_eof_or_next_header_remain_explicit(self):
         for placement in ("after-normal", "middle"):
-            for marker in sorted(dh.NATIVE_TRACEBACK_MARKERS):
+            for marker in (value + suffix for value in sorted(dh.NATIVE_TRACEBACK_MARKERS) for suffix in ("", " \t")):
                 report = self.fragment_report(placement)
                 web = next(stream for stream in report["logs"] if stream["source"] == self.case.web)
                 index = -1 if placement == "middle" else len(web["rows"])
@@ -265,11 +265,12 @@ class RetainedPartialTraceTests(unittest.TestCase):
         self.assertIn("Unverified retained", str(self.refuse_scan(report)))
 
     def test_cut_native_frame_without_opener_or_terminal_remains_unverified(self):
-        for fragment in ('  File "/installed/esi/decorators.py', '  File "/installed/esi/decorators.py", line 29, in _check_'):
+        for fragment in ('  File "/installed/esi/decorators.py', '  File "/installed/esi/decorators.py", line 29, in _check_',
+                         "Traceback (most recent call last): \t"):
             report = self.fragment_report()
             report["logs"][1]["rows"] = [normal_row(), native_row(fragment)]
             with self.subTest(fragment=fragment):
-                self.assertIn("Unverified retained", str(self.refuse_scan(report)))
+                self.assertRegex(str(self.refuse_scan(report)), "(?:Unverified|Incomplete) retained")
 
     def test_malformed_physical_rows_cannot_hide_structural_evidence(self):
         for change in ("newline", "replacement", "clock"):

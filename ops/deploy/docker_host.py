@@ -406,7 +406,7 @@ def _native_exception_evidence(lines):
     """
     for line in lines:
         # An EOF cut inside a native frame is still exception evidence.
-        if line in NATIVE_TRACEBACK_MARKERS or line.startswith('  File "'):
+        if any(line.startswith(marker) for marker in NATIVE_TRACEBACK_MARKERS) or line.startswith('  File "'):
             return True
         if NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
             name = line.partition(":")[0]
@@ -1305,7 +1305,7 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
             fail("Complete semantic log record exceeds its preservation bound")
         rows.append(row)
         size += row_bytes
-        if original in NATIVE_TRACEBACK_MARKERS:
+        if any(original.startswith(marker) for marker in NATIVE_TRACEBACK_MARKERS):
             in_traceback = True
             last_traceback = len(rows) - 1
         elif terminal.fullmatch(original):
