@@ -248,6 +248,32 @@ class CompleteRetainedTracebackTests(unittest.TestCase):
                                 host._classify_log_batch([(source, "\n".join(lines))], {host.config.worker_service}, "rollback")
                             self.assertEqual(host.recovered_log_review.summary(), [])
 
+    def test_opened_http_trace_without_frame_stays_unverified_through_final_scanner(self):
+        for boundary in ("eof", "next-header"):
+            host = self.rollback_host()
+            source = host.config.worker_service + "/000000000001"
+            lines = [line for line in http_record() if not line.startswith('  File "')]
+            self.assertFalse(http_traceback(lines))
+            if boundary == "next-header":
+                lines.append("[2026-10-01 11:01:00,123: INFO/MainProcess] Ordinary following record")
+            with self.subTest(boundary=boundary), self.assertRaises(dh.LogScanError) as caught:
+                host._classify_log_batch([(source, "\n".join(lines))], {host.config.worker_service}, "rollback")
+            self.assertFalse(caught.exception.scan_complete)
+            self.assertIn("Unverified native exception fragment", str(caught.exception))
+            self.assertIn("structures.tasks.update_structures_assets_for_owner", str(caught.exception))
+            self.assertEqual(host.recovered_log_review.summary(), [])
+            for adapter in ("fresh", "retained"):
+                rows = [partial.native_row(line) for line in lines]
+                records = list(parse_rows(rows, source, adapter, {}))
+                self.assertEqual(sum(len(record["rows"]) for record in records), len(rows))
+                with self.subTest(boundary=boundary, adapter=adapter), dh.RetainedSemanticAnalyzer(state()) as analyzer:
+                    for record in records:
+                        analyzer.feed(record)
+                    result = analyzer.finish()
+                self.assertFalse(result["analysis_complete"])
+                self.assertGreater(result["unknown_count"], 0)
+                self.assertEqual(result["recovered_count"], 0)
+
     def test_valid_asset_http_chain_and_literal_multiline_controls(self):
         c = self.case
         c.load(c.asset_only())
@@ -261,7 +287,8 @@ class CompleteRetainedTracebackTests(unittest.TestCase):
         source = host.config.worker_service + "/000000000001"
         lines = http_record()
         chain = ["", "The above exception was the direct cause of the following exception:", "",
-                 "Traceback (most recent call last):", "esi.exceptions.HTTPClientError"]
+                 "Traceback (most recent call last):", '  File "/synthetic/tasks.py", line 9, in update',
+                 "esi.exceptions.HTTPClientError"]
         whitespace_markers = [line + " \t" if line == "Traceback (most recent call last):" else line for line in lines]
         for record in (lines, lines + chain, whitespace_markers,
                        lines + ['    literal client text: "Traceback (most recent call last):"']):

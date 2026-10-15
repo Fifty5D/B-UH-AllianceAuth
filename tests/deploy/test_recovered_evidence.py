@@ -281,9 +281,14 @@ class RecoveredLogTests(unittest.TestCase):
             '  File "/synthetic/assets.py", line 1, in update\n'
             "aiopenapi3.errors.HTTPClientError\n\n"
             "The above exception was the direct cause of the following exception:\n\n"
-            "Traceback (most recent call last):\n"
             "esi.exceptions.HTTPClientError\n"
         )
+        incomplete = text.replace("esi.exceptions.HTTPClientError\n",
+                                  "Traceback (most recent call last):\nesi.exceptions.HTTPClientError\n")
+        with self.assertRaises(LogScanError) as caught:
+            self.classify(incomplete)
+        self.assertFalse(caught.exception.scan_complete)
+        self.assertEqual(self.host.recovered_log_review.summary(), [])
         self.assertTrue(self.classify(text))
         self.assertTrue(self.classify(task_error(ASSET_TASK)))
         with self.assertRaises(LogScanError):

@@ -448,7 +448,7 @@ def _complete_native_traceback(lines, *, require_frames=False):
         elif NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
             # Python can print an unraised cause without its own traceback.
             # It must still be linked by an explicit separator to a real trace.
-            if phase not in ({"trace"} if require_frames else {"start", "trace", "chain"}) or require_frames and not frames:
+            if phase not in ({"trace"} if require_frames else {"start", "trace", "chain"}) or phase == "trace" and not frames:
                 return None
             terminals.append(line.partition(":")[0])
             phase = "closed"

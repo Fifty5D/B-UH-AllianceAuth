@@ -258,9 +258,13 @@ class AssetRecoveryTests(unittest.TestCase):
         line = next(node.lineno for node in ast.walk(ast.parse(SOURCES['esi.openapi_clients']['text']))
                     if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
                     and isinstance(node.exc.func, ast.Name) and node.exc.func.id == 'HTTPClientError')
+        request_line = next(node.lineno for node in ast.walk(ast.parse(SOURCES['esi.openapi_clients']['text']))
+                            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == 'request')
         item['record'] = record('[01/Jan/2026 00:01:00] ERROR [memberaudit.models.characters:12] '
                                 'Fixture (ID:7): assets: Error occurred: HTTPClientError: <HTTPClientError 404>\n'
                                 'Traceback (most recent call last):\n'
+                                f'  File "/installed/esi/openapi_clients.py", line {request_line}, in result\n'
                                 'aiopenapi3.errors.HTTPClientError: Invalid IDs in the request\n'
                                 'During handling of the above exception, another exception occurred:\n'
                                 'Traceback (most recent call last):\n'
@@ -274,6 +278,12 @@ class AssetRecoveryTests(unittest.TestCase):
 
     def test_complete_native_404_requires_real_payload_and_same_later_success(self):
         self.assertTrue(prove_semantic_recovery(self.asset_case(), SOURCES))
+        # The original synthetic case opened a cause traceback with no frame.
+        # Keep those incomplete bytes as a negative; the positive uses the
+        # actual request-call line from the synthetic source above.
+        incomplete = self.asset_case()
+        del incomplete['record']['rows'][2]
+        self.assertFalse(prove_semantic_recovery(incomplete, SOURCES))
         for key in ('payload_bytes_verified', 'relationships_valid'):
             other = self.asset_case()
             other[key] = False
