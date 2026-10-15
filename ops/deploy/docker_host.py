@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 from collections import Counter
 import gzip
 import hashlib
@@ -385,6 +386,33 @@ CALLBACK_RECOVERY_UNRESOLVED = (
     "Unresolved callback: supported producer records do not prove callback-operation completion; "
     "legacy report hashes and annotations cannot qualify recovery"
 )
+NATIVE_TRACEBACK_MARKERS = frozenset({
+    "Traceback (most recent call last):",
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+})
+NATIVE_TRACEBACK_FRAME_RE = re.compile(r'^  File "[^"\n]+", line [0-9]+, in [^\n]+$')
+NATIVE_EXCEPTION_TERMINAL_RE = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
+BUILTIN_EXCEPTION_NAMES = frozenset(name for name, value in vars(builtins).items()
+                                  if isinstance(value, type) and issubclass(value, BaseException))
+
+
+def _native_exception_evidence(lines):
+    """Native structure, not quoted/inline client words or a benign severity.
+
+    A frame, chain separator or terminal can outlive its own header/traceback
+    opener. Its origin then remains unknown; the preceding record cannot lend
+    it a benign outcome. An exact unquoted diagnostic is conservatively kept.
+    """
+    for line in lines:
+        # An EOF cut inside a native frame is still exception evidence.
+        if line in NATIVE_TRACEBACK_MARKERS or line.startswith('  File "'):
+            return True
+        if NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
+            name = line.partition(":")[0]
+            if "." in name or name in BUILTIN_EXCEPTION_NAMES or name.endswith(("Error", "Exception")):
+                return True
+    return False
 
 
 def _callback_failure_body(body):
@@ -768,7 +796,8 @@ class RetainedSemanticAnalyzer:
                         or any(not isinstance(row.get("text"), str) for row in rows)):
                     raise DeploymentError("Auxiliary retained evidence is incomplete")
                 text = "\n".join(row["text"] for row in rows)
-                if FATAL_LOG_RE.search(text) or SEMANTIC_CANDIDATE.search(text):
+                if (FATAL_LOG_RE.search(text) or SEMANTIC_CANDIDATE.search(text)
+                        or _native_exception_evidence(text.splitlines())):
                     proof = self.state.get("auxiliary_scope_proofs", {}).get(hashlib.sha256(text.encode()).hexdigest())
                     valid = isinstance(proof, dict) and proof.get("source") == original_source and proof.get("scope") in {
                         "command_audit", "optional_telemetry", "pre_auth_transport", "optional_identity_introspection"}
@@ -791,7 +820,7 @@ class RetainedSemanticAnalyzer:
                     self.duplicate_physical_views += 1
                     return
             candidate = bool(FATAL_LOG_RE.search(body) or SEMANTIC_CANDIDATE.search(body)
-                             or _semantic_callback_failure(record))
+                             or _semantic_callback_failure(record) or _native_exception_evidence(body.splitlines()))
             if not candidate and not re.search(
                     r"Discord Service|Nickname for |Account .*deleted|account.*deleted|"
                     r"\[esi\.(?:decorators|views):|HTTP/[0-9.]+|"
@@ -1194,7 +1223,7 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
     whole record; crossing one retains a partial record and blocks collection.
     """
     header = re.compile(r"^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]+\]|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4} )")
-    terminal = re.compile(r"^(?:[A-Za-z_]\w*\.)*[A-Z][A-Za-z0-9_]*(?::(?: .*)?|)$")
+    terminal = NATIVE_EXCEPTION_TERMINAL_RE
     session = re.compile(r"\bsession (?P<key>[A-Za-z0-9]{5,64})(?=[. ]|$)")
     rows, first_at, ordinal, size = [], None, 0, 0
     in_traceback = False
@@ -1276,9 +1305,7 @@ def _semantic_records_from_rows(physical_rows, source, *, stats, deadline):
             fail("Complete semantic log record exceeds its preservation bound")
         rows.append(row)
         size += row_bytes
-        if original.startswith(("Traceback (most recent call last):",
-                                "During handling of the above exception, another exception occurred:",
-                                "The above exception was the direct cause of the following exception:")):
+        if original in NATIVE_TRACEBACK_MARKERS:
             in_traceback = True
             last_traceback = len(rows) - 1
         elif terminal.fullmatch(original):
@@ -2288,6 +2315,9 @@ def _retained_log_records(rows):
                 or not isinstance(row.get("raw_sha256"), str)
                 or SHA256_RE.fullmatch(row["raw_sha256"]) is None):
             raise DeploymentError("Retained finding record is incomplete")
+        if any(marker in row["text"] for marker in ("\n", "\r", "\ufffd")):
+            raise DeploymentError("Retained finding physical row has invalid line boundaries; evidence is incomplete")
+        _semantic_stamp(row.get("at"))
         if ALLIANCEAUTH_LOG_HEADER_RE.match(row["text"]) or CELERY_LOG_HEADER_RE.match(row["text"]):
             if record:
                 yield record
@@ -2336,6 +2366,30 @@ def _asset_trace_frames(text):
     frames = re.findall(r'  File "([^"]+)", line [0-9]+, in ([^\n]+)', text)
     return tuple([path.split("site-packages/", 1)[-1].split("lib/python3.12/", 1)[-1], function]
                  for path, function in frames)
+
+
+def _legacy_asset_trace_shape(lines):
+    """Do not let an extra or partial exception ride an accepted asset tuple."""
+    terminals, in_trace, frames = [], False, 0
+    for line in lines[1:]:
+        if line == "Traceback (most recent call last):":
+            if in_trace:
+                return False
+            in_trace, frames = True, 0
+        elif NATIVE_TRACEBACK_FRAME_RE.fullmatch(line):
+            if not in_trace:
+                return False
+            frames += 1
+        elif NATIVE_EXCEPTION_TERMINAL_RE.fullmatch(line):
+            if not in_trace or not frames:
+                return False
+            terminals.append(line.partition(":")[0].rsplit(".", 1)[-1])
+            in_trace = False
+        elif line in NATIVE_TRACEBACK_MARKERS and in_trace:
+            return False
+    return (not in_trace and bool(terminals)
+            and set(terminals) <= {"HTTPError", "HTTPClientError"}
+            and _asset_trace_frames("\n".join(lines)) in (ASSET_ERROR_FRAMES, ASSET_TASK_FRAMES))
 
 
 def _prove_retained_findings(report, review, config, proof):
@@ -2400,12 +2454,22 @@ def _prove_retained_findings(report, review, config, proof):
         service, separator, container = stream["source"].partition("/")
         if not separator or containers.get(container) != service:
             raise DeploymentError("Retained finding log container differs")
-    for stream in streams:
-        for record in _retained_log_records(stream["rows"]):
+    selected_records = [(stream, list(_retained_log_records(stream["rows"]))) for stream in streams]
+    for stream, logical_records in selected_records:
+        for ordinal, record in enumerate(logical_records, 1):
             if _callback_failure_body("\n".join(row["text"] for row in record)):
                 # The current interval has not been scanned yet. Retain the
                 # known unresolved finding without claiming a complete scan.
                 raise LogScanError([CALLBACK_RECOVERY_UNRESOLVED], complete=False)
+            if _native_exception_evidence(row["text"] for row in record):
+                try:
+                    # Use the live/retained framing contract to keep incomplete
+                    # causal tails blocking, even after an unrelated header.
+                    list(_semantic_records_from_rows(record, stream["source"], stats={},
+                         deadline=time.monotonic() + config.command_timeout_seconds))
+                except SemanticRecordError as error:
+                    raise LogScanError([f"Incomplete retained native exception evidence: "
+                                        f"{stream['source']} record {ordinal}; {error}"], complete=False) from error
     web = [stream for stream in streams if stream["source"].partition("/")[0] == config.gunicorn_service]
     if len(web) > 1:
         raise DeploymentError("Retained callback source is ambiguous")
@@ -2416,8 +2480,6 @@ def _prove_retained_findings(report, review, config, proof):
         raise DeploymentError("Retained callback HTTP evidence is incomplete")
     if http_sources and any(row["status"] >= 400 for row in http_sources[0]["rows"]):
         raise DeploymentError("Retained login HTTP failure remains unresolved")
-    if any(re.search(r"\b(?:ERROR|CRITICAL)\b", row["text"]) for stream in web for row in stream["rows"]):
-        raise DeploymentError("Retained login application failure remains unresolved")
     records, warnings = {}, []
     def add(source, record, warning):
         key = (source, record[0]["raw_sha256"])
@@ -2429,11 +2491,11 @@ def _prove_retained_findings(report, review, config, proof):
             warnings.append(warning)
     name = re.escape(identity["character_name"])
     asset_errors, task_errors = [], []
-    for stream in streams:
+    for stream, logical_records in selected_records:
         service = stream["source"].partition("/")[0]
         if service != config.worker_service:
             continue
-        for record in _retained_log_records(stream["rows"]):
+        for record in logical_records:
             header = record[0]["text"]
             if not re.search(r"\bERROR(?: |/MainProcess\])", header):
                 continue
@@ -2469,6 +2531,21 @@ def _prove_retained_findings(report, review, config, proof):
                      f"later assets update {status['update_finished_at']} and run {status['run_finished_at']}")
     for record, source in [(row[0], row[2]) for row in asset_errors] + task_errors:
         add(source, record, asset_warning)
+    for stream, logical_records in selected_records:
+        for ordinal, record in enumerate(logical_records, 1):
+            lines = [row["text"] for row in record]
+            native = ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]) or CELERY_LOG_HEADER_RE.match(lines[0])
+            if native["level"] not in {"ERROR", "CRITICAL"} and not _native_exception_evidence(lines):
+                continue
+            hashes = tuple(row["raw_sha256"] for row in record)
+            if (hashes not in records.get((stream["source"], hashes[0]), [])
+                    or not _legacy_asset_trace_shape(lines)):
+                # Account for every selected logical record, including residual
+                # evidence never repeated by current transport. No cache is
+                # activated unless the entire report qualifies.
+                raise LogScanError([f"Unverified retained native exception evidence: "
+                                    f"{stream['source']} record {ordinal}; original header/boundaries "
+                                    "or recovery are not established"], complete=False)
     return records, tuple(warnings)
 
 
@@ -7732,6 +7809,7 @@ class DockerHost:
                             [(source, batch)], individually_scanned, owner_transition_phase
                         )
                     except LogScanError as error:
+                        scan_complete = scan_complete and error.scan_complete
                         for failure in error.findings:
                             retain_failure(source, failure)
                         truncated = truncated or error.findings_truncated
@@ -7764,6 +7842,7 @@ class DockerHost:
         allowed: list[str] = []
         rejected: list[str] = []
         rejected_overflow = False
+        evidence_incomplete = False
 
         def reject(sample):
             nonlocal rejected_overflow
@@ -8065,8 +8144,12 @@ class DockerHost:
             recovered_indexes: set[int] = set()
             starts = [index for index, line in enumerate(source_lines)
                       if ALLIANCEAUTH_LOG_HEADER_RE.match(line) or CELERY_LOG_HEADER_RE.match(line)]
+            if _native_exception_evidence(source_lines[:starts[0] if starts else len(source_lines)]):
+                reject("Unverified native exception fragment has no original header; evidence is incomplete")
+                evidence_incomplete = True
             for start, stop in zip(starts, [*starts[1:], len(source_lines)]):
-                hashes = tuple(hashlib.sha256(line.encode()).hexdigest() for line in source_lines[start:stop])
+                lines = source_lines[start:stop]
+                hashes = tuple(hashlib.sha256(line.encode()).hexdigest() for line in lines)
                 # Recheck semantics before consulting any cached byte acceptance.
                 # This also blocks schema/report transitions and direct callers
                 # carrying acceptance produced by an older verifier.
@@ -8075,6 +8158,13 @@ class DockerHost:
                     continue
                 key = (source, hashes[0])
                 expected = self.recovered_retained_log_records.get(key, [])
+                native = ALLIANCEAUTH_LOG_HEADER_RE.match(lines[0]) or CELERY_LOG_HEADER_RE.match(lines[0])
+                if _native_exception_evidence(lines) and (native["level"] not in {"ERROR", "CRITICAL"}
+                        or expected and not _legacy_asset_trace_shape(lines)):
+                    reject("Unverified native exception fragment; original header/boundaries or recovery "
+                           "are not established")
+                    evidence_incomplete = True
+                    continue
                 if not expected or hashes not in expected:
                     continue
                 occurrence = (*key, hashes)
@@ -8157,7 +8247,7 @@ class DockerHost:
                 else:
                     reject(_failure_sample(source_lines, index))
         if rejected:
-            raise LogScanError(rejected, truncated=rejected_overflow)
+            raise LogScanError(rejected, complete=not evidence_incomplete, truncated=rejected_overflow)
         return tuple(allowed)
 
     def _retain_transition_log_findings(

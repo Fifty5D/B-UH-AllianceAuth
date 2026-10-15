@@ -607,6 +607,10 @@ def main(argv=None):
                       "proven_worker_recycles": current.accepted_worker_recycles}
             if record["reviewed_baseline_unchanged"] is not True:
                 raise DeploymentError("Original reviewed restart baseline changed")
+            # Fresh proof must succeed before any qualification receipt. An old
+            # receipt or a quiet current scan cannot erase retained fragments.
+            retained_warnings = (current._verified_retained_log_findings()
+                                 if "retained_log_findings" in review else ())
             _atomic_bytes(current.backup_path / "WORKER-RECYCLES.json",
                           (json.dumps(record, sort_keys=True) + "\n").encode(), 0o600, owner=(0, 0))
             if review["schema_version"] == 4:
@@ -630,7 +634,7 @@ def main(argv=None):
                 findings = {"schema_version": 1, "attempt_id": plan["attempt_id"],
                     "plan_sha256": assessment["hold_sha256"], "review_sha256": digest(private_read(review_path)),
                     "proof": review["retained_log_findings"],
-                    "recovered_warnings": current._verified_retained_log_findings(),
+                    "recovered_warnings": retained_warnings,
                     "callback_recovery_accepted": False,
                     "records": [{"source": source, "header_sha256": header,
                                  "ordered_original_line_sha256": rows}

@@ -19,6 +19,7 @@ from .docker_host import (
     DockerHost,
     FATAL_LOG_RE,
     _callback_failure_body,
+    _native_exception_evidence,
 )
 from .recovery_sync import stamp
 
@@ -450,7 +451,8 @@ class ReviewedDockerHost(DockerHost):
             for record in records(text):
                 # A legacy review object or cached category cannot remove a
                 # callback before the current strict scanner sees it.
-                if _callback_failure_body("\n".join(record)):
+                if (_callback_failure_body("\n".join(record))
+                        or _native_exception_evidence(record) and (reviewed_web or not http_traceback(record))):
                     remaining.extend(record)
                     continue
                 try:

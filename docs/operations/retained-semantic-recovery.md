@@ -107,6 +107,22 @@ their installed-source verification is not callback-operation completion.
 The pre-cleanup path rereads and revalidates the report rather than reusing an
 earlier conclusion. Original reports and acceptance receipts are not rewritten.
 
+Every selected retained logical record is accounted for before acceptance is
+activated. Native traceback openers, stack frames, exception terminals and causal
+chain separators remain evidence when their original header is missing, including
+in the middle of a stream after a normal record. The preceding record cannot lend
+them its severity, identity or outcome. Complete residual traces remain unverified;
+truncated causal tails remain incomplete under the shared live/retained parser.
+Neither result proves a current application failure or a recovered historical
+operation. A quiet current scan cannot erase the retained blocker.
+
+Recognition uses native line structure rather than arbitrary quoted/inline client
+marker words. Benign multiline records remain supported. Exact qualified asset
+records retain their existing proof, but an extra exception tail cannot borrow
+that recovery. The final cached-row filter and rollback adapter preserve uncertain
+fragments. Fresh pre-cleanup retained proof runs before qualification receipts are
+written; an older digest-bound receipt is historical evidence, not a substitute.
+
 This is source qualification only. Receiver installation, retained application
 recovery, historical closure and deployment readiness require their own evidence
 and authorizations. Immutable v0.8.3, the existing incident hold, exclusions,
