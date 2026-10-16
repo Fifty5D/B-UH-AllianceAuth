@@ -196,7 +196,11 @@ def _github_user(value: Any) -> tuple[str, int]:
 
 
 def _validate_review_evidence(
-    value: Any, *, repository: str, pr: int, head_sha: str
+    value: Any,
+    *,
+    repository: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
 ) -> dict[str, Any]:
     evidence = _mapping(value, "review evidence")
     _exact_keys(
@@ -394,6 +398,10 @@ def _validate_review_evidence(
     }
     resolved_ids: set[int] = set()
     if "commented_dispositions" in evidence:
+        if repository is None or pr is None or head_sha is None:
+            raise ReadinessError(
+                "COMMENTED dispositions require exact-source validation context"
+            )
         raw_dispositions = evidence["commented_dispositions"]
         if not isinstance(raw_dispositions, list) or not 1 <= len(raw_dispositions) <= 100:
             raise ReadinessError("COMMENTED disposition evidence is malformed")

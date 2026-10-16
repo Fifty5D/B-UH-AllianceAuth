@@ -10,6 +10,7 @@ from ops.readiness import (
     COMMENTED_DISPOSITION_MARKER,
     ReadinessError,
     _review_evidence,
+    _validate_review_evidence,
     collect,
     validate,
     verify_published,
@@ -153,6 +154,17 @@ class CommentedDispositionTests(unittest.TestCase):
         self.assertEqual(disposition["authority"]["author_id"], 101)
         self.assertEqual(client.reviews, originals)
         self.assertNotIn('"body":', json.dumps(record))
+
+    def test_legacy_review_validators_remain_compatible_without_granting_unbound_resolution(
+        self,
+    ):
+        client = self.client(disposition=False)
+        client.reviews.pop(0)
+        legacy = _review_evidence(client, REPOSITORY, PR)
+        self.assertEqual(_validate_review_evidence(legacy), legacy)
+        extended = self.collect(self.client())["review_evidence"]
+        with self.assertRaisesRegex(ReadinessError, "exact-source validation context"):
+            _validate_review_evidence(extended)
 
     def test_partial_resolution_keeps_older_same_author_and_other_authors_blocking(self):
         for other_author in (False, True):
