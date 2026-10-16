@@ -26,7 +26,10 @@ class GitGraph:
         # Retain the isolated graph for inspection; never clean a user's checkout.
         self.path = Path(tempfile.mkdtemp(prefix="readiness-combination-"))
         self.environment = dict(
-            os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"
+            os.environ,
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_NOSYSTEM="1",
+            PYTHONDONTWRITEBYTECODE="1",
         )
         self.git("init", "--initial-branch=main")
         for name in readiness.QUALIFICATION_WORKFLOWS:
@@ -88,6 +91,7 @@ class GitGraph:
             result = subprocess.run(
                 [
                     sys.executable,
+                    "-B",
                     "-c",
                     "import runpy; from pathlib import Path; "
                     "[runpy.run_path(str(p)) for p in sorted(Path('.').glob('*_test.py'))]",
