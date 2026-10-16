@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -61,6 +62,10 @@ READINESS_POINTER_MARKER = "<!-- buh-readiness-record:v2 -->"
 READINESS_ARTIFACT_LIMIT = 1024 * 1024
 READINESS_RECORD_LIMIT = 512 * 1024
 PULL_FILES_API_LIMIT = 3000
+COMMENTED_DISPOSITION_MARKER = "<!-- buh-commented-review-disposition:v1 -->"
+SOURCE_PASS = re.compile(
+    r"\bsource review: \*\*PASS\*\* at `([0-9a-f]{40})`, base `([0-9a-f]{40})`"
+)
 
 
 class ReadinessError(ValueError):
@@ -123,7 +128,76 @@ def _review_digest(snapshot: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _validate_review_evidence(value: Any) -> dict[str, Any]:
+def _body_digest(body: str) -> str:
+    return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def _sha256(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ReadinessError("invalid disposition body digest")
+    return value
+
+
+def _review_time(value: Any) -> datetime:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value
+    ):
+        raise ReadinessError("disposition evidence time is malformed")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReadinessError("disposition evidence time is malformed") from exc
+
+
+def _disposition_payload(value: Any) -> dict[str, Any]:
+    payload = _mapping(value, "COMMENTED review disposition")
+    _exact_keys(
+        payload,
+        {"schema_version", "repository", "pr", "head_sha", "base_sha",
+         "pass_review", "resolved_reviews"},
+        "COMMENTED review disposition",
+    )
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ReadinessError("unsupported COMMENTED disposition schema")
+    repository = payload["repository"]
+    if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
+        raise ReadinessError("invalid disposition repository")
+    _positive_int(payload["pr"], "disposition PR")
+    _sha(payload["head_sha"], "disposition head")
+    _sha(payload["base_sha"], "disposition base")
+
+    def reference(item: Any) -> dict[str, Any]:
+        ref = _mapping(item, "disposition review reference")
+        _exact_keys(ref, {"id", "body_sha256"}, "disposition review reference")
+        return {
+            "id": _positive_int(ref["id"], "disposition review id"),
+            "body_sha256": _sha256(ref["body_sha256"]),
+        }
+
+    passed = reference(payload["pass_review"])
+    raw_targets = payload["resolved_reviews"]
+    if not isinstance(raw_targets, list) or not 1 <= len(raw_targets) <= 100:
+        raise ReadinessError("disposition must name 1 to 100 whole reviews")
+    targets = [reference(item) for item in raw_targets]
+    ids = [item["id"] for item in targets]
+    if ids != sorted(set(ids)) or passed["id"] in ids:
+        raise ReadinessError("disposition review references are ambiguous")
+    return {**payload, "pass_review": passed, "resolved_reviews": targets}
+
+
+def _github_user(value: Any) -> tuple[str, int]:
+    user = _mapping(value, "disposition GitHub user")
+    if user.get("type") != "User":
+        raise ReadinessError("disposition requires an authenticated human GitHub user")
+    return (
+        _metadata_string(user.get("login"), "disposition GitHub login", 100),
+        _positive_int(user.get("id"), "disposition GitHub user id"),
+    )
+
+
+def _validate_review_evidence(
+    value: Any, *, repository: str, pr: int, head_sha: str
+) -> dict[str, Any]:
     evidence = _mapping(value, "review evidence")
     _exact_keys(
         evidence,
@@ -136,10 +210,11 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             "issue_comments",
         },
         "review evidence",
+        optional={"commented_dispositions"},
     )
 
     def normalize_reviews(
-        raw: Any, context: str, allowed: set[str]
+        raw: Any, context: str, allowed: set[str], *, unique_authors: bool = True
     ) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
             raise ReadinessError(f"{context} are malformed")
@@ -169,7 +244,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             if not isinstance(review["serious"], bool):
                 raise ReadinessError(f"{context} serious marker is malformed")
             folded_author = author.casefold()
-            if folded_author in authors or review_id in ids:
+            if (unique_authors and folded_author in authors) or review_id in ids:
                 raise ReadinessError(f"{context} contain duplicate identities")
             authors.add(folded_author)
             ids.add(review_id)
@@ -203,6 +278,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
         evidence["unresolved_serious_reviews"],
         "unresolved serious reviews",
         REVIEW_STATES - {"APPROVED", "DISMISSED"},
+        unique_authors=False,
     )
     if any(not review["serious"] for review in unresolved_serious):
         raise ReadinessError("unresolved serious review evidence is inconsistent")
@@ -266,6 +342,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             comment,
             {"id", "author", "created_at", "updated_at", "serious"},
             "pull-request issue comment",
+            optional={"author_id", "body_sha256", "node_id", "last_edited_at"},
         )
         comment_id = _positive_int(comment["id"], "pull-request issue comment id")
         if comment_id in issue_comment_ids:
@@ -292,6 +369,18 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
                 "serious": serious,
             }
         )
+        if "author_id" in comment or "body_sha256" in comment:
+            issue_comments[-1].update(
+                author_id=_positive_int(comment.get("author_id"), "disposition author id"),
+                body_sha256=_sha256(comment.get("body_sha256")),
+                node_id=_metadata_string(comment.get("node_id"), "disposition node id"),
+            )
+        if "last_edited_at" in comment:
+            if comment["last_edited_at"] is not None:
+                raise ReadinessError(
+                    "an edited disposition cannot establish author provenance"
+                )
+            issue_comments[-1]["last_edited_at"] = None
     expected_issue_comments = sorted(issue_comments, key=lambda item: item["id"])
     if issue_comments != expected_issue_comments:
         raise ReadinessError("pull-request issue comments are not canonical")
@@ -303,22 +392,162 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
         "threads": threads,
         "issue_comments": issue_comments,
     }
+    resolved_ids: set[int] = set()
+    if "commented_dispositions" in evidence:
+        raw_dispositions = evidence["commented_dispositions"]
+        if not isinstance(raw_dispositions, list) or not 1 <= len(raw_dispositions) <= 100:
+            raise ReadinessError("COMMENTED disposition evidence is malformed")
+        dispositions: list[dict[str, Any]] = []
+        comments_by_id = {comment["id"]: comment for comment in issue_comments}
+        serious_by_id = {review["id"]: review for review in unresolved_serious}
+        review_keys = {"id", "author", "state", "submitted_at", "commit_id", "serious"}
+
+        def bound_review(raw: Any, *, passed: bool = False) -> dict[str, Any]:
+            review = _mapping(raw, "disposition bound review")
+            extra = {"author_id", "body_sha256"}
+            if passed:
+                extra |= {"source_head_sha", "source_base_sha"}
+            _exact_keys(review, review_keys | extra, "disposition bound review")
+            normalized = normalize_reviews(
+                [{key: review[key] for key in review_keys}],
+                "disposition bound reviews",
+                REVIEW_STATES,
+            )[0]
+            _positive_int(review["author_id"], "bound review author id")
+            _sha256(review["body_sha256"])
+            _sha(review["commit_id"], "bound review commit")
+            _review_time(review["submitted_at"])
+            if review["id"] in serious_by_id and normalized != serious_by_id[review["id"]]:
+                raise ReadinessError("disposition changed historical review metadata")
+            return dict(review)
+
+        for raw in raw_dispositions:
+            disposition = _mapping(raw, "COMMENTED disposition evidence")
+            _exact_keys(
+                disposition,
+                {"comment_id", "authority", "payload", "reviews", "ancestry"},
+                "COMMENTED disposition evidence",
+            )
+            comment_id = _positive_int(disposition["comment_id"], "disposition comment id")
+            comment = comments_by_id.get(comment_id)
+            if (
+                comment is None
+                or "author_id" not in comment
+                or "last_edited_at" not in comment
+            ):
+                raise ReadinessError("disposition comment provenance is missing")
+            if comment["created_at"] != comment["updated_at"]:
+                raise ReadinessError(
+                    "an edited disposition cannot establish author provenance"
+                )
+            authority = _mapping(disposition["authority"], "disposition authority")
+            _exact_keys(
+                authority,
+                {"repository", "author", "author_id", "permission"},
+                "disposition authority",
+            )
+            _positive_int(authority["author_id"], "disposition authority user id")
+            if (
+                authority["repository"] != repository
+                or authority["author"] != comment["author"]
+                or authority["author_id"] != comment["author_id"]
+                or authority["permission"] not in {"write", "admin"}
+            ):
+                raise ReadinessError(
+                    "disposition author lacks verified repository authority"
+                )
+            payload = _disposition_payload(disposition["payload"])
+            if (payload["repository"], payload["pr"], payload["head_sha"]) != (
+                repository,
+                pr,
+                head_sha,
+            ):
+                raise ReadinessError(
+                    "disposition belongs to another repository, PR or head"
+                )
+            ancestry = _mapping(disposition["ancestry"], "disposition source ancestry")
+            _exact_keys(
+                ancestry,
+                {"current_base_sha", "head_merge_base_sha", "base_merge_base_sha"},
+                "disposition source ancestry",
+            )
+            _sha(ancestry["current_base_sha"], "disposition current base")
+            if (
+                ancestry["head_merge_base_sha"] != payload["base_sha"]
+                or ancestry["base_merge_base_sha"] != payload["base_sha"]
+            ):
+                raise ReadinessError("disposition reviewed base is not a source ancestor")
+            raw_reviews = disposition["reviews"]
+            if not isinstance(raw_reviews, list) or len(raw_reviews) != 1 + len(
+                payload["resolved_reviews"]
+            ):
+                raise ReadinessError("disposition bound reviews are incomplete")
+            passed = bound_review(raw_reviews[0], passed=True)
+            if (
+                passed["id"] != payload["pass_review"]["id"]
+                or passed["body_sha256"] != payload["pass_review"]["body_sha256"]
+                or passed["author_id"] != comment["author_id"]
+                or passed["state"] not in {"COMMENTED", "APPROVED"}
+                or passed["serious"]
+                or passed["commit_id"] != head_sha
+                or passed["source_head_sha"] != head_sha
+                or passed["source_base_sha"] != payload["base_sha"]
+                or _review_time(passed["submitted_at"])
+                >= _review_time(comment["created_at"])
+            ):
+                raise ReadinessError(
+                    "disposition lacks exact-source authenticated PASS evidence"
+                )
+            reviews = [passed]
+            for raw_review, ref in zip(raw_reviews[1:], payload["resolved_reviews"]):
+                review = bound_review(raw_review)
+                if (
+                    review["id"] != ref["id"]
+                    or review["body_sha256"] != ref["body_sha256"]
+                    or review["state"] != "COMMENTED"
+                    or not review["serious"]
+                    or review["id"] >= passed["id"]
+                    or _review_time(review["submitted_at"])
+                    >= _review_time(passed["submitted_at"])
+                    or (
+                        authority["permission"] != "admin"
+                        and review["author_id"] != comment["author_id"]
+                    )
+                ):
+                    raise ReadinessError(
+                        "disposition does not verify its named COMMENTED findings"
+                    )
+                resolved_ids.add(review["id"])
+                reviews.append(review)
+            dispositions.append(
+                {
+                    "comment_id": comment_id,
+                    "authority": dict(authority),
+                    "payload": payload,
+                    "reviews": reviews,
+                    "ancestry": dict(ancestry),
+                }
+            )
+        ids = [item["comment_id"] for item in dispositions]
+        if ids != sorted(set(ids)):
+            raise ReadinessError("COMMENTED dispositions are not canonical")
+        snapshot["commented_dispositions"] = dispositions
     digest = evidence["digest"]
     if digest != _review_digest(snapshot):
         raise ReadinessError("review evidence digest does not match its snapshot")
     if any(review["state"] == "CHANGES_REQUESTED" for review in latest_actionable):
         raise ReadinessError("an unresolved changes-requested review remains")
-    if unresolved_serious:
+    if any(review["id"] not in resolved_ids for review in unresolved_serious):
         raise ReadinessError("an unresolved serious review finding remains")
     if any(
         review["serious"]
+        and review["id"] not in resolved_ids
         and review["state"] not in {"APPROVED", "DISMISSED"}
         for review in latest_reviews
     ):
         raise ReadinessError("an unresolved serious review finding remains")
     if any(
-        not thread["resolved"]
-        and any(comment["serious"] for comment in thread["comments"])
+        not thread["resolved"] and any(comment["serious"] for comment in thread["comments"])
         for thread in threads
     ):
         raise ReadinessError("an unresolved serious review finding remains")
@@ -561,7 +790,9 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_preview is not None:
         raise ReadinessError("readiness record has unexpected preview evidence")
 
-    reviews = _validate_review_evidence(value["review_evidence"])
+    reviews = _validate_review_evidence(
+        value["review_evidence"], repository=repository, pr=pr, head_sha=head
+    )
     if value["ready"] is not True:
         raise ReadinessError("readiness record is not qualified")
     return {
@@ -767,7 +998,9 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
     elif preview is not None:
         raise ReadinessError("unexpected UI preview evidence")
 
-    review_evidence = _validate_review_evidence(value["review_evidence"])
+    review_evidence = _validate_review_evidence(
+        value["review_evidence"], repository=repository, pr=pr, head_sha=head
+    )
 
     return {
         "schema_version": 2,
@@ -1079,19 +1312,180 @@ def _verify_preview_zip(payload: bytes, manifest: Mapping[str, Any]) -> None:
         raise ReadinessError("UI preview archive lacks its Playwright report")
 
 
+def _commented_dispositions(
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    head_sha: str | None,
+    base_sha: str | None,
+    candidates: list[tuple[Mapping[str, Any], dict[str, Any]]],
+    reviews: Mapping[int, tuple[Mapping[str, Any], dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Bind explicit whole-review resolutions to live, authenticated metadata.
+
+    Write-level reviewers may resolve their own findings; repository admins may
+    act as process owners. Both must author the supporting source PASS. Older
+    source dispositions remain historical comments and grant no current relief.
+    """
+    dispositions = []
+    authorities: dict[int, dict[str, Any]] = {}
+    provenance_query = """
+      query($id: ID!) {
+        node(id: $id) {
+          __typename
+          ... on IssueComment {
+            id databaseId body createdAt updatedAt lastEditedAt
+            author { __typename login ... on User { databaseId } }
+          }
+        }
+      }
+    """
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReadinessError("disposition JSON has duplicate fields")
+            result[key] = value
+        return result
+
+    for comment, normalized in candidates:
+        try:
+            payload = _disposition_payload(
+                json.loads(
+                    comment["body"][len(COMMENTED_DISPOSITION_MARKER) + 1 :],
+                    object_pairs_hook=unique_object,
+                )
+            )
+        except (ValueError, RecursionError) as exc:
+            raise ReadinessError("COMMENTED disposition JSON is malformed") from exc
+        if (payload["repository"], payload["pr"], payload["head_sha"]) != (
+            repository,
+            pr,
+            head_sha,
+        ):
+            continue
+        if len(dispositions) >= 100:
+            raise ReadinessError("too many COMMENTED review dispositions")
+        _sha(head_sha, "disposition current head")
+        _sha(base_sha, "disposition current base")
+        # REST update times have one-second precision and do not identify an
+        # editor. Require GitHub's explicit unedited provenance, even for edits
+        # in the same second, and cross-check the independently fetched body.
+        provenance = _mapping(
+            client.graphql(provenance_query, {"id": normalized["node_id"]}).get("node"),
+            "disposition comment provenance",
+        )
+        provenance_author = _mapping(provenance.get("author"), "disposition comment author")
+        if (
+            provenance.get("__typename") != "IssueComment"
+            or provenance.get("id") != normalized["node_id"]
+            or provenance.get("databaseId") != normalized["id"]
+            or "lastEditedAt" not in provenance
+            or provenance["lastEditedAt"] is not None
+            or provenance.get("body") != comment["body"]
+            or provenance.get("createdAt") != normalized["created_at"]
+            or provenance.get("updatedAt") != normalized["updated_at"]
+            or provenance_author.get("__typename") != "User"
+            or provenance_author.get("databaseId") != normalized["author_id"]
+            or provenance_author.get("login") != normalized["author"]
+        ):
+            raise ReadinessError(
+                "disposition comment lacks authenticated unedited provenance"
+            )
+        normalized["last_edited_at"] = None
+        # Activating this policy advances main. The independently reviewed base
+        # remains valid only as a verified ancestor of both source and target.
+        ancestry = {"current_base_sha": base_sha}
+        for name, revision in (("head", head_sha), ("base", base_sha)):
+            comparison = _mapping(
+                client.get_json(
+                    f"/repos/{repository}/compare/{payload['base_sha']}...{revision}"
+                ),
+                "disposition source comparison",
+            )
+            merge_base = _mapping(
+                comparison.get("merge_base_commit"), "disposition merge base"
+            )
+            if (
+                comparison.get("status") not in {"ahead", "identical"}
+                or merge_base.get("sha") != payload["base_sha"]
+            ):
+                raise ReadinessError("disposition reviewed base is not a source ancestor")
+            ancestry[f"{name}_merge_base_sha"] = payload["base_sha"]
+        author, author_id = _github_user(comment.get("user"))
+        if author_id not in authorities:
+            permission = _mapping(
+                client.get_json(
+                    f"/repos/{repository}/collaborators/{urllib.parse.quote(author, safe='')}/permission"
+                ),
+                "disposition repository permission",
+            )
+            permission_author, permission_id = _github_user(permission.get("user"))
+            if permission_author != author or permission_id != author_id:
+                raise ReadinessError(
+                    "disposition permission belongs to another GitHub user"
+                )
+            authorities[author_id] = {
+                "repository": repository,
+                "author": author,
+                "author_id": author_id,
+                "permission": permission.get("permission"),
+            }
+        bound_reviews = []
+        for ref in [payload["pass_review"], *payload["resolved_reviews"]]:
+            if ref["id"] not in reviews:
+                raise ReadinessError("disposition references a missing historical review")
+            raw, review = reviews[ref["id"]]
+            _, review_author_id = _github_user(raw.get("user"))
+            bound = {
+                **review,
+                "author_id": review_author_id,
+                "body_sha256": _body_digest(raw.get("body") or ""),
+            }
+            if ref is payload["pass_review"]:
+                matches = SOURCE_PASS.findall(raw.get("body") or "")
+                if len(matches) != 1:
+                    raise ReadinessError(
+                        "disposition requires one explicit source PASS identity"
+                    )
+                bound.update(source_head_sha=matches[0][0], source_base_sha=matches[0][1])
+            bound_reviews.append(bound)
+        dispositions.append(
+            {
+                "comment_id": normalized["id"],
+                "authority": authorities[author_id],
+                "payload": payload,
+                "reviews": bound_reviews,
+                "ancestry": ancestry,
+            }
+        )
+    return sorted(dispositions, key=lambda value: value["comment_id"])
+
+
 def _review_evidence(
-    client: GitHubClient, repository: str, pr: int
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    *,
+    head_sha: str | None = None,
+    base_sha: str | None = None,
 ) -> dict[str, Any]:
     latest: dict[str, dict[str, Any]] = {}
     latest_actionable: dict[str, dict[str, Any]] = {}
     reviews_by_author: dict[str, list[dict[str, Any]]] = {}
     review_ids: set[int] = set()
+    bound_reviews: dict[int, tuple[Mapping[str, Any], dict[str, Any]]] = {}
     for item in client.pages(f"/repos/{repository}/pulls/{pr}/reviews"):
         review = _mapping(item, "pull-request review")
         user = review.get("user")
         login = user.get("login") if isinstance(user, Mapping) else None
         review_id = review.get("id")
-        if not isinstance(login, str) or isinstance(review_id, bool) or not isinstance(review_id, int):
+        if (
+            not isinstance(login, str)
+            or isinstance(review_id, bool)
+            or not isinstance(review_id, int)
+        ):
             raise ReadinessError("pull-request review metadata is malformed")
         state = review.get("state")
         if state not in REVIEW_STATES:
@@ -1118,6 +1512,7 @@ def _review_evidence(
         if normalized["id"] in review_ids:
             raise ReadinessError("pull-request reviews contain duplicate identities")
         review_ids.add(normalized["id"])
+        bound_reviews[normalized["id"]] = (review, normalized)
         key = login.casefold()
         reviews_by_author.setdefault(key, []).append(normalized)
         if key not in latest or review_id > latest[key]["id"]:
@@ -1127,16 +1522,19 @@ def _review_evidence(
         ):
             latest_actionable[key] = normalized
 
-    unresolved_serious: dict[str, dict[str, Any]] = {}
+    unresolved_serious: list[dict[str, Any]] = []
     for key, author_reviews in reviews_by_author.items():
+        outstanding: list[dict[str, Any]] = []
         for review in sorted(author_reviews, key=lambda value: value["id"]):
             if review["state"] in {"APPROVED", "DISMISSED"}:
-                unresolved_serious.pop(key, None)
+                outstanding.clear()
             elif review["serious"]:
-                unresolved_serious[key] = review
+                outstanding.append(review)
+        unresolved_serious.extend(outstanding)
 
     normalized_issue_comments: list[dict[str, Any]] = []
     issue_comment_ids: set[int] = set()
+    disposition_candidates: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
     for item in client.pages(f"/repos/{repository}/issues/{pr}/comments"):
         comment = _mapping(item, "pull-request issue comment")
         user = comment.get("user")
@@ -1172,14 +1570,26 @@ def _review_evidence(
         normalized_issue_comments.append(
             {
                 "id": _positive_int(comment_id, "pull-request issue comment id"),
-                "author": _metadata_string(
-                    login, "pull-request issue comment author", 100
-                ),
+                "author": _metadata_string(login, "pull-request issue comment author", 100),
                 "created_at": created_at,
                 "updated_at": updated_at,
                 "serious": bool(SERIOUS_MARKER.search(body)),
             }
         )
+        if body.startswith(COMMENTED_DISPOSITION_MARKER):
+            if not body.startswith(f"{COMMENTED_DISPOSITION_MARKER}\n"):
+                raise ReadinessError("COMMENTED disposition marker is malformed")
+            _, author_id = _github_user(user)
+            normalized_issue_comments[-1].update(
+                author_id=author_id,
+                body_sha256=_body_digest(body),
+                node_id=_metadata_string(comment.get("node_id"), "disposition node id"),
+            )
+            disposition_candidates.append((comment, normalized_issue_comments[-1]))
+
+    dispositions = _commented_dispositions(
+        client, repository, pr, head_sha, base_sha, disposition_candidates, bound_reviews
+    )
 
     owner, name = repository.split("/", 1)
     cursor = None
@@ -1237,9 +1647,7 @@ def _review_evidence(
             normalized_comments: list[dict[str, Any]] = []
             for raw_comment in comment_nodes:
                 comment = _mapping(raw_comment, "review-thread comment")
-                comment_id = _metadata_string(
-                    comment.get("id"), "review-thread comment id"
-                )
+                comment_id = _metadata_string(comment.get("id"), "review-thread comment id")
                 updated_at = _metadata_string(
                     comment.get("updatedAt"), "review-thread comment update time", 64
                 )
@@ -1279,7 +1687,7 @@ def _review_evidence(
                     ),
                 ),
                 "unresolved_serious_reviews": sorted(
-                    unresolved_serious.values(),
+                    unresolved_serious,
                     key=lambda value: (
                         value["author"].casefold(),
                         value["author"],
@@ -1291,6 +1699,8 @@ def _review_evidence(
                     normalized_issue_comments, key=lambda value: value["id"]
                 ),
             }
+            if dispositions:
+                snapshot["commented_dispositions"] = dispositions
             return {"digest": _review_digest(snapshot), **snapshot}
         cursor = page_info.get("endCursor")
         if not isinstance(cursor, str) or not cursor:
@@ -1393,6 +1803,7 @@ def collect(
         head_repository = initial["head"]["repo"]["full_name"]
         base_ref = initial["base"]["ref"]
         base_repository = initial["base"]["repo"]["full_name"]
+        base_sha = initial["base"].get("sha")
     except (KeyError, TypeError) as exc:
         raise ReadinessError("pull-request branch metadata is malformed") from exc
     if initial.get("number") != pr:
@@ -1633,7 +2044,9 @@ def collect(
             "archive_sha256": evidence_sha256,
         }
 
-    review_evidence = _review_evidence(client, repository, pr)
+    review_evidence = _review_evidence(
+        client, repository, pr, head_sha=head, base_sha=base_sha
+    )
     final = _mapping(client.get_json(pr_path), "final pull request")
     try:
         observed_head = final["head"]["sha"]
@@ -1656,6 +2069,8 @@ def collect(
         raise ReadinessError("pull-request head repository changed during validation")
     if final_base_ref != base_ref or final_base_repository != base_repository:
         raise ReadinessError("pull-request base changed during readiness validation")
+    if review_evidence.get("commented_dispositions") and final["base"].get("sha") != base_sha:
+        raise ReadinessError("disposition reviewed base changed during readiness validation")
     final_labels = _labels(final, "final pull-request")
     if merged:
         if "ready-for-work" not in final_labels or "needs-codex" in final_labels:
@@ -2395,8 +2810,12 @@ def verify_published(
     ):
         raise ReadinessError("feature validation check provenance does not match")
 
-    current_reviews = _review_evidence(client, repository, pr)
-    current_reviews = _validate_review_evidence(current_reviews)
+    current_reviews = _review_evidence(
+        client, repository, pr, head_sha=feature_head, base_sha=parent_shas[0]
+    )
+    current_reviews = _validate_review_evidence(
+        current_reviews, repository=repository, pr=pr, head_sha=feature_head
+    )
     if current_reviews != record["review_evidence"]:
         raise ReadinessError("current review evidence differs from the readiness record")
     _verify_retained_preview(client, repository, pr, feature_head, record)

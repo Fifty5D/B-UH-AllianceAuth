@@ -52,6 +52,11 @@ resolution, and update times; never comment bodies). A conversation comment with
 a serious marker remains blocking until its author edits away the finding or
 deletes the obsolete comment and readiness is requested again. The reserved
 GitHub-Actions-owned readiness-pointer comment is excluded from that snapshot.
+Serious COMMENTED reviews also support an
+[explicit, authenticated whole-review disposition](commented-review-dispositions.md)
+bound to exact source PASS evidence, without rewriting the historical review.
+Only its named reviews receive resolution; native required reviews and every
+other readiness and release gate remain effective.
 One bot-owned PR comment is the sole authoritative pointer
 to the current record and artifact digest, explicitly superseding older artifacts.
 Only after that pointer exists does the workflow remove `needs-codex` and re-add

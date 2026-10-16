@@ -470,6 +470,7 @@ class FakeGitHub:
         self.run_conclusion = "success"
         self.head_repository = REPOSITORY
         self.base_ref = "main"
+        self.base_sha = BASE_SHA
         self.labels = ["codex", "needs-codex"]
         self.ignored_preview_run = False
         self.changed_files = [".github/workflows/ui-preview.yml"]
@@ -498,6 +499,7 @@ class FakeGitHub:
             },
             "base": {
                 "ref": self.base_ref,
+                "sha": self.base_sha,
                 "repo": {"full_name": REPOSITORY},
             },
             "labels": [{"name": name} for name in self.labels],
@@ -704,6 +706,7 @@ class PublishedGitHub(FakeGitHub):
             },
             "base": {
                 "ref": self.base_ref,
+                "sha": self.base_sha,
                 "repo": {"full_name": REPOSITORY},
             },
             "labels": [{"name": name} for name in self.labels],
