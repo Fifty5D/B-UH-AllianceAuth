@@ -52,6 +52,7 @@ ACTIONABLE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 REQUIRED_CHECK = "Source test suite / Required source checks"
 PROTECTED_BASE_REF = "main"
 SOURCE_WORKFLOW = ".github/workflows/source-ci.yml"
+SOURCE_TEST_WORKFLOW = ".github/workflows/reusable-source-tests.yml"
 PREVIEW_WORKFLOW = ".github/workflows/ui-preview.yml"
 PREVIEW_WORKFLOW_FILE = "ui-preview.yml"
 PREVIEW_ARTIFACT_LIMIT = 256 * 1024 * 1024
@@ -66,6 +67,20 @@ COMMENTED_DISPOSITION_MARKER = "<!-- buh-commented-review-disposition:v1 -->"
 SOURCE_PASS = re.compile(
     r"\bsource review: \*\*PASS\*\* at `([0-9a-f]{40})`, base `([0-9a-f]{40})`"
 )
+QUALIFICATION_WORKFLOWS = (SOURCE_WORKFLOW, SOURCE_TEST_WORKFLOW, PREVIEW_WORKFLOW)
+QUALIFICATION_LOG_LIMIT = 8 * 1024 * 1024
+SOURCE_JOB_NAMES = (
+    "Test configuration",
+    "Immutable release ledger",
+    "Immutable Moon Tax v0.3.3 recovery artifact",
+    "Fast source checks",
+    "Reproduce the effective production Auth build",
+    "MariaDB, Redis, Celery, and fake ESI",
+    "Legacy schema upgrade and backup restore",
+    "Browser tables, actions, and permissions",
+    "Required source checks",
+)
+PREVIEW_JOB_NAME = "Fake-data desktop and mobile preview"
 
 
 class ReadinessError(ValueError):
@@ -716,8 +731,9 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
             "ready",
         },
         "readiness record",
+        optional={"source_qualification"},
     )
-    if value["schema_version"] != 2:
+    if type(value["schema_version"]) is not int or value["schema_version"] not in {2, 3}:
         raise ReadinessError("unsupported readiness record schema")
     repository = value["repository"]
     if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
@@ -803,8 +819,8 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if value["ready"] is not True:
         raise ReadinessError("readiness record is not qualified")
-    return {
-        "schema_version": 2,
+    result = {
+        "schema_version": value["schema_version"],
         "repository": repository,
         "pr": pr,
         "base_ref": PROTECTED_BASE_REF,
@@ -816,6 +832,7 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
         "review_evidence": reviews,
         "ready": True,
     }
+    return _qualified_record(result, value)
 
 
 def validate(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -838,8 +855,8 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
         "preview",
         "review_evidence",
     }
-    _exact_keys(value, required, "readiness evidence")
-    if value["schema_version"] != 2:
+    _exact_keys(value, required, "readiness evidence", optional={"source_qualification"})
+    if type(value["schema_version"]) is not int or value["schema_version"] not in {2, 3}:
         raise ReadinessError("unsupported readiness evidence schema")
     repository = value["repository"]
     if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
@@ -1010,8 +1027,8 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
         value["review_evidence"], repository=repository, pr=pr, head_sha=head
     )
 
-    return {
-        "schema_version": 2,
+    result = {
+        "schema_version": value["schema_version"],
         "repository": repository,
         "pr": pr,
         "base_ref": base_ref,
@@ -1028,6 +1045,186 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
         "review_evidence": review_evidence,
         "ready": True,
     }
+    return _qualified_record(result, value)
+
+
+def _trusted_workflow_blobs() -> dict[str, str]:
+    """The supported checkout contract comes from this trusted checkout only."""
+    root = Path(__file__).resolve().parents[1]
+    result = {}
+    for path in QUALIFICATION_WORKFLOWS:
+        try:
+            content = (root / path).read_bytes().replace(b"\r\n", b"\n")
+        except OSError as exc:
+            raise ReadinessError("trusted source-checkout contract is unavailable") from exc
+        result[path] = hashlib.sha1(
+            b"blob " + str(len(content)).encode("ascii") + b"\0" + content
+        ).hexdigest()
+    return result
+
+
+def _qualification_jobs(
+    raw: Any,
+    *,
+    head: str,
+    run_id: int,
+    run_attempt: int,
+    preview: bool = False,
+    check_id: int | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise ReadinessError("tested-source job evidence is missing")
+    names = (
+        {PREVIEW_JOB_NAME}
+        if preview
+        else {f"Source test suite / {name}" for name in SOURCE_JOB_NAMES}
+    )
+    jobs = []
+    ids = set()
+    for item in raw:
+        job = _mapping(item, "tested-source job")
+        _exact_keys(
+            job,
+            {
+                "id",
+                "name",
+                "run_id",
+                "run_attempt",
+                "conclusion",
+                "checked_out_sha",
+                "log_sha256",
+            },
+            "tested-source job",
+        )
+        identity = _positive_int(job["id"], "tested-source job id")
+        _metadata_string(job["name"], "tested-source job name")
+        if (
+            _positive_int(job["run_id"], "tested-source run id") != run_id
+            or _positive_int(job["run_attempt"], "tested-source run attempt") != run_attempt
+        ):
+            raise ReadinessError("tested-source jobs belong to another run or attempt")
+        if identity in ids or job["name"] not in names:
+            raise ReadinessError("tested-source jobs contain unexpected identities")
+        ids.add(identity)
+        names.remove(job["name"])
+        aggregate = not preview and job["name"] == REQUIRED_CHECK
+        if aggregate and (identity != check_id or job["conclusion"] != "success"):
+            raise ReadinessError(
+                "tested-source aggregate does not match the required check"
+            )
+        if aggregate or job["conclusion"] == "skipped":
+            if job["checked_out_sha"] is not None or job["log_sha256"] is not None:
+                raise ReadinessError("untested jobs cannot claim a checked-out source")
+        elif job["conclusion"] == "success":
+            if job["checked_out_sha"] != head:
+                raise ReadinessError("qualifying job tested another source")
+            _sha256(job["log_sha256"])
+        else:
+            raise ReadinessError("tested-source job is failed or pending")
+        jobs.append(dict(job))
+    if names:
+        raise ReadinessError("tested-source job evidence is incomplete")
+    skipped = {job["name"] for job in jobs if job["conclusion"] == "skipped"}
+    runtime = {f"Source test suite / {name}" for name in SOURCE_JOB_NAMES[3:-1]}
+    # The unchanged supported contract skips all five runtime lanes together for
+    # a proven docs-only diff. Required/configuration/release jobs still execute.
+    if skipped and (preview or skipped != runtime):
+        raise ReadinessError("tested-source jobs do not match the supported CI profile")
+    ordered = sorted(jobs, key=lambda job: job["name"])
+    if jobs != ordered:
+        raise ReadinessError("tested-source jobs are not canonical")
+    return ordered
+
+
+def _qualified_record(record: dict[str, Any], source: Mapping[str, Any]) -> dict[str, Any]:
+    if record["schema_version"] == 2:
+        # Historical records/callers remain readable, but this new disposition
+        # route has never been published by an active schema-v2 policy.
+        if (
+            "source_qualification" in source
+            or "commented_dispositions" in record["review_evidence"]
+        ):
+            raise ReadinessError("current-combination qualification requires schema v3")
+        return record
+    qualification = _mapping(
+        source.get("source_qualification"), "current-source qualification"
+    )
+    _exact_keys(
+        qualification,
+        {
+            "schema_version",
+            "repository",
+            "pr",
+            "base_sha",
+            "head_sha",
+            "merge_tree_sha",
+            "tested_source_sha",
+            "tested_tree_sha",
+            "workflow_commit_sha",
+            "workflow_blobs",
+            "source_jobs",
+            "preview_jobs",
+            "review_digest",
+        },
+        "current-source qualification",
+    )
+    if (
+        type(qualification["schema_version"]) is not int
+        or qualification["schema_version"] != 1
+    ):
+        raise ReadinessError("unsupported current-source qualification schema")
+    for key in (
+        "base_sha",
+        "head_sha",
+        "merge_tree_sha",
+        "tested_source_sha",
+        "tested_tree_sha",
+        "workflow_commit_sha",
+    ):
+        _sha(qualification[key], f"current-source {key}")
+    if (
+        qualification["repository"] != record["repository"]
+        or type(qualification["pr"]) is not int
+        or qualification["pr"] != record["pr"]
+        or qualification["head_sha"] != record["head_sha"]
+        or qualification["tested_source_sha"] != record["head_sha"]
+        or qualification["merge_tree_sha"] != qualification["tested_tree_sha"]
+    ):
+        raise ReadinessError(
+            "combined source is not the tested head tree; incorporate the target base "
+            "and obtain applicable source review, CI and preview"
+        )
+    if qualification["workflow_blobs"] != _trusted_workflow_blobs():
+        raise ReadinessError(
+            "qualifying checkout workflow differs from the trusted contract"
+        )
+    if qualification["review_digest"] != record["review_evidence"]["digest"]:
+        raise ReadinessError(
+            "current-source qualification is bound to another review snapshot"
+        )
+    for disposition in record["review_evidence"].get("commented_dispositions", []):
+        if disposition["ancestry"]["current_base_sha"] != qualification["base_sha"]:
+            raise ReadinessError("disposition and qualification target different bases")
+    source_jobs = _qualification_jobs(
+        qualification["source_jobs"],
+        head=record["head_sha"],
+        run_id=record["required_check"]["workflow_run_id"],
+        run_attempt=record["required_check"]["workflow_run_attempt"],
+        check_id=record["required_check"]["check_run_id"],
+    )
+    if record["preview_required"]:
+        preview_jobs = _qualification_jobs(
+            qualification["preview_jobs"],
+            head=record["head_sha"],
+            preview=True,
+            run_id=record["preview"]["run_id"],
+            run_attempt=record["preview"]["run_attempt"],
+        )
+        if {job["id"] for job in source_jobs} & {job["id"] for job in preview_jobs}:
+            raise ReadinessError("source and preview qualification reuse a job identity")
+    elif qualification["preview_jobs"] is not None:
+        raise ReadinessError("current-source qualification has unexpected preview jobs")
+    return {**record, "source_qualification": dict(qualification)}
 
 
 class GitHubClient:
@@ -1784,6 +1981,270 @@ def _one_exact_pr_association(
     return matches == 1
 
 
+def _source_commit(client: GitHubClient, repository: str, sha: str) -> Mapping[str, Any]:
+    _sha(sha, "qualified source commit")
+    try:
+        raw = client.get_json(f"/repos/{repository}/commits/{sha}")
+    except ReadinessError as exc:
+        raise ReadinessError(
+            f"qualified source Git metadata is unavailable for {sha}"
+        ) from exc
+    commit = _mapping(raw, "qualified source commit")
+    tree = _mapping(commit.get("commit"), "qualified Git commit").get("tree")
+    tree = _mapping(tree, "qualified source tree")
+    if commit.get("sha") != sha:
+        raise ReadinessError("qualified source commit identity does not match")
+    _sha(tree.get("sha"), "qualified source tree")
+    return commit
+
+
+def _source_tree(commit: Mapping[str, Any]) -> str:
+    return commit["commit"]["tree"]["sha"]
+
+
+def _workflow_tree_blobs(
+    client: GitHubClient, repository: str, tree_sha: str
+) -> dict[str, str]:
+    tree = _mapping(
+        client.get_json(f"/repos/{repository}/git/trees/{tree_sha}", {"recursive": 1}),
+        "qualified workflow tree",
+    )
+    nodes = tree.get("tree")
+    if (
+        tree.get("sha") != tree_sha
+        or tree.get("truncated") is not False
+        or not isinstance(nodes, list)
+    ):
+        raise ReadinessError("qualified workflow tree is incomplete")
+    result = {}
+    seen = set()
+    for node in nodes:
+        entry = _mapping(node, "qualified workflow entry")
+        path = _metadata_string(entry.get("path"), "qualified workflow path")
+        if path in seen:
+            raise ReadinessError("qualified workflow tree contains duplicate paths")
+        seen.add(path)
+        if path in QUALIFICATION_WORKFLOWS:
+            if entry.get("type") != "blob" or entry.get("mode") != "100644":
+                raise ReadinessError("qualifying workflow is not a regular file")
+            result[path] = _sha(entry.get("sha"), "qualifying workflow blob")
+    if result != _trusted_workflow_blobs():
+        raise ReadinessError(
+            "qualifying checkout workflow differs from the trusted contract"
+        )
+    return result
+
+
+def _tested_jobs(
+    client: GitHubClient,
+    repository: str,
+    head: str,
+    run_id: int,
+    run_attempt: int,
+    *,
+    preview: bool = False,
+    check_id: int | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        raw_payload = client.get_json(
+            f"/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs",
+            {"per_page": 100},
+        )
+    except ReadinessError as exc:
+        raise ReadinessError("tested-source job listing is unavailable") from exc
+    payload = _mapping(raw_payload, "tested-source jobs")
+    jobs = payload.get("jobs")
+    if (
+        not isinstance(jobs, list)
+        or type(payload.get("total_count")) is not int
+        or payload["total_count"] != len(jobs)
+        or len(jobs) > 9
+    ):
+        raise ReadinessError("tested-source job listing is incomplete")
+    proofs = []
+    api_url = client.api_url
+    for raw in jobs:
+        job = _mapping(raw, "tested-source job")
+        identity = _positive_int(job.get("id"), "tested-source job id")
+        name = _metadata_string(job.get("name"), "tested-source job name")
+        if (
+            type(job.get("run_id")) is not int
+            or type(job.get("run_attempt")) is not int
+            or job.get("run_id") != run_id
+            or job.get("run_attempt") != run_attempt
+            or job.get("head_sha") != head
+            or job.get("status") != "completed"
+        ):
+            raise ReadinessError("tested-source job provenance is stale or pending")
+        proof = {
+            "id": identity,
+            "name": name,
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "conclusion": job.get("conclusion"),
+            "checked_out_sha": None,
+            "log_sha256": None,
+        }
+        aggregate = not preview and name == REQUIRED_CHECK
+        if job.get("conclusion") == "success" and not aggregate:
+            steps = job.get("steps")
+            if not isinstance(steps, list) or not any(
+                isinstance(step, Mapping)
+                and isinstance(step.get("name"), str)
+                and step["name"].startswith("Check out")
+                and step.get("status") == "completed"
+                and step.get("conclusion") == "success"
+                for step in steps
+            ):
+                raise ReadinessError("qualifying job lacks a successful checkout")
+            try:
+                log = client.download(
+                    f"{api_url}/repos/{repository}/actions/jobs/{identity}/logs",
+                    QUALIFICATION_LOG_LIMIT,
+                )
+            except ReadinessError as exc:
+                raise ReadinessError(
+                    f"qualifying checkout log is unavailable for job {identity}"
+                ) from exc
+            if not isinstance(log, bytes) or not 0 < len(log) <= QUALIFICATION_LOG_LIMIT:
+                raise ReadinessError(
+                    "qualifying checkout log is unavailable or exceeds its bound"
+                )
+            try:
+                text = log.decode("utf-8-sig")
+            except UnicodeError as exc:
+                raise ReadinessError("qualifying checkout log is malformed") from exc
+            checkouts = re.findall(
+                r"\[command\][^\n]*?git checkout --progress --force ([0-9a-f]{40})(?:\s|$)",
+                text,
+            )
+            observed = re.findall(
+                r"\[command\][^\n]*?git log -1 --format=%H[^\n]*\n[^\n]*?\b([0-9a-f]{40})\s*(?:\n|$)",
+                text,
+            )
+            if (
+                not checkouts
+                or set(checkouts) != {head}
+                or not observed
+                or set(observed) != {head}
+            ):
+                raise ReadinessError("qualifying job did not check out the tested source")
+            proof.update(
+                checked_out_sha=head, log_sha256=f"sha256:{hashlib.sha256(log).hexdigest()}"
+            )
+        proofs.append(proof)
+    proofs.sort(key=lambda job: job["name"])
+    return _qualification_jobs(
+        proofs,
+        head=head,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        preview=preview,
+        check_id=check_id,
+    )
+
+
+def _current_source_qualification(
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    head: str,
+    base: str,
+    merge_sha: str,
+    check: Mapping[str, Any],
+    preview: Mapping[str, Any] | None,
+    reviews: Mapping[str, Any],
+    source_run: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse head evidence only after exact combined-tree and checkout proof.
+
+    There is no filename/ancestry-based exception. A different combined tree
+    needs an updated source head with applicable tests, preview and review.
+    """
+    _sha(base, "current qualification base")
+    merged = _source_commit(client, repository, merge_sha)
+    parents = merged.get("parents")
+    if not isinstance(parents, list) or [
+        item.get("sha") if isinstance(item, Mapping) else None for item in parents
+    ] != [base, head]:
+        raise ReadinessError("current combined source has different head/base parents")
+    tested = _source_commit(client, repository, head)
+    if _source_tree(merged) != _source_tree(tested):
+        raise ReadinessError(
+            "combined source is not the tested head tree; incorporate the target base "
+            "and obtain applicable source review, CI and preview"
+        )
+    blobs = _workflow_tree_blobs(client, repository, _source_tree(tested))
+    references = source_run.get("referenced_workflows")
+    if not isinstance(references, list) or len(references) != 1:
+        raise ReadinessError("source CI lacks its immutable reusable-workflow identity")
+    reference = _mapping(references[0], "source reusable workflow")
+    workflow_commit = _sha(reference.get("sha"), "source workflow commit")
+    if (
+        reference.get("path") != f"{repository}/{SOURCE_TEST_WORKFLOW}@{workflow_commit}"
+        or reference.get("ref") != f"refs/pull/{pr}/merge"
+    ):
+        raise ReadinessError("source CI reusable-workflow provenance differs")
+    # A local reusable workflow uses the caller's same immutable commit. Verify
+    # that executing contract, not merely files at the displayed run head.
+    workflow_tree = _source_tree(_source_commit(client, repository, workflow_commit))
+    _workflow_tree_blobs(client, repository, workflow_tree)
+    run_id, attempt = check["workflow_run_id"], check["workflow_run_attempt"]
+    _newest_qualifying_workflow_run(
+        client,
+        repository,
+        pr,
+        head,
+        expected_run_id=run_id,
+        expected_run_attempt=attempt,
+        workflow=SOURCE_WORKFLOW,
+        event="pull_request",
+        context="combined-source validation",
+    )
+    source_jobs = _tested_jobs(
+        client, repository, head, run_id, attempt, check_id=check["check_run_id"]
+    )
+    preview_jobs = None
+    if preview is not None:
+        preview_jobs = _tested_jobs(
+            client,
+            repository,
+            head,
+            preview["run_id"],
+            preview["run_attempt"],
+            preview=True,
+        )
+    final_run = _verified_workflow_run(
+        client,
+        repository,
+        pr,
+        head,
+        run_id=run_id,
+        run_attempt=attempt,
+        workflow=SOURCE_WORKFLOW,
+        event="pull_request",
+        context="final tested-source run",
+        allow_postmerge_empty_association=True,
+    )
+    if final_run.get("head_sha") != head:
+        raise ReadinessError("tested-source run changed head during qualification")
+    return {
+        "schema_version": 1,
+        "repository": repository,
+        "pr": pr,
+        "base_sha": base,
+        "head_sha": head,
+        "merge_tree_sha": _source_tree(merged),
+        "tested_source_sha": head,
+        "tested_tree_sha": _source_tree(tested),
+        "workflow_commit_sha": workflow_commit,
+        "workflow_blobs": blobs,
+        "source_jobs": source_jobs,
+        "preview_jobs": preview_jobs,
+        "review_digest": reviews["digest"],
+    }
+
+
 def collect(
     client: GitHubClient,
     repository: str,
@@ -1829,6 +2290,13 @@ def collect(
         raise ReadinessError("pull-request head is not in the protected repository")
     if base_repository != repository or base_ref != PROTECTED_BASE_REF:
         raise ReadinessError("pull request does not target the protected main branch")
+    merge_sha = _sha(initial.get("merge_commit_sha"), "current combined-source commit")
+    if merged:
+        parents = _source_commit(client, repository, merge_sha).get("parents")
+        if not isinstance(parents, list) or len(parents) != 2:
+            raise ReadinessError("combined-source commit is not a two-parent merge")
+        base_sha = _mapping(parents[0], "combined-source first parent").get("sha")
+    _sha(base_sha, "current target-base commit")
     labels = _labels(initial, "pull-request")
     if "codex" not in labels:
         raise ReadinessError("pull request is not marked as a Codex change")
@@ -1872,6 +2340,7 @@ def collect(
         "app_slug": app.get("slug") if isinstance(app, Mapping) else None,
         "run_id": int(run_match.group(1)) if run_match else None,
     }
+    check_workflow_run: Mapping[str, Any] = {}
     if run_match:
         check_workflow_run = _mapping(
             client.get_json(
@@ -2055,6 +2524,13 @@ def collect(
     review_evidence = _review_evidence(
         client, repository, pr, head_sha=head, base_sha=base_sha
     )
+    _validate_review_evidence(review_evidence, repository=repository, pr=pr, head_sha=head)
+    source_qualification = _current_source_qualification(
+        client, repository, pr, head, base_sha, merge_sha,
+        {"check_run_id": check["id"], "workflow_run_id": check["run_id"],
+         "workflow_run_attempt": check["run_attempt"]},
+        preview, review_evidence, check_workflow_run,
+    )
     final = _mapping(client.get_json(pr_path), "final pull request")
     try:
         observed_head = final["head"]["sha"]
@@ -2077,8 +2553,10 @@ def collect(
         raise ReadinessError("pull-request head repository changed during validation")
     if final_base_ref != base_ref or final_base_repository != base_repository:
         raise ReadinessError("pull-request base changed during readiness validation")
-    if review_evidence.get("commented_dispositions") and final["base"].get("sha") != base_sha:
-        raise ReadinessError("disposition reviewed base changed during readiness validation")
+    if not merged and final["base"].get("sha") != base_sha:
+        raise ReadinessError("target base changed during readiness validation")
+    if final.get("merge_commit_sha") != merge_sha:
+        raise ReadinessError("combined-source commit changed during readiness validation")
     final_labels = _labels(final, "final pull-request")
     if merged:
         if "ready-for-work" not in final_labels or "needs-codex" in final_labels:
@@ -2091,7 +2569,7 @@ def collect(
         ] + ["needs-codex"]
     return validate(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "repository": repository,
             "pr": pr,
             "base_ref": base_ref,
@@ -2103,6 +2581,7 @@ def collect(
             "checks": [check],
             "preview": preview,
             "review_evidence": review_evidence,
+            "source_qualification": source_qualification,
         }
     )
 
@@ -2827,6 +3306,13 @@ def verify_published(
     if current_reviews != record["review_evidence"]:
         raise ReadinessError("current review evidence differs from the readiness record")
     _verify_retained_preview(client, repository, pr, feature_head, record)
+    if record["schema_version"] == 3:
+        qualification = _current_source_qualification(
+            client, repository, pr, feature_head, parent_shas[0], merge_source_commit,
+            check, record["preview"], current_reviews, source_run,
+        )
+        if qualification != record["source_qualification"]:
+            raise ReadinessError("current source qualification differs from the published record")
 
     final_pr = _merged_feature_pr(
         client.get_json(pr_path),

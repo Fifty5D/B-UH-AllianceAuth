@@ -12,6 +12,10 @@ from ops.readiness import (
     READINESS_WORKFLOW,
     REQUIRED_CHECK,
     ReadinessError,
+    SOURCE_JOB_NAMES,
+    SOURCE_TEST_WORKFLOW,
+    PREVIEW_JOB_NAME,
+    _trusted_workflow_blobs,
     _manifest_from_zip,
     _verify_preview_zip,
     collect,
@@ -31,6 +35,45 @@ MERGE_SHA = "d" * 40
 BASE_SHA = "e" * 40
 READINESS_RUN_ID = 5678
 READINESS_RUN_ATTEMPT = 3
+WORKFLOW_SHA = "c" * 40
+
+
+def checkout_log(head=SHA):
+    return (
+        f"2026-10-16T01:00:00Z [command]/usr/bin/git checkout --progress --force {head}\n"
+        "2026-10-16T01:00:01Z [command]/usr/bin/git log -1 --format=%H\n"
+        f"2026-10-16T01:00:02Z {head}\n"
+    ).encode("utf-8")
+
+
+def qualified_jobs(run_id, attempt, head=SHA, preview=False):
+    names = (
+        [PREVIEW_JOB_NAME]
+        if preview
+        else [f"Source test suite / {name}" for name in SOURCE_JOB_NAMES]
+    )
+    return {
+        "total_count": len(names),
+        "jobs": [
+            {
+                "id": 55 if name == REQUIRED_CHECK else (2001 if preview else 1001) + index,
+                "name": name,
+                "run_id": run_id,
+                "run_attempt": attempt,
+                "head_sha": head,
+                "status": "completed",
+                "conclusion": "success",
+                "steps": [
+                    {
+                        "name": "Check out source",
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+            }
+            for index, name in enumerate(names)
+        ],
+    }
 
 
 def screenshot_inventory():
@@ -463,6 +506,7 @@ class ReadinessTests(unittest.TestCase):
 
 class FakeGitHub:
     def __init__(self):
+        self.api_url = "https://api.github.com"
         self.manifest_zip = manifest_zip()
         self.evidence_zip = evidence_zip()
         self.final_sha = SHA
@@ -471,6 +515,9 @@ class FakeGitHub:
         self.head_repository = REPOSITORY
         self.base_ref = "main"
         self.base_sha = BASE_SHA
+        self.merge_sha = MERGE_SHA
+        self.merge_tree_sha = "1" * 40
+        self.tested_tree_sha = "1" * 40
         self.labels = ["codex", "needs-codex"]
         self.ignored_preview_run = False
         self.changed_files = [".github/workflows/ui-preview.yml"]
@@ -493,6 +540,7 @@ class FakeGitHub:
         return {
             "number": PR,
             "state": "open",
+            "merge_commit_sha": self.merge_sha,
             "head": {
                 "sha": self.final_sha,
                 "repo": {"full_name": self.head_repository},
@@ -513,6 +561,20 @@ class FakeGitHub:
     def get_json(self, path, query=None):
         if path.endswith(f"/pulls/{PR}"):
             return self._pr()
+        if "/attempts/" in path and path.endswith("/jobs"):
+            run_id, attempt = int(path.split("/")[-4]), int(path.split("/")[-2])
+            return qualified_jobs(run_id, attempt, preview=run_id == RUN_ID)
+        if path.endswith(f"/commits/{SHA}") or path.endswith(f"/commits/{WORKFLOW_SHA}"):
+            identity = path.rsplit("/", 1)[1]
+            return {"sha": identity, "parents": [{"sha": BASE_SHA}],
+                    "commit": {"tree": {"sha": self.tested_tree_sha}}}
+        if path.endswith(f"/commits/{self.merge_sha}"):
+            return {"sha": self.merge_sha, "parents": [{"sha": self.base_sha}, {"sha": SHA}],
+                    "commit": {"tree": {"sha": self.merge_tree_sha}}}
+        if "/git/trees/" in path:
+            return {"sha": path.rsplit("/", 1)[1], "truncated": False,
+                    "tree": [{"path": name, "type": "blob", "mode": "100644", "sha": blob}
+                             for name, blob in _trusted_workflow_blobs().items()]}
         if path.endswith("/check-runs"):
             return {
                 "check_runs": [
@@ -539,6 +601,10 @@ class FakeGitHub:
                 "head_sha": SHA,
                 "head_repository": {"full_name": REPOSITORY},
                 "pull_requests": deepcopy(self.source_run_pull_requests),
+                "referenced_workflows": [{
+                    "path": f"{REPOSITORY}/{SOURCE_TEST_WORKFLOW}@{WORKFLOW_SHA}",
+                    "sha": WORKFLOW_SHA, "ref": f"refs/pull/{PR}/merge",
+                }],
             }
         if path.endswith("/actions/workflows/source-ci.yml/runs"):
             runs = [
@@ -640,6 +706,8 @@ class FakeGitHub:
 
     def download(self, url, maximum):
         self.assert_download_bound = maximum
+        if url.endswith("/logs"):
+            return checkout_log()
         return self.manifest_zip if url.endswith("manifest.zip") else self.evidence_zip
 
 
@@ -748,7 +816,8 @@ class PublishedGitHub(FakeGitHub):
         if "/git/trees/" in path:
             is_merged = path.endswith("1" * 40)
             present = self.workflow_after if is_merged else self.workflow_before
-            entries = []
+            entries = [{"path": name, "type": "blob", "mode": "100644", "sha": blob}
+                       for name, blob in _trusted_workflow_blobs().items()]
             if present:
                 entries.append(
                     {

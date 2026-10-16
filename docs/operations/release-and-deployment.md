@@ -57,6 +57,10 @@ Serious COMMENTED reviews also support an
 bound to exact source PASS evidence, without rewriting the historical review.
 Only its named reviews receive resolution; native required reviews and every
 other readiness and release gate remain effective.
+New schema-v3 readiness also binds the current head/base and combined Git tree
+to observed qualifying source/preview checkouts. Historical dispositions do not
+qualify a different tree; see the linked guide for exact-tree reuse and blocked
+qualification. Historical schema-v2 records without dispositions remain readable.
 One bot-owned PR comment is the sole authoritative pointer
 to the current record and artifact digest, explicitly superseding older artifacts.
 Only after that pointer exists does the workflow remove `needs-codex` and re-add

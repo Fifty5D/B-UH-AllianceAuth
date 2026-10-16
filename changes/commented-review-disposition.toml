@@ -1,3 +1,3 @@
 app = "platform"
 kind = "fix"
-summary = "Bind explicit COMMENTED review dispositions to authenticated authority, named findings and exact-source PASS evidence."
+summary = "Bind COMMENTED review dispositions to authenticated whole-review evidence and require the current combined Git tree to match verified source/preview checkouts."

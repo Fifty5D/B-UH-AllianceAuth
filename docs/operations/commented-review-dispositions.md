@@ -91,6 +91,62 @@ dismissals retain their existing behavior. This accounting is not a formal
 GitHub approval: required-review protection, source tests, previews, release
 lineage and production gates remain independently required.
 
+## Historical resolution and current qualification
+
+A disposition resolves named findings in its recorded source; it does not qualify
+that source against a different combined tree. New collections emit a schema-v3
+readiness record with `source_qualification`, binding the repository, PR, current
+head and target base, combined Git tree, tested source/tree, executing workflow
+commit/blobs, source and applicable preview job IDs/run attempts/checkout-log
+hashes, and review snapshot digest. The existing schema-v2 bot pointer still
+authenticates the entire record through its artifact digest.
+
+The bounded reuse rule is **exact Git-tree equality**. The collector reads
+GitHub's current test merge, verifies its two parents are the current base and
+head, and requires its tree to equal the tested head's tree. It never decides
+equivalence from ancestry, filenames, an "activation-only" description, timestamps
+or passing tests on a different tree. Main can activate policy while the source
+head stays unchanged only when this check establishes that the combined tree is
+already exactly that reviewed/tested source. For example, main can independently
+incorporate contents already present in the accepted head. Historical PASS and
+its original reviewed base remain unchanged.
+
+If activation adds contents absent from that head, reuse is **blocked**, even if
+the changes seem harmless or affect only policy/docs. In particular, PR91's old
+PASS is not automatically a review of the newly activated policy's combined tree.
+Incorporate the current target into source, obtain applicable source review,
+ordinary current-head CI and any required preview, then use a new authenticated
+disposition for that head. There is no PR-specific exception or system for proving
+arbitrary behavioral equivalence. Missing/conflicting test merges, unavailable
+Git metadata, unsupported workflow contracts or missing checkout logs also block.
+
+The workflow's displayed run head is not checkout proof. The collector verifies
+the immutable reusable-workflow execution commit reported by GitHub and the
+supported source/preview workflow Git blobs from its trusted checkout. It requires
+the complete successful CI job profile, successful checkout steps and bounded job
+logs containing the actual checkout and `git log -1 --format=%H` identity. Required
+CI and applicable preview jobs must have checked out the tested source. The
+supported docs-only profile may skip all five runtime lanes together; its
+configuration/release/required jobs still run. Changed or unavailable workflow
+contracts require fresh supported qualification, not inferred compatibility.
+
+Every new collection, including repeated collection at the same changed base,
+performs these checks. It rereads head/base/test-merge identity before returning.
+The unchanged publication workflow compares complete records before upload and
+before its final signal; the new fields participate in those comparisons. A label
+is still asynchronous metadata, not independent qualification. Later published
+verification rechecks the real merge's first parent/tree, actual CI/preview jobs
+and log hashes, workflow contract and live review evidence against the artifact.
+A different base at merge time cannot reuse the prior record. Later main movement
+does not rebind an already verified historical merge to a different target.
+
+Retained schema-v2 records without dispositions remain readable for existing
+historical release consumers. They cannot carry this new route or its qualification
+fields; all current collection emits v3. Removing qualification from v3 or
+downgrading a disposition-bearing record to v2 is rejected. Metadata-only static
+validation checks record bindings; live collector/published verification supplies
+the GitHub provenance. Retained records do not make missing live evidence fresh.
+
 ## Activation and later readiness
 
 1. Independently review the separate policy PR at its exact final head, with all
@@ -114,8 +170,9 @@ lineage and production gates remain independently required.
    exact supporting review/body hashes and still-current evidence; preserve its
    original reviewed base and all historical records.
 4. Let the disposition's normal comment event invalidate/evaluate readiness.
-   Once all findings have supported dispositions and exact-head source/preview
-   evidence is current and unexpired, request `ready-for-work` once. Verify the
+   Once all findings have supported dispositions and the current combination has
+   applicable current, unexpired source/review/preview qualification, request
+   `ready-for-work` once. Verify the
    trusted workflow publishes its new digest-bound artifact and pointer, clears
    `needs-codex`, and emits readiness last. Do not request readiness repeatedly
    while policy activation or finding disposition is outstanding.
