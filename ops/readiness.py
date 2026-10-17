@@ -1270,7 +1270,7 @@ class GitHubClient:
         self.headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2026-03-10",
+            "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "buh-readiness-v1",
         }
 
@@ -1331,7 +1331,7 @@ class GitHubClient:
         return payload.get("data")
 
     def download(self, url: str, maximum: int) -> bytes:
-        """Download one tiny ZIP without forwarding the token across a redirect."""
+        """Read a bounded artifact or step log without forwarding its token."""
 
         parsed = urllib.parse.urlparse(url)
         api = urllib.parse.urlparse(self.api_url)
@@ -1343,8 +1343,16 @@ class GitHubClient:
                 return None
 
         opener = urllib.request.build_opener(NoRedirect)
+        headers = dict(self.headers)
+        # Keep existing metadata/artifact response contracts. The newer API
+        # version is required only at the independently attributed step endpoint.
+        step_log = bool(re.search(
+            r"/actions/jobs/[1-9][0-9]*/steps/(?:0|[1-9][0-9]*)/logs$", parsed.path
+        ))
+        if step_log:
+            headers["X-GitHub-Api-Version"] = "2026-03-10"
         try:
-            opener.open(urllib.request.Request(url, headers=self.headers), timeout=30)
+            opener.open(urllib.request.Request(url, headers=headers), timeout=30)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise ReadinessError("GitHub artifact download failed") from exc
@@ -1357,7 +1365,8 @@ class GitHubClient:
         return self._read(
             urllib.request.Request(
                 location,
-                headers={"Accept": "application/zip", "User-Agent": "buh-readiness-v1"},
+                headers={"Accept": "text/plain" if step_log else "application/zip",
+                         "User-Agent": "buh-readiness-v1"},
             ),
             maximum,
         )

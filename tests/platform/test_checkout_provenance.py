@@ -2,6 +2,8 @@
 
 import json
 import unittest
+import urllib.error
+from unittest import mock
 from copy import deepcopy
 
 from ops import readiness
@@ -36,6 +38,41 @@ class StepAPI(fixture.FakeGitHub):
 
 
 class CheckoutProvenanceTests(unittest.TestCase):
+    def test_step_api_version_does_not_change_metadata_contract_or_forward_token(self):
+        client = readiness.GitHubClient("https://api.github.com", "synthetic-token")
+        self.assertEqual(client.headers["X-GitHub-Api-Version"], "2022-11-28")
+        for path, version in (
+            ("/repos/owner/repo/actions/jobs/123/steps/1/logs", "2026-03-10"),
+            ("/repos/owner/repo/actions/artifacts/123/zip", "2022-11-28"),
+        ):
+            opener = mock.Mock()
+            opener.open.side_effect = urllib.error.HTTPError(
+                "https://api.github.com" + path,
+                302,
+                "redirect",
+                {"Location": "https://logs.example.invalid/signed-log"},
+                None,
+            )
+            with (
+                mock.patch.object(
+                    readiness.urllib.request, "build_opener", return_value=opener
+                ),
+                mock.patch.object(client, "_read", return_value=b"step output") as read,
+            ):
+                self.assertEqual(
+                    client.download("https://api.github.com" + path, 100), b"step output"
+                )
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_header("X-github-api-version"), version)
+            self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-token")
+            redirected = read.call_args.args[0]
+            self.assertIsNone(redirected.get_header("Authorization"))
+            self.assertEqual(
+                redirected.get_header("Accept"),
+                "text/plain" if "/steps/" in path else "application/zip",
+            )
+        self.assertEqual(client.headers["X-GitHub-Api-Version"], "2022-11-28")
+
     def collect(self, client):
         return readiness.collect(client, fixture.REPOSITORY, fixture.PR, fixture.SHA)
 
