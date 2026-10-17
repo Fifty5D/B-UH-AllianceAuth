@@ -52,6 +52,19 @@ resolution, and update times; never comment bodies). A conversation comment with
 a serious marker remains blocking until its author edits away the finding or
 deletes the obsolete comment and readiness is requested again. The reserved
 GitHub-Actions-owned readiness-pointer comment is excluded from that snapshot.
+Serious COMMENTED reviews also support an
+[explicit, authenticated whole-review disposition](commented-review-dispositions.md)
+bound to exact source PASS evidence, without rewriting the historical review.
+Only its named reviews receive resolution; native required reviews and every
+other readiness and release gate remain effective.
+New schema-v3 readiness binds the current head/base and combined Git tree to
+provider-attributed source checkout steps. Historical dispositions do not qualify
+a different tree. The current standalone preview has no supported immutable
+execution proof, and captured jobs lack the required step-log endpoint evidence;
+new qualification fails closed at these limits. See the linked guide for scope,
+exact-tree reuse and the separately needed evidence capability. Ordinary green
+CI/preview does not clear those limits. Historical schema-v2 records without
+dispositions remain readable.
 One bot-owned PR comment is the sole authoritative pointer
 to the current record and artifact digest, explicitly superseding older artifacts.
 Only after that pointer exists does the workflow remove `needs-codex` and re-add

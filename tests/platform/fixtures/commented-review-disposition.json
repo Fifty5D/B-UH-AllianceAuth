@@ -1,0 +1,23 @@
+{
+  "description": "Sanitized metadata for a preserved COMMENTED rejection followed by an exact-head source PASS. Bodies and users are synthetic; review IDs, states and submission ordering reflect the administrative failure.",
+  "reviews": [
+    {
+      "id": 5528185797,
+      "user": {"login": "process-reviewer", "id": 101, "type": "User"},
+      "author_association": "COLLABORATOR",
+      "state": "COMMENTED",
+      "submitted_at": "2026-10-15T04:47:39Z",
+      "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "Source review: CHANGES REQUIRED.\n\n[P1] Account for incomplete selected records.\n\n[P1] Preserve unfinished evidence through filtering."
+    },
+    {
+      "id": 5541681495,
+      "user": {"login": "process-reviewer", "id": 101, "type": "User"},
+      "author_association": "COLLABORATOR",
+      "state": "COMMENTED",
+      "submitted_at": "2026-10-16T00:49:33Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "Independent Work source review: **PASS** at `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, base `eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`.\n\nBoth named findings are verified corrected. This source disposition grants no merge or operations permission."
+    }
+  ]
+}

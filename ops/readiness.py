@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -51,6 +52,7 @@ ACTIONABLE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 REQUIRED_CHECK = "Source test suite / Required source checks"
 PROTECTED_BASE_REF = "main"
 SOURCE_WORKFLOW = ".github/workflows/source-ci.yml"
+SOURCE_TEST_WORKFLOW = ".github/workflows/reusable-source-tests.yml"
 PREVIEW_WORKFLOW = ".github/workflows/ui-preview.yml"
 PREVIEW_WORKFLOW_FILE = "ui-preview.yml"
 PREVIEW_ARTIFACT_LIMIT = 256 * 1024 * 1024
@@ -61,6 +63,46 @@ READINESS_POINTER_MARKER = "<!-- buh-readiness-record:v2 -->"
 READINESS_ARTIFACT_LIMIT = 1024 * 1024
 READINESS_RECORD_LIMIT = 512 * 1024
 PULL_FILES_API_LIMIT = 3000
+COMMENTED_DISPOSITION_MARKER = "<!-- buh-commented-review-disposition:v1 -->"
+SOURCE_PASS = re.compile(
+    r"\bsource review: \*\*PASS\*\* at `([0-9a-f]{40})`, base `([0-9a-f]{40})`"
+)
+QUALIFICATION_WORKFLOWS = (SOURCE_WORKFLOW, SOURCE_TEST_WORKFLOW, PREVIEW_WORKFLOW)
+QUALIFICATION_LOG_LIMIT = 8 * 1024 * 1024
+SOURCE_JOB_NAMES = (
+    "Test configuration",
+    "Immutable release ledger",
+    "Immutable Moon Tax v0.3.3 recovery artifact",
+    "Fast source checks",
+    "Reproduce the effective production Auth build",
+    "MariaDB, Redis, Celery, and fake ESI",
+    "Legacy schema upgrade and backup restore",
+    "Browser tables, actions, and permissions",
+    "Required source checks",
+)
+PREVIEW_JOB_NAME = "Fake-data desktop and mobile preview"
+SOURCE_CHECKOUT_STEPS = {
+    f"Source test suite / {name}": (2, checkout)
+    for name, checkout in zip(
+        SOURCE_JOB_NAMES[:-1],
+        (
+            "Check out source",
+            "Check out complete source history",
+            "Check out the exact source with immutable history",
+            "Check out source",
+            "Check out exact source",
+            "Check out source",
+            "Check out source and immutable baseline wheels",
+            "Check out source",
+        ),
+        strict=True,
+    )
+}
+PREVIEW_EXECUTION_LIMIT = (
+    "preview qualification is blocked: standalone GitHub run metadata does not "
+    "authenticate its immutable executing workflow; current PR refs, source CI, "
+    "job output and artifact digests cannot replace that evidence"
+)
 
 
 class ReadinessError(ValueError):
@@ -123,7 +165,80 @@ def _review_digest(snapshot: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _validate_review_evidence(value: Any) -> dict[str, Any]:
+def _body_digest(body: str) -> str:
+    return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def _sha256(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ReadinessError("invalid disposition body digest")
+    return value
+
+
+def _review_time(value: Any) -> datetime:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value
+    ):
+        raise ReadinessError("disposition evidence time is malformed")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReadinessError("disposition evidence time is malformed") from exc
+
+
+def _disposition_payload(value: Any) -> dict[str, Any]:
+    payload = _mapping(value, "COMMENTED review disposition")
+    _exact_keys(
+        payload,
+        {"schema_version", "repository", "pr", "head_sha", "base_sha",
+         "pass_review", "resolved_reviews"},
+        "COMMENTED review disposition",
+    )
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ReadinessError("unsupported COMMENTED disposition schema")
+    repository = payload["repository"]
+    if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
+        raise ReadinessError("invalid disposition repository")
+    _positive_int(payload["pr"], "disposition PR")
+    _sha(payload["head_sha"], "disposition head")
+    _sha(payload["base_sha"], "disposition base")
+
+    def reference(item: Any) -> dict[str, Any]:
+        ref = _mapping(item, "disposition review reference")
+        _exact_keys(ref, {"id", "body_sha256"}, "disposition review reference")
+        return {
+            "id": _positive_int(ref["id"], "disposition review id"),
+            "body_sha256": _sha256(ref["body_sha256"]),
+        }
+
+    passed = reference(payload["pass_review"])
+    raw_targets = payload["resolved_reviews"]
+    if not isinstance(raw_targets, list) or not 1 <= len(raw_targets) <= 100:
+        raise ReadinessError("disposition must name 1 to 100 whole reviews")
+    targets = [reference(item) for item in raw_targets]
+    ids = [item["id"] for item in targets]
+    if ids != sorted(set(ids)) or passed["id"] in ids:
+        raise ReadinessError("disposition review references are ambiguous")
+    return {**payload, "pass_review": passed, "resolved_reviews": targets}
+
+
+def _github_user(value: Any) -> tuple[str, int]:
+    user = _mapping(value, "disposition GitHub user")
+    if user.get("type") != "User":
+        raise ReadinessError("disposition requires an authenticated human GitHub user")
+    return (
+        _metadata_string(user.get("login"), "disposition GitHub login", 100),
+        _positive_int(user.get("id"), "disposition GitHub user id"),
+    )
+
+
+def _validate_review_evidence(
+    value: Any,
+    *,
+    repository: str | None = None,
+    pr: int | None = None,
+    head_sha: str | None = None,
+) -> dict[str, Any]:
     evidence = _mapping(value, "review evidence")
     _exact_keys(
         evidence,
@@ -136,10 +251,11 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             "issue_comments",
         },
         "review evidence",
+        optional={"commented_dispositions"},
     )
 
     def normalize_reviews(
-        raw: Any, context: str, allowed: set[str]
+        raw: Any, context: str, allowed: set[str], *, unique_authors: bool = True
     ) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
             raise ReadinessError(f"{context} are malformed")
@@ -169,7 +285,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             if not isinstance(review["serious"], bool):
                 raise ReadinessError(f"{context} serious marker is malformed")
             folded_author = author.casefold()
-            if folded_author in authors or review_id in ids:
+            if (unique_authors and folded_author in authors) or review_id in ids:
                 raise ReadinessError(f"{context} contain duplicate identities")
             authors.add(folded_author)
             ids.add(review_id)
@@ -203,6 +319,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
         evidence["unresolved_serious_reviews"],
         "unresolved serious reviews",
         REVIEW_STATES - {"APPROVED", "DISMISSED"},
+        unique_authors=False,
     )
     if any(not review["serious"] for review in unresolved_serious):
         raise ReadinessError("unresolved serious review evidence is inconsistent")
@@ -266,6 +383,7 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
             comment,
             {"id", "author", "created_at", "updated_at", "serious"},
             "pull-request issue comment",
+            optional={"author_id", "body_sha256", "node_id", "last_edited_at"},
         )
         comment_id = _positive_int(comment["id"], "pull-request issue comment id")
         if comment_id in issue_comment_ids:
@@ -292,6 +410,18 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
                 "serious": serious,
             }
         )
+        if "author_id" in comment or "body_sha256" in comment:
+            issue_comments[-1].update(
+                author_id=_positive_int(comment.get("author_id"), "disposition author id"),
+                body_sha256=_sha256(comment.get("body_sha256")),
+                node_id=_metadata_string(comment.get("node_id"), "disposition node id"),
+            )
+        if "last_edited_at" in comment:
+            if comment["last_edited_at"] is not None:
+                raise ReadinessError(
+                    "an edited disposition cannot establish author provenance"
+                )
+            issue_comments[-1]["last_edited_at"] = None
     expected_issue_comments = sorted(issue_comments, key=lambda item: item["id"])
     if issue_comments != expected_issue_comments:
         raise ReadinessError("pull-request issue comments are not canonical")
@@ -303,22 +433,166 @@ def _validate_review_evidence(value: Any) -> dict[str, Any]:
         "threads": threads,
         "issue_comments": issue_comments,
     }
+    resolved_ids: set[int] = set()
+    if "commented_dispositions" in evidence:
+        if repository is None or pr is None or head_sha is None:
+            raise ReadinessError(
+                "COMMENTED dispositions require exact-source validation context"
+            )
+        raw_dispositions = evidence["commented_dispositions"]
+        if not isinstance(raw_dispositions, list) or not 1 <= len(raw_dispositions) <= 100:
+            raise ReadinessError("COMMENTED disposition evidence is malformed")
+        dispositions: list[dict[str, Any]] = []
+        comments_by_id = {comment["id"]: comment for comment in issue_comments}
+        serious_by_id = {review["id"]: review for review in unresolved_serious}
+        review_keys = {"id", "author", "state", "submitted_at", "commit_id", "serious"}
+
+        def bound_review(raw: Any, *, passed: bool = False) -> dict[str, Any]:
+            review = _mapping(raw, "disposition bound review")
+            extra = {"author_id", "body_sha256"}
+            if passed:
+                extra |= {"source_head_sha", "source_base_sha"}
+            _exact_keys(review, review_keys | extra, "disposition bound review")
+            normalized = normalize_reviews(
+                [{key: review[key] for key in review_keys}],
+                "disposition bound reviews",
+                REVIEW_STATES,
+            )[0]
+            _positive_int(review["author_id"], "bound review author id")
+            _sha256(review["body_sha256"])
+            _sha(review["commit_id"], "bound review commit")
+            _review_time(review["submitted_at"])
+            if review["id"] in serious_by_id and normalized != serious_by_id[review["id"]]:
+                raise ReadinessError("disposition changed historical review metadata")
+            return dict(review)
+
+        for raw in raw_dispositions:
+            disposition = _mapping(raw, "COMMENTED disposition evidence")
+            _exact_keys(
+                disposition,
+                {"comment_id", "authority", "payload", "reviews", "ancestry"},
+                "COMMENTED disposition evidence",
+            )
+            comment_id = _positive_int(disposition["comment_id"], "disposition comment id")
+            comment = comments_by_id.get(comment_id)
+            if (
+                comment is None
+                or "author_id" not in comment
+                or "last_edited_at" not in comment
+            ):
+                raise ReadinessError("disposition comment provenance is missing")
+            if comment["created_at"] != comment["updated_at"]:
+                raise ReadinessError(
+                    "an edited disposition cannot establish author provenance"
+                )
+            authority = _mapping(disposition["authority"], "disposition authority")
+            _exact_keys(
+                authority,
+                {"repository", "author", "author_id", "permission"},
+                "disposition authority",
+            )
+            _positive_int(authority["author_id"], "disposition authority user id")
+            if (
+                authority["repository"] != repository
+                or authority["author"] != comment["author"]
+                or authority["author_id"] != comment["author_id"]
+                or authority["permission"] not in {"write", "admin"}
+            ):
+                raise ReadinessError(
+                    "disposition author lacks verified repository authority"
+                )
+            payload = _disposition_payload(disposition["payload"])
+            if (payload["repository"], payload["pr"], payload["head_sha"]) != (
+                repository,
+                pr,
+                head_sha,
+            ):
+                raise ReadinessError(
+                    "disposition belongs to another repository, PR or head"
+                )
+            ancestry = _mapping(disposition["ancestry"], "disposition source ancestry")
+            _exact_keys(
+                ancestry,
+                {"current_base_sha", "head_merge_base_sha", "base_merge_base_sha"},
+                "disposition source ancestry",
+            )
+            _sha(ancestry["current_base_sha"], "disposition current base")
+            if (
+                ancestry["head_merge_base_sha"] != payload["base_sha"]
+                or ancestry["base_merge_base_sha"] != payload["base_sha"]
+            ):
+                raise ReadinessError("disposition reviewed base is not a source ancestor")
+            raw_reviews = disposition["reviews"]
+            if not isinstance(raw_reviews, list) or len(raw_reviews) != 1 + len(
+                payload["resolved_reviews"]
+            ):
+                raise ReadinessError("disposition bound reviews are incomplete")
+            passed = bound_review(raw_reviews[0], passed=True)
+            if (
+                passed["id"] != payload["pass_review"]["id"]
+                or passed["body_sha256"] != payload["pass_review"]["body_sha256"]
+                or passed["author_id"] != comment["author_id"]
+                or passed["state"] not in {"COMMENTED", "APPROVED"}
+                or passed["serious"]
+                or passed["commit_id"] != head_sha
+                or passed["source_head_sha"] != head_sha
+                or passed["source_base_sha"] != payload["base_sha"]
+                or _review_time(passed["submitted_at"])
+                >= _review_time(comment["created_at"])
+            ):
+                raise ReadinessError(
+                    "disposition lacks exact-source authenticated PASS evidence"
+                )
+            reviews = [passed]
+            for raw_review, ref in zip(raw_reviews[1:], payload["resolved_reviews"]):
+                review = bound_review(raw_review)
+                if (
+                    review["id"] != ref["id"]
+                    or review["body_sha256"] != ref["body_sha256"]
+                    or review["state"] != "COMMENTED"
+                    or not review["serious"]
+                    or review["id"] >= passed["id"]
+                    or _review_time(review["submitted_at"])
+                    >= _review_time(passed["submitted_at"])
+                    or (
+                        authority["permission"] != "admin"
+                        and review["author_id"] != comment["author_id"]
+                    )
+                ):
+                    raise ReadinessError(
+                        "disposition does not verify its named COMMENTED findings"
+                    )
+                resolved_ids.add(review["id"])
+                reviews.append(review)
+            dispositions.append(
+                {
+                    "comment_id": comment_id,
+                    "authority": dict(authority),
+                    "payload": payload,
+                    "reviews": reviews,
+                    "ancestry": dict(ancestry),
+                }
+            )
+        ids = [item["comment_id"] for item in dispositions]
+        if ids != sorted(set(ids)):
+            raise ReadinessError("COMMENTED dispositions are not canonical")
+        snapshot["commented_dispositions"] = dispositions
     digest = evidence["digest"]
     if digest != _review_digest(snapshot):
         raise ReadinessError("review evidence digest does not match its snapshot")
     if any(review["state"] == "CHANGES_REQUESTED" for review in latest_actionable):
         raise ReadinessError("an unresolved changes-requested review remains")
-    if unresolved_serious:
+    if any(review["id"] not in resolved_ids for review in unresolved_serious):
         raise ReadinessError("an unresolved serious review finding remains")
     if any(
         review["serious"]
+        and review["id"] not in resolved_ids
         and review["state"] not in {"APPROVED", "DISMISSED"}
         for review in latest_reviews
     ):
         raise ReadinessError("an unresolved serious review finding remains")
     if any(
-        not thread["resolved"]
-        and any(comment["serious"] for comment in thread["comments"])
+        not thread["resolved"] and any(comment["serious"] for comment in thread["comments"])
         for thread in threads
     ):
         raise ReadinessError("an unresolved serious review finding remains")
@@ -479,8 +753,9 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
             "ready",
         },
         "readiness record",
+        optional={"source_qualification"},
     )
-    if value["schema_version"] != 2:
+    if type(value["schema_version"]) is not int or value["schema_version"] not in {2, 3}:
         raise ReadinessError("unsupported readiness record schema")
     repository = value["repository"]
     if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
@@ -561,11 +836,13 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_preview is not None:
         raise ReadinessError("readiness record has unexpected preview evidence")
 
-    reviews = _validate_review_evidence(value["review_evidence"])
+    reviews = _validate_review_evidence(
+        value["review_evidence"], repository=repository, pr=pr, head_sha=head
+    )
     if value["ready"] is not True:
         raise ReadinessError("readiness record is not qualified")
-    return {
-        "schema_version": 2,
+    result = {
+        "schema_version": value["schema_version"],
         "repository": repository,
         "pr": pr,
         "base_ref": PROTECTED_BASE_REF,
@@ -577,6 +854,7 @@ def _validate_readiness_record(value: Mapping[str, Any]) -> dict[str, Any]:
         "review_evidence": reviews,
         "ready": True,
     }
+    return _qualified_record(result, value)
 
 
 def validate(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -599,8 +877,8 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
         "preview",
         "review_evidence",
     }
-    _exact_keys(value, required, "readiness evidence")
-    if value["schema_version"] != 2:
+    _exact_keys(value, required, "readiness evidence", optional={"source_qualification"})
+    if type(value["schema_version"]) is not int or value["schema_version"] not in {2, 3}:
         raise ReadinessError("unsupported readiness evidence schema")
     repository = value["repository"]
     if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
@@ -767,10 +1045,12 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
     elif preview is not None:
         raise ReadinessError("unexpected UI preview evidence")
 
-    review_evidence = _validate_review_evidence(value["review_evidence"])
+    review_evidence = _validate_review_evidence(
+        value["review_evidence"], repository=repository, pr=pr, head_sha=head
+    )
 
-    return {
-        "schema_version": 2,
+    result = {
+        "schema_version": value["schema_version"],
         "repository": repository,
         "pr": pr,
         "base_ref": base_ref,
@@ -787,6 +1067,194 @@ def validate(evidence: dict[str, Any]) -> dict[str, Any]:
         "review_evidence": review_evidence,
         "ready": True,
     }
+    return _qualified_record(result, value)
+
+
+def _trusted_workflow_blobs() -> dict[str, str]:
+    """The supported checkout contract comes from this trusted checkout only."""
+    root = Path(__file__).resolve().parents[1]
+    result = {}
+    for path in QUALIFICATION_WORKFLOWS:
+        try:
+            content = (root / path).read_bytes().replace(b"\r\n", b"\n")
+        except OSError as exc:
+            raise ReadinessError("trusted source-checkout contract is unavailable") from exc
+        result[path] = hashlib.sha1(
+            b"blob " + str(len(content)).encode("ascii") + b"\0" + content
+        ).hexdigest()
+    return result
+
+
+def _qualification_jobs(
+    raw: Any,
+    *,
+    head: str,
+    run_id: int,
+    run_attempt: int,
+    preview: bool = False,
+    check_id: int | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise ReadinessError("tested-source job evidence is missing")
+    names = (
+        {PREVIEW_JOB_NAME}
+        if preview
+        else {f"Source test suite / {name}" for name in SOURCE_JOB_NAMES}
+    )
+    jobs = []
+    ids = set()
+    for item in raw:
+        job = _mapping(item, "tested-source job")
+        _exact_keys(
+            job,
+            {
+                "id",
+                "name",
+                "run_id",
+                "run_attempt",
+                "conclusion",
+                "checked_out_sha",
+                "log_sha256",
+                "checkout_step_number",
+                "checkout_step_name",
+            },
+            "tested-source job",
+        )
+        identity = _positive_int(job["id"], "tested-source job id")
+        _metadata_string(job["name"], "tested-source job name")
+        if (
+            _positive_int(job["run_id"], "tested-source run id") != run_id
+            or _positive_int(job["run_attempt"], "tested-source run attempt") != run_attempt
+        ):
+            raise ReadinessError("tested-source jobs belong to another run or attempt")
+        if identity in ids or job["name"] not in names:
+            raise ReadinessError("tested-source jobs contain unexpected identities")
+        ids.add(identity)
+        names.remove(job["name"])
+        aggregate = not preview and job["name"] == REQUIRED_CHECK
+        if aggregate and (identity != check_id or job["conclusion"] != "success"):
+            raise ReadinessError(
+                "tested-source aggregate does not match the required check"
+            )
+        if aggregate or job["conclusion"] == "skipped":
+            if any(job[key] is not None for key in (
+                "checked_out_sha", "log_sha256", "checkout_step_number", "checkout_step_name"
+            )):
+                raise ReadinessError("untested jobs cannot claim a checked-out source")
+        elif job["conclusion"] == "success":
+            if job["checked_out_sha"] != head:
+                raise ReadinessError("qualifying job tested another source")
+            expected_step = (
+                (3, "Check out the selected source")
+                if preview else SOURCE_CHECKOUT_STEPS[job["name"]]
+            )
+            if (
+                type(job["checkout_step_number"]) is not int
+                or (job["checkout_step_number"], job["checkout_step_name"]) != expected_step
+            ):
+                raise ReadinessError("checkout evidence belongs to another execution step")
+            _sha256(job["log_sha256"])
+        else:
+            raise ReadinessError("tested-source job is failed or pending")
+        jobs.append(dict(job))
+    if names:
+        raise ReadinessError("tested-source job evidence is incomplete")
+    skipped = {job["name"] for job in jobs if job["conclusion"] == "skipped"}
+    runtime = {f"Source test suite / {name}" for name in SOURCE_JOB_NAMES[3:-1]}
+    # The unchanged supported contract skips all five runtime lanes together for
+    # a proven docs-only diff. Required/configuration/release jobs still execute.
+    if skipped and (preview or skipped != runtime):
+        raise ReadinessError("tested-source jobs do not match the supported CI profile")
+    ordered = sorted(jobs, key=lambda job: job["name"])
+    if jobs != ordered:
+        raise ReadinessError("tested-source jobs are not canonical")
+    return ordered
+
+
+def _qualified_record(record: dict[str, Any], source: Mapping[str, Any]) -> dict[str, Any]:
+    if record["schema_version"] == 2:
+        # Historical records/callers remain readable, but this new disposition
+        # route has never been published by an active schema-v2 policy.
+        if (
+            "source_qualification" in source
+            or "commented_dispositions" in record["review_evidence"]
+        ):
+            raise ReadinessError("current-combination qualification requires schema v3")
+        return record
+    qualification = _mapping(
+        source.get("source_qualification"), "current-source qualification"
+    )
+    _exact_keys(
+        qualification,
+        {
+            "schema_version",
+            "repository",
+            "pr",
+            "base_sha",
+            "head_sha",
+            "merge_tree_sha",
+            "tested_source_sha",
+            "tested_tree_sha",
+            "workflow_commit_sha",
+            "workflow_blobs",
+            "source_jobs",
+            "preview_jobs",
+            "review_digest",
+        },
+        "current-source qualification",
+    )
+    if (
+        type(qualification["schema_version"]) is not int
+        or qualification["schema_version"] != 2
+    ):
+        raise ReadinessError("unsupported current-source qualification schema")
+    for key in (
+        "base_sha",
+        "head_sha",
+        "merge_tree_sha",
+        "tested_source_sha",
+        "tested_tree_sha",
+        "workflow_commit_sha",
+    ):
+        _sha(qualification[key], f"current-source {key}")
+    if (
+        qualification["repository"] != record["repository"]
+        or type(qualification["pr"]) is not int
+        or qualification["pr"] != record["pr"]
+        or qualification["head_sha"] != record["head_sha"]
+        or qualification["tested_source_sha"] != record["head_sha"]
+        or qualification["merge_tree_sha"] != qualification["tested_tree_sha"]
+    ):
+        raise ReadinessError(
+            "combined source is not the tested head tree; incorporate the target base "
+            "and obtain applicable source review, CI and preview"
+        )
+    if qualification["workflow_blobs"] != _trusted_workflow_blobs():
+        raise ReadinessError(
+            "qualifying checkout workflow differs from the trusted contract"
+        )
+    if qualification["review_digest"] != record["review_evidence"]["digest"]:
+        raise ReadinessError(
+            "current-source qualification is bound to another review snapshot"
+        )
+    for disposition in record["review_evidence"].get("commented_dispositions", []):
+        if disposition["ancestry"]["current_base_sha"] != qualification["base_sha"]:
+            raise ReadinessError("disposition and qualification target different bases")
+    _qualification_jobs(
+        qualification["source_jobs"],
+        head=record["head_sha"],
+        run_id=record["required_check"]["workflow_run_id"],
+        run_attempt=record["required_check"]["workflow_run_attempt"],
+        check_id=record["required_check"]["check_run_id"],
+    )
+    if record["preview_required"]:
+        # No schema-v3 preview record has been issued by the active policy. The
+        # existing standalone workflow exposes no authenticated immutable caller
+        # revision. Do not grandfather a checkout-only preview into publication.
+        raise ReadinessError(PREVIEW_EXECUTION_LIMIT)
+    elif qualification["preview_jobs"] is not None:
+        raise ReadinessError("current-source qualification has unexpected preview jobs")
+    return {**record, "source_qualification": dict(qualification)}
 
 
 class GitHubClient:
@@ -863,7 +1331,7 @@ class GitHubClient:
         return payload.get("data")
 
     def download(self, url: str, maximum: int) -> bytes:
-        """Download one tiny ZIP without forwarding the token across a redirect."""
+        """Read a bounded artifact or step log without forwarding its token."""
 
         parsed = urllib.parse.urlparse(url)
         api = urllib.parse.urlparse(self.api_url)
@@ -875,8 +1343,16 @@ class GitHubClient:
                 return None
 
         opener = urllib.request.build_opener(NoRedirect)
+        headers = dict(self.headers)
+        # Keep existing metadata/artifact response contracts. The newer API
+        # version is required only at the independently attributed step endpoint.
+        step_log = bool(re.search(
+            r"/actions/jobs/[1-9][0-9]*/steps/(?:0|[1-9][0-9]*)/logs$", parsed.path
+        ))
+        if step_log:
+            headers["X-GitHub-Api-Version"] = "2026-03-10"
         try:
-            opener.open(urllib.request.Request(url, headers=self.headers), timeout=30)
+            opener.open(urllib.request.Request(url, headers=headers), timeout=30)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise ReadinessError("GitHub artifact download failed") from exc
@@ -889,7 +1365,8 @@ class GitHubClient:
         return self._read(
             urllib.request.Request(
                 location,
-                headers={"Accept": "application/zip", "User-Agent": "buh-readiness-v1"},
+                headers={"Accept": "text/plain" if step_log else "application/zip",
+                         "User-Agent": "buh-readiness-v1"},
             ),
             maximum,
         )
@@ -1079,19 +1556,180 @@ def _verify_preview_zip(payload: bytes, manifest: Mapping[str, Any]) -> None:
         raise ReadinessError("UI preview archive lacks its Playwright report")
 
 
+def _commented_dispositions(
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    head_sha: str | None,
+    base_sha: str | None,
+    candidates: list[tuple[Mapping[str, Any], dict[str, Any]]],
+    reviews: Mapping[int, tuple[Mapping[str, Any], dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Bind explicit whole-review resolutions to live, authenticated metadata.
+
+    Write-level reviewers may resolve their own findings; repository admins may
+    act as process owners. Both must author the supporting source PASS. Older
+    source dispositions remain historical comments and grant no current relief.
+    """
+    dispositions = []
+    authorities: dict[int, dict[str, Any]] = {}
+    provenance_query = """
+      query($id: ID!) {
+        node(id: $id) {
+          __typename
+          ... on IssueComment {
+            id databaseId body createdAt updatedAt lastEditedAt
+            author { __typename login ... on User { databaseId } }
+          }
+        }
+      }
+    """
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReadinessError("disposition JSON has duplicate fields")
+            result[key] = value
+        return result
+
+    for comment, normalized in candidates:
+        try:
+            payload = _disposition_payload(
+                json.loads(
+                    comment["body"][len(COMMENTED_DISPOSITION_MARKER) + 1 :],
+                    object_pairs_hook=unique_object,
+                )
+            )
+        except (ValueError, RecursionError) as exc:
+            raise ReadinessError("COMMENTED disposition JSON is malformed") from exc
+        if (payload["repository"], payload["pr"], payload["head_sha"]) != (
+            repository,
+            pr,
+            head_sha,
+        ):
+            continue
+        if len(dispositions) >= 100:
+            raise ReadinessError("too many COMMENTED review dispositions")
+        _sha(head_sha, "disposition current head")
+        _sha(base_sha, "disposition current base")
+        # REST update times have one-second precision and do not identify an
+        # editor. Require GitHub's explicit unedited provenance, even for edits
+        # in the same second, and cross-check the independently fetched body.
+        provenance = _mapping(
+            client.graphql(provenance_query, {"id": normalized["node_id"]}).get("node"),
+            "disposition comment provenance",
+        )
+        provenance_author = _mapping(provenance.get("author"), "disposition comment author")
+        if (
+            provenance.get("__typename") != "IssueComment"
+            or provenance.get("id") != normalized["node_id"]
+            or provenance.get("databaseId") != normalized["id"]
+            or "lastEditedAt" not in provenance
+            or provenance["lastEditedAt"] is not None
+            or provenance.get("body") != comment["body"]
+            or provenance.get("createdAt") != normalized["created_at"]
+            or provenance.get("updatedAt") != normalized["updated_at"]
+            or provenance_author.get("__typename") != "User"
+            or provenance_author.get("databaseId") != normalized["author_id"]
+            or provenance_author.get("login") != normalized["author"]
+        ):
+            raise ReadinessError(
+                "disposition comment lacks authenticated unedited provenance"
+            )
+        normalized["last_edited_at"] = None
+        # Activating this policy advances main. The independently reviewed base
+        # remains valid only as a verified ancestor of both source and target.
+        ancestry = {"current_base_sha": base_sha}
+        for name, revision in (("head", head_sha), ("base", base_sha)):
+            comparison = _mapping(
+                client.get_json(
+                    f"/repos/{repository}/compare/{payload['base_sha']}...{revision}"
+                ),
+                "disposition source comparison",
+            )
+            merge_base = _mapping(
+                comparison.get("merge_base_commit"), "disposition merge base"
+            )
+            if (
+                comparison.get("status") not in {"ahead", "identical"}
+                or merge_base.get("sha") != payload["base_sha"]
+            ):
+                raise ReadinessError("disposition reviewed base is not a source ancestor")
+            ancestry[f"{name}_merge_base_sha"] = payload["base_sha"]
+        author, author_id = _github_user(comment.get("user"))
+        if author_id not in authorities:
+            permission = _mapping(
+                client.get_json(
+                    f"/repos/{repository}/collaborators/{urllib.parse.quote(author, safe='')}/permission"
+                ),
+                "disposition repository permission",
+            )
+            permission_author, permission_id = _github_user(permission.get("user"))
+            if permission_author != author or permission_id != author_id:
+                raise ReadinessError(
+                    "disposition permission belongs to another GitHub user"
+                )
+            authorities[author_id] = {
+                "repository": repository,
+                "author": author,
+                "author_id": author_id,
+                "permission": permission.get("permission"),
+            }
+        bound_reviews = []
+        for ref in [payload["pass_review"], *payload["resolved_reviews"]]:
+            if ref["id"] not in reviews:
+                raise ReadinessError("disposition references a missing historical review")
+            raw, review = reviews[ref["id"]]
+            _, review_author_id = _github_user(raw.get("user"))
+            bound = {
+                **review,
+                "author_id": review_author_id,
+                "body_sha256": _body_digest(raw.get("body") or ""),
+            }
+            if ref is payload["pass_review"]:
+                matches = SOURCE_PASS.findall(raw.get("body") or "")
+                if len(matches) != 1:
+                    raise ReadinessError(
+                        "disposition requires one explicit source PASS identity"
+                    )
+                bound.update(source_head_sha=matches[0][0], source_base_sha=matches[0][1])
+            bound_reviews.append(bound)
+        dispositions.append(
+            {
+                "comment_id": normalized["id"],
+                "authority": authorities[author_id],
+                "payload": payload,
+                "reviews": bound_reviews,
+                "ancestry": ancestry,
+            }
+        )
+    return sorted(dispositions, key=lambda value: value["comment_id"])
+
+
 def _review_evidence(
-    client: GitHubClient, repository: str, pr: int
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    *,
+    head_sha: str | None = None,
+    base_sha: str | None = None,
 ) -> dict[str, Any]:
     latest: dict[str, dict[str, Any]] = {}
     latest_actionable: dict[str, dict[str, Any]] = {}
     reviews_by_author: dict[str, list[dict[str, Any]]] = {}
     review_ids: set[int] = set()
+    bound_reviews: dict[int, tuple[Mapping[str, Any], dict[str, Any]]] = {}
     for item in client.pages(f"/repos/{repository}/pulls/{pr}/reviews"):
         review = _mapping(item, "pull-request review")
         user = review.get("user")
         login = user.get("login") if isinstance(user, Mapping) else None
         review_id = review.get("id")
-        if not isinstance(login, str) or isinstance(review_id, bool) or not isinstance(review_id, int):
+        if (
+            not isinstance(login, str)
+            or isinstance(review_id, bool)
+            or not isinstance(review_id, int)
+        ):
             raise ReadinessError("pull-request review metadata is malformed")
         state = review.get("state")
         if state not in REVIEW_STATES:
@@ -1118,6 +1756,7 @@ def _review_evidence(
         if normalized["id"] in review_ids:
             raise ReadinessError("pull-request reviews contain duplicate identities")
         review_ids.add(normalized["id"])
+        bound_reviews[normalized["id"]] = (review, normalized)
         key = login.casefold()
         reviews_by_author.setdefault(key, []).append(normalized)
         if key not in latest or review_id > latest[key]["id"]:
@@ -1127,16 +1766,19 @@ def _review_evidence(
         ):
             latest_actionable[key] = normalized
 
-    unresolved_serious: dict[str, dict[str, Any]] = {}
+    unresolved_serious: list[dict[str, Any]] = []
     for key, author_reviews in reviews_by_author.items():
+        outstanding: list[dict[str, Any]] = []
         for review in sorted(author_reviews, key=lambda value: value["id"]):
             if review["state"] in {"APPROVED", "DISMISSED"}:
-                unresolved_serious.pop(key, None)
+                outstanding.clear()
             elif review["serious"]:
-                unresolved_serious[key] = review
+                outstanding.append(review)
+        unresolved_serious.extend(outstanding)
 
     normalized_issue_comments: list[dict[str, Any]] = []
     issue_comment_ids: set[int] = set()
+    disposition_candidates: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
     for item in client.pages(f"/repos/{repository}/issues/{pr}/comments"):
         comment = _mapping(item, "pull-request issue comment")
         user = comment.get("user")
@@ -1172,14 +1814,26 @@ def _review_evidence(
         normalized_issue_comments.append(
             {
                 "id": _positive_int(comment_id, "pull-request issue comment id"),
-                "author": _metadata_string(
-                    login, "pull-request issue comment author", 100
-                ),
+                "author": _metadata_string(login, "pull-request issue comment author", 100),
                 "created_at": created_at,
                 "updated_at": updated_at,
                 "serious": bool(SERIOUS_MARKER.search(body)),
             }
         )
+        if body.startswith(COMMENTED_DISPOSITION_MARKER):
+            if not body.startswith(f"{COMMENTED_DISPOSITION_MARKER}\n"):
+                raise ReadinessError("COMMENTED disposition marker is malformed")
+            _, author_id = _github_user(user)
+            normalized_issue_comments[-1].update(
+                author_id=author_id,
+                body_sha256=_body_digest(body),
+                node_id=_metadata_string(comment.get("node_id"), "disposition node id"),
+            )
+            disposition_candidates.append((comment, normalized_issue_comments[-1]))
+
+    dispositions = _commented_dispositions(
+        client, repository, pr, head_sha, base_sha, disposition_candidates, bound_reviews
+    )
 
     owner, name = repository.split("/", 1)
     cursor = None
@@ -1237,9 +1891,7 @@ def _review_evidence(
             normalized_comments: list[dict[str, Any]] = []
             for raw_comment in comment_nodes:
                 comment = _mapping(raw_comment, "review-thread comment")
-                comment_id = _metadata_string(
-                    comment.get("id"), "review-thread comment id"
-                )
+                comment_id = _metadata_string(comment.get("id"), "review-thread comment id")
                 updated_at = _metadata_string(
                     comment.get("updatedAt"), "review-thread comment update time", 64
                 )
@@ -1279,7 +1931,7 @@ def _review_evidence(
                     ),
                 ),
                 "unresolved_serious_reviews": sorted(
-                    unresolved_serious.values(),
+                    unresolved_serious,
                     key=lambda value: (
                         value["author"].casefold(),
                         value["author"],
@@ -1291,6 +1943,8 @@ def _review_evidence(
                     normalized_issue_comments, key=lambda value: value["id"]
                 ),
             }
+            if dispositions:
+                snapshot["commented_dispositions"] = dispositions
             return {"digest": _review_digest(snapshot), **snapshot}
         cursor = page_info.get("endCursor")
         if not isinstance(cursor, str) or not cursor:
@@ -1366,6 +2020,341 @@ def _one_exact_pr_association(
     return matches == 1
 
 
+def _source_commit(client: GitHubClient, repository: str, sha: str) -> Mapping[str, Any]:
+    _sha(sha, "qualified source commit")
+    try:
+        raw = client.get_json(f"/repos/{repository}/commits/{sha}")
+    except ReadinessError as exc:
+        raise ReadinessError(
+            f"qualified source Git metadata is unavailable for {sha}"
+        ) from exc
+    commit = _mapping(raw, "qualified source commit")
+    tree = _mapping(commit.get("commit"), "qualified Git commit").get("tree")
+    tree = _mapping(tree, "qualified source tree")
+    if commit.get("sha") != sha:
+        raise ReadinessError("qualified source commit identity does not match")
+    _sha(tree.get("sha"), "qualified source tree")
+    return commit
+
+
+def _source_tree(commit: Mapping[str, Any]) -> str:
+    return commit["commit"]["tree"]["sha"]
+
+
+def _workflow_tree_blobs(
+    client: GitHubClient, repository: str, tree_sha: str
+) -> dict[str, str]:
+    tree = _mapping(
+        client.get_json(f"/repos/{repository}/git/trees/{tree_sha}", {"recursive": 1}),
+        "qualified workflow tree",
+    )
+    nodes = tree.get("tree")
+    if (
+        tree.get("sha") != tree_sha
+        or tree.get("truncated") is not False
+        or not isinstance(nodes, list)
+    ):
+        raise ReadinessError("qualified workflow tree is incomplete")
+    result = {}
+    seen = set()
+    for node in nodes:
+        entry = _mapping(node, "qualified workflow entry")
+        path = _metadata_string(entry.get("path"), "qualified workflow path")
+        if path in seen:
+            raise ReadinessError("qualified workflow tree contains duplicate paths")
+        seen.add(path)
+        if path in QUALIFICATION_WORKFLOWS:
+            if entry.get("type") != "blob" or entry.get("mode") != "100644":
+                raise ReadinessError("qualifying workflow is not a regular file")
+            result[path] = _sha(entry.get("sha"), "qualifying workflow blob")
+    if result != _trusted_workflow_blobs():
+        raise ReadinessError(
+            "qualifying checkout workflow differs from the trusted contract"
+        )
+    return result
+
+
+def _checkout_step(job: Mapping[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    """Match the step to the already verified, immutable workflow contract.
+
+    A display name or printable group is not a provenance boundary. GitHub's
+    job/step API supplies the execution identity; only its step-specific log
+    endpoint may supply output attributed to that execution.
+    """
+    expected = (
+        (3, "Check out the selected source")
+        if preview else SOURCE_CHECKOUT_STEPS.get(job.get("name"))
+    )
+    steps = job.get("steps")
+    if expected is None or not isinstance(steps, list):
+        raise ReadinessError("qualifying job lacks its supported checkout execution")
+    normalized = []
+    for raw in steps:
+        step = _mapping(raw, "job execution step")
+        number = _positive_int(step.get("number"), "job execution step number")
+        name = _metadata_string(step.get("name"), "job execution step name")
+        normalized.append({"number": number, "name": name,
+                           "status": step.get("status"), "conclusion": step.get("conclusion")})
+    numbers = [step["number"] for step in normalized]
+    if numbers != sorted(set(numbers)):
+        raise ReadinessError("job execution steps are ambiguous or out of order")
+    matching = [step for step in normalized if step["number"] == expected[0]]
+    if (
+        len(matching) != 1 or matching[0]["name"] != expected[1]
+        or matching[0]["status"] != "completed"
+        or matching[0]["conclusion"] != "success"
+        or not normalized or normalized[0] != {
+            "number": 1, "name": "Set up job", "status": "completed", "conclusion": "success"
+        }
+    ):
+        raise ReadinessError("qualifying job lacks its successful supported checkout")
+    if preview and (len(normalized) < 3 or normalized[1] != {
+        "number": 2, "name": "Resolve the exact open pull-request head",
+        "status": "completed", "conclusion": "success",
+    } or normalized[2] != matching[0]):
+        raise ReadinessError("preview checkout attribution lacks its supported preceding execution")
+    return matching[0]
+
+
+def _checkout_identity(log: bytes, repository: str, head: str) -> None:
+    """Interpret output ONLY after attribution by the provider's step endpoint.
+
+    The pinned checkout action at this step executes before PR source code.
+    Group strings, wall-clock intervals and whole-job text grant no authority.
+    """
+    if not isinstance(log, bytes) or not 0 < len(log) <= QUALIFICATION_LOG_LIMIT:
+        raise ReadinessError("attributed checkout log is unavailable or exceeds its bound")
+    try:
+        text = log.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ReadinessError("attributed checkout log is malformed") from exc
+    lines = []
+    for line in text.splitlines():
+        match = re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z (.*)", line)
+        if match is None:
+            raise ReadinessError("attributed checkout log contains ambiguous records")
+        lines.append(match[1])
+    repositories = [line.removeprefix("Syncing repository: ") for line in lines
+                    if line.startswith("Syncing repository: ")]
+    checkouts = [(i, match[1]) for i, line in enumerate(lines)
+                 if (match := re.fullmatch(
+                     r"\[command\]/usr/bin/git checkout --progress --force ([0-9a-f]{40})", line
+                 ))]
+    observations = [i for i, line in enumerate(lines)
+                    if line == "[command]/usr/bin/git log -1 --format=%H"]
+    if (
+        repositories != [repository] or len(checkouts) != 1 or checkouts[0][1] != head
+        or len(observations) != 1 or observations[0] <= checkouts[0][0]
+        or observations[0] + 1 >= len(lines) or lines[observations[0] + 1] != head
+    ):
+        raise ReadinessError("attributed checkout did not establish the tested source")
+
+
+def _preview_execution_contract(
+    client: GitHubClient, repository: str, pr: int, head: str, preview: Mapping[str, Any]
+) -> None:
+    """Fail closed at the unsupported standalone-preview provenance boundary.
+
+    Neither the run's displayed head nor its mutable PR association identifies
+    its merge-ref workflow revision. The current standalone workflow has no
+    reusable execution reference. Resolving today's ref or parsing printed SHA/
+    grouping text would manufacture the missing binding. A separately reviewed
+    provider/evidence capability is needed before this route can qualify.
+    """
+    _verified_workflow_run(
+        client, repository, pr, head, run_id=preview["run_id"],
+        run_attempt=preview["run_attempt"], workflow=PREVIEW_WORKFLOW,
+        event="pull_request", context="preview execution contract",
+        allow_postmerge_empty_association=True,
+    )
+    raise ReadinessError(PREVIEW_EXECUTION_LIMIT)
+
+
+def _tested_jobs(
+    client: GitHubClient,
+    repository: str,
+    head: str,
+    run_id: int,
+    run_attempt: int,
+    *,
+    preview: bool = False,
+    check_id: int | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        raw_payload = client.get_json(
+            f"/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs",
+            {"per_page": 100},
+        )
+    except ReadinessError as exc:
+        raise ReadinessError("tested-source job listing is unavailable") from exc
+    payload = _mapping(raw_payload, "tested-source jobs")
+    jobs = payload.get("jobs")
+    if (
+        not isinstance(jobs, list)
+        or type(payload.get("total_count")) is not int
+        or payload["total_count"] != len(jobs)
+        or len(jobs) > 9
+    ):
+        raise ReadinessError("tested-source job listing is incomplete")
+    proofs = []
+    api_url = client.api_url
+    for raw in jobs:
+        job = _mapping(raw, "tested-source job")
+        identity = _positive_int(job.get("id"), "tested-source job id")
+        name = _metadata_string(job.get("name"), "tested-source job name")
+        if (
+            type(job.get("run_id")) is not int
+            or type(job.get("run_attempt")) is not int
+            or job.get("run_id") != run_id
+            or job.get("run_attempt") != run_attempt
+            or job.get("head_sha") != head
+            or job.get("status") != "completed"
+        ):
+            raise ReadinessError("tested-source job provenance is stale or pending")
+        proof = {
+            "id": identity,
+            "name": name,
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "conclusion": job.get("conclusion"),
+            "checked_out_sha": None,
+            "log_sha256": None,
+            "checkout_step_number": None,
+            "checkout_step_name": None,
+        }
+        aggregate = not preview and name == REQUIRED_CHECK
+        if job.get("conclusion") == "success" and not aggregate:
+            step = _checkout_step(job, preview=preview)
+            try:
+                log = client.download(
+                    f"{api_url}/repos/{repository}/actions/jobs/{identity}"
+                    f"/steps/{step['number'] - 1}/logs",
+                    QUALIFICATION_LOG_LIMIT,
+                )
+            except ReadinessError as exc:
+                raise ReadinessError(
+                    f"provider-attributed checkout output is unavailable for run {run_id} "
+                    f"attempt {run_attempt}, job {identity}, step {step['number']}; "
+                    "whole-job logs and printable markers cannot substitute"
+                ) from exc
+            _checkout_identity(log, repository, head)
+            final_job = _mapping(
+                client.get_json(f"/repos/{repository}/actions/jobs/{identity}"),
+                "verified checkout job",
+            )
+            if any(final_job.get(key) != job.get(key) for key in (
+                "id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion"
+            )) or _checkout_step(final_job, preview=preview) != step:
+                raise ReadinessError("checkout execution identity changed during qualification")
+            proof.update(
+                checked_out_sha=head, log_sha256=f"sha256:{hashlib.sha256(log).hexdigest()}",
+                checkout_step_number=step["number"], checkout_step_name=step["name"],
+            )
+        proofs.append(proof)
+    proofs.sort(key=lambda job: job["name"])
+    return _qualification_jobs(
+        proofs,
+        head=head,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        preview=preview,
+        check_id=check_id,
+    )
+
+
+def _current_source_qualification(
+    client: GitHubClient,
+    repository: str,
+    pr: int,
+    head: str,
+    base: str,
+    merge_sha: str,
+    check: Mapping[str, Any],
+    preview: Mapping[str, Any] | None,
+    reviews: Mapping[str, Any],
+    source_run: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse head evidence only after exact combined-tree and checkout proof.
+
+    There is no filename/ancestry-based exception. A different combined tree
+    needs an updated source head with applicable tests, preview and review.
+    """
+    _sha(base, "current qualification base")
+    merged = _source_commit(client, repository, merge_sha)
+    parents = merged.get("parents")
+    if not isinstance(parents, list) or [
+        item.get("sha") if isinstance(item, Mapping) else None for item in parents
+    ] != [base, head]:
+        raise ReadinessError("current combined source has different head/base parents")
+    tested = _source_commit(client, repository, head)
+    if _source_tree(merged) != _source_tree(tested):
+        raise ReadinessError(
+            "combined source is not the tested head tree; incorporate the target base "
+            "and obtain applicable source review, CI and preview"
+        )
+    blobs = _workflow_tree_blobs(client, repository, _source_tree(tested))
+    references = source_run.get("referenced_workflows")
+    if not isinstance(references, list) or len(references) != 1:
+        raise ReadinessError("source CI lacks its immutable reusable-workflow identity")
+    reference = _mapping(references[0], "source reusable workflow")
+    workflow_commit = _sha(reference.get("sha"), "source workflow commit")
+    if (
+        reference.get("path") != f"{repository}/{SOURCE_TEST_WORKFLOW}@{workflow_commit}"
+        or reference.get("ref") != f"refs/pull/{pr}/merge"
+    ):
+        raise ReadinessError("source CI reusable-workflow provenance differs")
+    # A local reusable workflow uses the caller's same immutable commit. Verify
+    # that executing contract, not merely files at the displayed run head.
+    workflow_tree = _source_tree(_source_commit(client, repository, workflow_commit))
+    _workflow_tree_blobs(client, repository, workflow_tree)
+    run_id, attempt = check["workflow_run_id"], check["workflow_run_attempt"]
+    _newest_qualifying_workflow_run(
+        client,
+        repository,
+        pr,
+        head,
+        expected_run_id=run_id,
+        expected_run_attempt=attempt,
+        workflow=SOURCE_WORKFLOW,
+        event="pull_request",
+        context="combined-source validation",
+    )
+    if preview is not None:
+        _preview_execution_contract(client, repository, pr, head, preview)
+    source_jobs = _tested_jobs(
+        client, repository, head, run_id, attempt, check_id=check["check_run_id"]
+    )
+    final_run = _verified_workflow_run(
+        client,
+        repository,
+        pr,
+        head,
+        run_id=run_id,
+        run_attempt=attempt,
+        workflow=SOURCE_WORKFLOW,
+        event="pull_request",
+        context="final tested-source run",
+        allow_postmerge_empty_association=True,
+    )
+    if final_run.get("head_sha") != head or final_run.get("referenced_workflows") != references:
+        raise ReadinessError("tested-source run changed head during qualification")
+    return {
+        "schema_version": 2,
+        "repository": repository,
+        "pr": pr,
+        "base_sha": base,
+        "head_sha": head,
+        "merge_tree_sha": _source_tree(merged),
+        "tested_source_sha": head,
+        "tested_tree_sha": _source_tree(tested),
+        "workflow_commit_sha": workflow_commit,
+        "workflow_blobs": blobs,
+        "source_jobs": source_jobs,
+        "preview_jobs": None,
+        "review_digest": reviews["digest"],
+    }
+
+
 def collect(
     client: GitHubClient,
     repository: str,
@@ -1393,6 +2382,7 @@ def collect(
         head_repository = initial["head"]["repo"]["full_name"]
         base_ref = initial["base"]["ref"]
         base_repository = initial["base"]["repo"]["full_name"]
+        base_sha = initial["base"].get("sha")
     except (KeyError, TypeError) as exc:
         raise ReadinessError("pull-request branch metadata is malformed") from exc
     if initial.get("number") != pr:
@@ -1410,6 +2400,13 @@ def collect(
         raise ReadinessError("pull-request head is not in the protected repository")
     if base_repository != repository or base_ref != PROTECTED_BASE_REF:
         raise ReadinessError("pull request does not target the protected main branch")
+    merge_sha = _sha(initial.get("merge_commit_sha"), "current combined-source commit")
+    if merged:
+        parents = _source_commit(client, repository, merge_sha).get("parents")
+        if not isinstance(parents, list) or len(parents) != 2:
+            raise ReadinessError("combined-source commit is not a two-parent merge")
+        base_sha = _mapping(parents[0], "combined-source first parent").get("sha")
+    _sha(base_sha, "current target-base commit")
     labels = _labels(initial, "pull-request")
     if "codex" not in labels:
         raise ReadinessError("pull request is not marked as a Codex change")
@@ -1453,6 +2450,7 @@ def collect(
         "app_slug": app.get("slug") if isinstance(app, Mapping) else None,
         "run_id": int(run_match.group(1)) if run_match else None,
     }
+    check_workflow_run: Mapping[str, Any] = {}
     if run_match:
         check_workflow_run = _mapping(
             client.get_json(
@@ -1633,7 +2631,16 @@ def collect(
             "archive_sha256": evidence_sha256,
         }
 
-    review_evidence = _review_evidence(client, repository, pr)
+    review_evidence = _review_evidence(
+        client, repository, pr, head_sha=head, base_sha=base_sha
+    )
+    _validate_review_evidence(review_evidence, repository=repository, pr=pr, head_sha=head)
+    source_qualification = _current_source_qualification(
+        client, repository, pr, head, base_sha, merge_sha,
+        {"check_run_id": check["id"], "workflow_run_id": check["run_id"],
+         "workflow_run_attempt": check["run_attempt"]},
+        preview, review_evidence, check_workflow_run,
+    )
     final = _mapping(client.get_json(pr_path), "final pull request")
     try:
         observed_head = final["head"]["sha"]
@@ -1656,6 +2663,10 @@ def collect(
         raise ReadinessError("pull-request head repository changed during validation")
     if final_base_ref != base_ref or final_base_repository != base_repository:
         raise ReadinessError("pull-request base changed during readiness validation")
+    if not merged and final["base"].get("sha") != base_sha:
+        raise ReadinessError("target base changed during readiness validation")
+    if final.get("merge_commit_sha") != merge_sha:
+        raise ReadinessError("combined-source commit changed during readiness validation")
     final_labels = _labels(final, "final pull-request")
     if merged:
         if "ready-for-work" not in final_labels or "needs-codex" in final_labels:
@@ -1668,7 +2679,7 @@ def collect(
         ] + ["needs-codex"]
     return validate(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "repository": repository,
             "pr": pr,
             "base_ref": base_ref,
@@ -1680,6 +2691,7 @@ def collect(
             "checks": [check],
             "preview": preview,
             "review_evidence": review_evidence,
+            "source_qualification": source_qualification,
         }
     )
 
@@ -2395,11 +3407,22 @@ def verify_published(
     ):
         raise ReadinessError("feature validation check provenance does not match")
 
-    current_reviews = _review_evidence(client, repository, pr)
-    current_reviews = _validate_review_evidence(current_reviews)
+    current_reviews = _review_evidence(
+        client, repository, pr, head_sha=feature_head, base_sha=parent_shas[0]
+    )
+    current_reviews = _validate_review_evidence(
+        current_reviews, repository=repository, pr=pr, head_sha=feature_head
+    )
     if current_reviews != record["review_evidence"]:
         raise ReadinessError("current review evidence differs from the readiness record")
     _verify_retained_preview(client, repository, pr, feature_head, record)
+    if record["schema_version"] == 3:
+        qualification = _current_source_qualification(
+            client, repository, pr, feature_head, parent_shas[0], merge_source_commit,
+            check, record["preview"], current_reviews, source_run,
+        )
+        if qualification != record["source_qualification"]:
+            raise ReadinessError("current source qualification differs from the published record")
 
     final_pr = _merged_feature_pr(
         client.get_json(pr_path),
