@@ -186,6 +186,7 @@ class GraphAPI(DispositionAPI, common.PublishedGitHub):
         self.combined = graph.corrected if corrected else graph.safe
         self.workflow_commit = graph.corrected if corrected else graph.old_ci
         super().__init__()
+        self.changed_files = ["feature.py", "feature_test.py"]
         self.final_sha = self.head
         self.base_sha = graph.b if corrected else graph.p
         self.merged, self.pointer_count = False, 0
@@ -418,7 +419,7 @@ class SourceQualificationTests(unittest.TestCase):
         ):
             self.collect(client)
 
-    def test_material_advance_after_current_source_tests_review_and_preview(self):
+    def test_material_advance_after_current_source_tests_and_review_with_no_ui_scope(self):
         client = self.client(corrected=True)
         original_pass = deepcopy(client.reviews[1])
         record = self.collect(client)
@@ -434,6 +435,7 @@ class SourceQualificationTests(unittest.TestCase):
             if kind == "review":
                 client.reviews.pop()
             elif kind == "preview":
+                client.changed_files = ["templates/index.html"]
                 client.preview_head = self.graph.h
             else:
                 client.ci_head = self.graph.h
@@ -580,8 +582,8 @@ class SourceQualificationTests(unittest.TestCase):
         with self.assertRaises(readiness.ReadinessError):
             self.verify(client)
 
-    def test_published_qualification_rechecks_logs_and_current_preview_jobs(self):
-        for kind in ("logs", "source", "preview"):
+    def test_published_qualification_rechecks_attributed_logs_and_current_source_jobs(self):
+        for kind in ("logs", "source"):
             client = self.client()
             client.publish(self.collect(client))
             if kind == "logs":

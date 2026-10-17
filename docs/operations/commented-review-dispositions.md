@@ -94,12 +94,14 @@ lineage and production gates remain independently required.
 ## Historical resolution and current qualification
 
 A disposition resolves named findings in its recorded source; it does not qualify
-that source against a different combined tree. New collections emit a schema-v3
-readiness record with `source_qualification`, binding the repository, PR, current
-head and target base, combined Git tree, tested source/tree, executing workflow
-commit/blobs, source and applicable preview job IDs/run attempts/checkout-log
-hashes, and review snapshot digest. The existing schema-v2 bot pointer still
-authenticates the entire record through its artifact digest.
+that source against a different combined tree. Eligible new collections emit a
+schema-v3 readiness record with `source_qualification` version 2, binding the
+repository, PR, current head and target base, combined Git tree, tested source/tree,
+executing source workflow commit/blobs, source job/run attempts and provider-attributed
+checkout step numbers/names/log hashes, and review snapshot digest. The existing
+schema-v2 bot pointer still authenticates the entire record through its artifact
+digest. The current standalone preview route cannot yet supply the execution
+provenance required below, so an applicable preview blocks new qualification.
 
 The bounded reuse rule is **exact Git-tree equality**. The collector reads
 GitHub's current test merge, verifies its two parents are the current base and
@@ -121,28 +123,58 @@ arbitrary behavioral equivalence. Missing/conflicting test merges, unavailable
 Git metadata, unsupported workflow contracts or missing checkout logs also block.
 
 The workflow's displayed run head is not checkout proof. The collector verifies
-the immutable reusable-workflow execution commit reported by GitHub and the
-supported source/preview workflow Git blobs from its trusted checkout. It requires
-the complete successful CI job profile, successful checkout steps and bounded job
-logs containing the actual checkout and `git log -1 --format=%H` identity. Required
-CI and applicable preview jobs must have checked out the tested source. The
-supported docs-only profile may skip all five runtime lanes together; its
-configuration/release/required jobs still run. Changed or unavailable workflow
-contracts require fresh supported qualification, not inferred compatibility.
+the immutable reusable source-workflow execution commit reported by GitHub and
+the supported workflow Git blobs from its trusted checkout. For each executing
+source lane it matches the checkout's exact ordinal/name to that verified contract,
+reads the output from GitHub's job/step-specific log endpoint, and rechecks the
+job/run/attempt/source and successful step metadata after reading. The endpoint's
+zero-based step position is the verified metadata ordinal minus one. Only the
+attributed pinned checkout action's output may establish the repository, checkout
+and `git log -1 --format=%H` identity. Whole-job substrings, timestamps or printed
+grouping markers never authenticate the producing step. Missing, conflicting,
+ambiguous or unavailable attributed output blocks; there is no whole-log fallback.
+See GitHub's [step-log API](https://docs.github.com/en/rest/actions/workflow-jobs#download-step-logs-for-a-workflow-run-job).
+The supported docs-only profile may skip all five runtime lanes together; its
+configuration/release/required jobs still run. The trusted scope classifier alone
+determines preview exemption; a caller cannot exempt a UI path by omitting proof.
+
+**Current evidence limitation:** the captured hosted source/preview jobs return
+HTTP 404 from that step-specific endpoint. Their downloadable run archives contain
+aggregate job output and system logs, without separately attributed checkout logs.
+The genuine checkout text is useful parser-format evidence, but cannot qualify a
+new v3 record without attribution. Synthetic endpoint responses in tests prove
+the supported positive contract; they do not establish that the live service
+currently provides it.
+
+Independently, the standalone Preview UI run exposes no immutable executing caller
+revision. `referenced_workflows` is empty, and its system log names a mutable PR
+merge ref. Older runs' PR-association head/base objects may reflect current PR
+state. Neither those associations, today's YAML/ref, the source-CI revision, a
+displayed run head, a job name nor a valid artifact digest establishes the older
+preview's executing workflow or its browser-generation steps. Current v3 preview
+qualification therefore fails closed explicitly, including after a changed
+workflow is restored. It cannot issue or revalidate a preview-bearing v3 record.
+No workflow definition, permission or attestation platform is added by this change.
+A separately reviewed provider/evidence capability is needed to restore that
+positive route. Ordinary Preview UI generation/CI remains useful validation, but
+a green run does not remove this qualification limit. Legitimate no-UI and retained
+historical-v2 routes retain their supported behavior.
 
 Every new collection, including repeated collection at the same changed base,
 performs these checks. It rereads head/base/test-merge identity before returning.
 The unchanged publication workflow compares complete records before upload and
 before its final signal; the new fields participate in those comparisons. A label
 is still asynchronous metadata, not independent qualification. Later published
-verification rechecks the real merge's first parent/tree, actual CI/preview jobs
-and log hashes, workflow contract and live review evidence against the artifact.
+verification rechecks the real merge's first parent/tree, actual source jobs and
+attributed step-log hashes, workflow contract and live review evidence against the
+artifact. Unsupported preview execution cannot be grandfathered into that record.
 A different base at merge time cannot reuse the prior record. Later main movement
 does not rebind an already verified historical merge to a different target.
 
 Retained schema-v2 records without dispositions remain readable for existing
 historical release consumers. They cannot carry this new route or its qualification
-fields; all current collection emits v3. Removing qualification from v3 or
+fields; all eligible current collection emits v3. The older qualification version
+1 used whole-job text and is not accepted as current proof. Removing qualification from v3 or
 downgrading a disposition-bearing record to v2 is rejected. Metadata-only static
 validation checks record bindings; live collector/published verification supplies
 the GitHub provenance. Retained records do not make missing live evidence fresh.

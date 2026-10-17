@@ -81,6 +81,28 @@ SOURCE_JOB_NAMES = (
     "Required source checks",
 )
 PREVIEW_JOB_NAME = "Fake-data desktop and mobile preview"
+SOURCE_CHECKOUT_STEPS = {
+    f"Source test suite / {name}": (2, checkout)
+    for name, checkout in zip(
+        SOURCE_JOB_NAMES[:-1],
+        (
+            "Check out source",
+            "Check out complete source history",
+            "Check out the exact source with immutable history",
+            "Check out source",
+            "Check out exact source",
+            "Check out source",
+            "Check out source and immutable baseline wheels",
+            "Check out source",
+        ),
+        strict=True,
+    )
+}
+PREVIEW_EXECUTION_LIMIT = (
+    "preview qualification is blocked: standalone GitHub run metadata does not "
+    "authenticate its immutable executing workflow; current PR refs, source CI, "
+    "job output and artifact digests cannot replace that evidence"
+)
 
 
 class ReadinessError(ValueError):
@@ -1093,6 +1115,8 @@ def _qualification_jobs(
                 "conclusion",
                 "checked_out_sha",
                 "log_sha256",
+                "checkout_step_number",
+                "checkout_step_name",
             },
             "tested-source job",
         )
@@ -1113,11 +1137,22 @@ def _qualification_jobs(
                 "tested-source aggregate does not match the required check"
             )
         if aggregate or job["conclusion"] == "skipped":
-            if job["checked_out_sha"] is not None or job["log_sha256"] is not None:
+            if any(job[key] is not None for key in (
+                "checked_out_sha", "log_sha256", "checkout_step_number", "checkout_step_name"
+            )):
                 raise ReadinessError("untested jobs cannot claim a checked-out source")
         elif job["conclusion"] == "success":
             if job["checked_out_sha"] != head:
                 raise ReadinessError("qualifying job tested another source")
+            expected_step = (
+                (3, "Check out the selected source")
+                if preview else SOURCE_CHECKOUT_STEPS[job["name"]]
+            )
+            if (
+                type(job["checkout_step_number"]) is not int
+                or (job["checkout_step_number"], job["checkout_step_name"]) != expected_step
+            ):
+                raise ReadinessError("checkout evidence belongs to another execution step")
             _sha256(job["log_sha256"])
         else:
             raise ReadinessError("tested-source job is failed or pending")
@@ -1170,7 +1205,7 @@ def _qualified_record(record: dict[str, Any], source: Mapping[str, Any]) -> dict
     )
     if (
         type(qualification["schema_version"]) is not int
-        or qualification["schema_version"] != 1
+        or qualification["schema_version"] != 2
     ):
         raise ReadinessError("unsupported current-source qualification schema")
     for key in (
@@ -1205,7 +1240,7 @@ def _qualified_record(record: dict[str, Any], source: Mapping[str, Any]) -> dict
     for disposition in record["review_evidence"].get("commented_dispositions", []):
         if disposition["ancestry"]["current_base_sha"] != qualification["base_sha"]:
             raise ReadinessError("disposition and qualification target different bases")
-    source_jobs = _qualification_jobs(
+    _qualification_jobs(
         qualification["source_jobs"],
         head=record["head_sha"],
         run_id=record["required_check"]["workflow_run_id"],
@@ -1213,15 +1248,10 @@ def _qualified_record(record: dict[str, Any], source: Mapping[str, Any]) -> dict
         check_id=record["required_check"]["check_run_id"],
     )
     if record["preview_required"]:
-        preview_jobs = _qualification_jobs(
-            qualification["preview_jobs"],
-            head=record["head_sha"],
-            preview=True,
-            run_id=record["preview"]["run_id"],
-            run_attempt=record["preview"]["run_attempt"],
-        )
-        if {job["id"] for job in source_jobs} & {job["id"] for job in preview_jobs}:
-            raise ReadinessError("source and preview qualification reuse a job identity")
+        # No schema-v3 preview record has been issued by the active policy. The
+        # existing standalone workflow exposes no authenticated immutable caller
+        # revision. Do not grandfather a checkout-only preview into publication.
+        raise ReadinessError(PREVIEW_EXECUTION_LIMIT)
     elif qualification["preview_jobs"] is not None:
         raise ReadinessError("current-source qualification has unexpected preview jobs")
     return {**record, "source_qualification": dict(qualification)}
@@ -1240,7 +1270,7 @@ class GitHubClient:
         self.headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "X-GitHub-Api-Version": "2026-03-10",
             "User-Agent": "buh-readiness-v1",
         }
 
@@ -2035,6 +2065,102 @@ def _workflow_tree_blobs(
     return result
 
 
+def _checkout_step(job: Mapping[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    """Match the step to the already verified, immutable workflow contract.
+
+    A display name or printable group is not a provenance boundary. GitHub's
+    job/step API supplies the execution identity; only its step-specific log
+    endpoint may supply output attributed to that execution.
+    """
+    expected = (
+        (3, "Check out the selected source")
+        if preview else SOURCE_CHECKOUT_STEPS.get(job.get("name"))
+    )
+    steps = job.get("steps")
+    if expected is None or not isinstance(steps, list):
+        raise ReadinessError("qualifying job lacks its supported checkout execution")
+    normalized = []
+    for raw in steps:
+        step = _mapping(raw, "job execution step")
+        number = _positive_int(step.get("number"), "job execution step number")
+        name = _metadata_string(step.get("name"), "job execution step name")
+        normalized.append({"number": number, "name": name,
+                           "status": step.get("status"), "conclusion": step.get("conclusion")})
+    numbers = [step["number"] for step in normalized]
+    if numbers != sorted(set(numbers)):
+        raise ReadinessError("job execution steps are ambiguous or out of order")
+    matching = [step for step in normalized if step["number"] == expected[0]]
+    if (
+        len(matching) != 1 or matching[0]["name"] != expected[1]
+        or matching[0]["status"] != "completed"
+        or matching[0]["conclusion"] != "success"
+        or not normalized or normalized[0] != {
+            "number": 1, "name": "Set up job", "status": "completed", "conclusion": "success"
+        }
+    ):
+        raise ReadinessError("qualifying job lacks its successful supported checkout")
+    if preview and (len(normalized) < 3 or normalized[1] != {
+        "number": 2, "name": "Resolve the exact open pull-request head",
+        "status": "completed", "conclusion": "success",
+    } or normalized[2] != matching[0]):
+        raise ReadinessError("preview checkout attribution lacks its supported preceding execution")
+    return matching[0]
+
+
+def _checkout_identity(log: bytes, repository: str, head: str) -> None:
+    """Interpret output ONLY after attribution by the provider's step endpoint.
+
+    The pinned checkout action at this step executes before PR source code.
+    Group strings, wall-clock intervals and whole-job text grant no authority.
+    """
+    if not isinstance(log, bytes) or not 0 < len(log) <= QUALIFICATION_LOG_LIMIT:
+        raise ReadinessError("attributed checkout log is unavailable or exceeds its bound")
+    try:
+        text = log.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ReadinessError("attributed checkout log is malformed") from exc
+    lines = []
+    for line in text.splitlines():
+        match = re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z (.*)", line)
+        if match is None:
+            raise ReadinessError("attributed checkout log contains ambiguous records")
+        lines.append(match[1])
+    repositories = [line.removeprefix("Syncing repository: ") for line in lines
+                    if line.startswith("Syncing repository: ")]
+    checkouts = [(i, match[1]) for i, line in enumerate(lines)
+                 if (match := re.fullmatch(
+                     r"\[command\]/usr/bin/git checkout --progress --force ([0-9a-f]{40})", line
+                 ))]
+    observations = [i for i, line in enumerate(lines)
+                    if line == "[command]/usr/bin/git log -1 --format=%H"]
+    if (
+        repositories != [repository] or len(checkouts) != 1 or checkouts[0][1] != head
+        or len(observations) != 1 or observations[0] <= checkouts[0][0]
+        or observations[0] + 1 >= len(lines) or lines[observations[0] + 1] != head
+    ):
+        raise ReadinessError("attributed checkout did not establish the tested source")
+
+
+def _preview_execution_contract(
+    client: GitHubClient, repository: str, pr: int, head: str, preview: Mapping[str, Any]
+) -> None:
+    """Fail closed at the unsupported standalone-preview provenance boundary.
+
+    Neither the run's displayed head nor its mutable PR association identifies
+    its merge-ref workflow revision. The current standalone workflow has no
+    reusable execution reference. Resolving today's ref or parsing printed SHA/
+    grouping text would manufacture the missing binding. A separately reviewed
+    provider/evidence capability is needed before this route can qualify.
+    """
+    _verified_workflow_run(
+        client, repository, pr, head, run_id=preview["run_id"],
+        run_attempt=preview["run_attempt"], workflow=PREVIEW_WORKFLOW,
+        event="pull_request", context="preview execution contract",
+        allow_postmerge_empty_association=True,
+    )
+    raise ReadinessError(PREVIEW_EXECUTION_LIMIT)
+
+
 def _tested_jobs(
     client: GitHubClient,
     repository: str,
@@ -2084,53 +2210,36 @@ def _tested_jobs(
             "conclusion": job.get("conclusion"),
             "checked_out_sha": None,
             "log_sha256": None,
+            "checkout_step_number": None,
+            "checkout_step_name": None,
         }
         aggregate = not preview and name == REQUIRED_CHECK
         if job.get("conclusion") == "success" and not aggregate:
-            steps = job.get("steps")
-            if not isinstance(steps, list) or not any(
-                isinstance(step, Mapping)
-                and isinstance(step.get("name"), str)
-                and step["name"].startswith("Check out")
-                and step.get("status") == "completed"
-                and step.get("conclusion") == "success"
-                for step in steps
-            ):
-                raise ReadinessError("qualifying job lacks a successful checkout")
+            step = _checkout_step(job, preview=preview)
             try:
                 log = client.download(
-                    f"{api_url}/repos/{repository}/actions/jobs/{identity}/logs",
+                    f"{api_url}/repos/{repository}/actions/jobs/{identity}"
+                    f"/steps/{step['number'] - 1}/logs",
                     QUALIFICATION_LOG_LIMIT,
                 )
             except ReadinessError as exc:
                 raise ReadinessError(
-                    f"qualifying checkout log is unavailable for job {identity}"
+                    f"provider-attributed checkout output is unavailable for run {run_id} "
+                    f"attempt {run_attempt}, job {identity}, step {step['number']}; "
+                    "whole-job logs and printable markers cannot substitute"
                 ) from exc
-            if not isinstance(log, bytes) or not 0 < len(log) <= QUALIFICATION_LOG_LIMIT:
-                raise ReadinessError(
-                    "qualifying checkout log is unavailable or exceeds its bound"
-                )
-            try:
-                text = log.decode("utf-8-sig")
-            except UnicodeError as exc:
-                raise ReadinessError("qualifying checkout log is malformed") from exc
-            checkouts = re.findall(
-                r"\[command\][^\n]*?git checkout --progress --force ([0-9a-f]{40})(?:\s|$)",
-                text,
+            _checkout_identity(log, repository, head)
+            final_job = _mapping(
+                client.get_json(f"/repos/{repository}/actions/jobs/{identity}"),
+                "verified checkout job",
             )
-            observed = re.findall(
-                r"\[command\][^\n]*?git log -1 --format=%H[^\n]*\n[^\n]*?\b([0-9a-f]{40})\s*(?:\n|$)",
-                text,
-            )
-            if (
-                not checkouts
-                or set(checkouts) != {head}
-                or not observed
-                or set(observed) != {head}
-            ):
-                raise ReadinessError("qualifying job did not check out the tested source")
+            if any(final_job.get(key) != job.get(key) for key in (
+                "id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion"
+            )) or _checkout_step(final_job, preview=preview) != step:
+                raise ReadinessError("checkout execution identity changed during qualification")
             proof.update(
-                checked_out_sha=head, log_sha256=f"sha256:{hashlib.sha256(log).hexdigest()}"
+                checked_out_sha=head, log_sha256=f"sha256:{hashlib.sha256(log).hexdigest()}",
+                checkout_step_number=step["number"], checkout_step_name=step["name"],
             )
         proofs.append(proof)
     proofs.sort(key=lambda job: job["name"])
@@ -2201,19 +2310,11 @@ def _current_source_qualification(
         event="pull_request",
         context="combined-source validation",
     )
+    if preview is not None:
+        _preview_execution_contract(client, repository, pr, head, preview)
     source_jobs = _tested_jobs(
         client, repository, head, run_id, attempt, check_id=check["check_run_id"]
     )
-    preview_jobs = None
-    if preview is not None:
-        preview_jobs = _tested_jobs(
-            client,
-            repository,
-            head,
-            preview["run_id"],
-            preview["run_attempt"],
-            preview=True,
-        )
     final_run = _verified_workflow_run(
         client,
         repository,
@@ -2226,10 +2327,10 @@ def _current_source_qualification(
         context="final tested-source run",
         allow_postmerge_empty_association=True,
     )
-    if final_run.get("head_sha") != head:
+    if final_run.get("head_sha") != head or final_run.get("referenced_workflows") != references:
         raise ReadinessError("tested-source run changed head during qualification")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "repository": repository,
         "pr": pr,
         "base_sha": base,
@@ -2240,7 +2341,7 @@ def _current_source_qualification(
         "workflow_commit_sha": workflow_commit,
         "workflow_blobs": blobs,
         "source_jobs": source_jobs,
-        "preview_jobs": preview_jobs,
+        "preview_jobs": None,
         "review_digest": reviews["digest"],
     }
 

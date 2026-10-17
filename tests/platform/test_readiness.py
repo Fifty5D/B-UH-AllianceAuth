@@ -16,6 +16,7 @@ from ops.readiness import (
     SOURCE_TEST_WORKFLOW,
     PREVIEW_JOB_NAME,
     _trusted_workflow_blobs,
+    SOURCE_CHECKOUT_STEPS,
     _manifest_from_zip,
     _verify_preview_zip,
     collect,
@@ -40,6 +41,7 @@ WORKFLOW_SHA = "c" * 40
 
 def checkout_log(head=SHA):
     return (
+        f"2026-10-16T00:59:59Z Syncing repository: {REPOSITORY}\n"
         f"2026-10-16T01:00:00Z [command]/usr/bin/git checkout --progress --force {head}\n"
         "2026-10-16T01:00:01Z [command]/usr/bin/git log -1 --format=%H\n"
         f"2026-10-16T01:00:02Z {head}\n"
@@ -64,8 +66,11 @@ def qualified_jobs(run_id, attempt, head=SHA, preview=False):
                 "status": "completed",
                 "conclusion": "success",
                 "steps": [
+                    {"number": 1, "name": "Set up job", "status": "completed", "conclusion": "success"},
+                    *([{"number": 2, "name": "Resolve the exact open pull-request head", "status": "completed", "conclusion": "success"}] if preview else []),
                     {
-                        "name": "Check out source",
+                        "number": 3 if preview else 2,
+                        "name": "Check out the selected source" if preview else SOURCE_CHECKOUT_STEPS.get(name, (2, "Require every source-test lane"))[1],
                         "status": "completed",
                         "conclusion": "success",
                     }
@@ -520,7 +525,7 @@ class FakeGitHub:
         self.tested_tree_sha = "1" * 40
         self.labels = ["codex", "needs-codex"]
         self.ignored_preview_run = False
-        self.changed_files = [".github/workflows/ui-preview.yml"]
+        self.changed_files = ["apps/example/models.py"]
         self.reported_changed_files = None
         self.reviews = []
         self.review_threads = []
@@ -561,6 +566,12 @@ class FakeGitHub:
     def get_json(self, path, query=None):
         if path.endswith(f"/pulls/{PR}"):
             return self._pr()
+        if "/actions/jobs/" in path:
+            identity = int(path.rsplit("/", 1)[1])
+            jobs = qualified_jobs(99, 1)["jobs"] + qualified_jobs(RUN_ID, RUN_ATTEMPT, preview=True)["jobs"]
+            return next(job for job in jobs if job["id"] == identity)
+        if path.endswith(f"/actions/runs/{RUN_ID}"):
+            return self.get_json("/actions/workflows/ui-preview.yml/runs")["workflow_runs"][0]
         if "/attempts/" in path and path.endswith("/jobs"):
             run_id, attempt = int(path.split("/")[-4]), int(path.split("/")[-2])
             return qualified_jobs(run_id, attempt, preview=run_id == RUN_ID)
@@ -714,6 +725,7 @@ class FakeGitHub:
 class PublishedGitHub(FakeGitHub):
     def __init__(self):
         super().__init__()
+        self.changed_files = [".github/workflows/ui-preview.yml"]
         self.labels = ["codex", "ready-for-work"]
         self.merged = True
         self.merger = "Anthony"
@@ -929,7 +941,8 @@ class CollectionTests(unittest.TestCase):
     def test_collection_selects_and_binds_exact_github_evidence(self):
         result = collect(FakeGitHub(), REPOSITORY, PR, SHA)
         self.assertTrue(result["ready"])
-        self.assertEqual(result["preview"]["run_id"], RUN_ID)
+        self.assertIsNone(result["preview"])
+        self.assertEqual(result["source_qualification"]["schema_version"], 2)
         self.assertRegex(result["review_evidence"]["digest"], r"^sha256:[0-9a-f]{64}$")
 
     def test_changed_file_enumeration_is_complete_and_below_the_api_cap(self):
@@ -1128,17 +1141,18 @@ class CollectionTests(unittest.TestCase):
 
     def test_newest_pending_preview_cannot_hide_behind_old_success(self):
         client = FakeGitHub()
+        client.changed_files = ["templates/index.html"]
         client.run_status = "in_progress"
         client.run_conclusion = None
-        with self.assertRaisesRegex(ReadinessError, "pending"):
+        with self.assertRaisesRegex(ReadinessError, "pending|not successfully completed"):
             collect(client, REPOSITORY, PR, SHA)
 
     def test_newer_deliberate_label_noop_does_not_hide_preview_evidence(self):
         client = FakeGitHub()
+        client.changed_files = ["templates/index.html"]
         client.ignored_preview_run = True
-        result = collect(client, REPOSITORY, PR, SHA)
-        self.assertTrue(result["ready"])
-        self.assertEqual(result["preview"]["run_id"], RUN_ID)
+        with self.assertRaisesRegex(ReadinessError, "immutable executing workflow"):
+            collect(client, REPOSITORY, PR, SHA)
 
     def test_duplicate_authoritative_checks_fail_closed(self):
         client = FakeGitHub()
@@ -1191,6 +1205,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_malformed_preview_pr_association_fails_closed(self):
         client = FakeGitHub()
+        client.changed_files = ["templates/index.html"]
         original = client.get_json
 
         def get_json(path, query=None):
@@ -1222,6 +1237,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_downloaded_manifest_digest_is_verified(self):
         client = FakeGitHub()
+        client.changed_files = ["templates/index.html"]
         client.manifest_digest = "d" * 64
         with self.assertRaisesRegex(ReadinessError, "digest"):
             collect(client, REPOSITORY, PR, SHA)
@@ -1461,6 +1477,7 @@ class PublishedReadinessTests(unittest.TestCase):
 
     def test_first_introduction_mode_directly_attests_exact_head(self):
         client = PublishedGitHub()
+        client.changed_files = ["apps/example/models.py"]
         client.pointer_count = 0
         client.source_run_pull_requests = []
         client.preview_run_pull_requests = []
@@ -1475,7 +1492,7 @@ class PublishedReadinessTests(unittest.TestCase):
         )
         self.assertIsNone(result["readiness"])
         self.assertEqual(result["feature_validation"]["workflow_run_id"], 99)
-        self.assertTrue(result["preview_required"])
+        self.assertFalse(result["preview_required"])
         self.assertRegex(result["review_digest"], r"^sha256:[0-9a-f]{64}$")
 
     def test_first_introduction_is_explicit_narrow_and_non_reusable(self):

@@ -436,6 +436,7 @@ class CommentedDispositionTests(unittest.TestCase):
 
     def test_source_and_preview_gates_remain_required(self):
         client = self.client()
+        client.changed_files = ["templates/index.html"]
         client.run_status = "in_progress"
         with self.assertRaises(ReadinessError):
             self.collect(client)
@@ -455,6 +456,7 @@ class CommentedDispositionTests(unittest.TestCase):
     def test_published_verification_rejects_missing_altered_and_revoked_disposition(self):
         def published():
             client = seed(PublishedDispositionGitHub())
+            client.changed_files = ["apps/example/models.py"]
             add_disposition(client)
             client.readiness_record = collect(client, REPOSITORY, PR, SHA, merged=True)
             client.rebuild_readiness_artifact()
