@@ -312,6 +312,13 @@ class GraphAPI(DispositionAPI, common.PublishedGitHub):
         if url.endswith("/logs"):
             if self.unavailable == "logs":
                 raise readiness.ReadinessError("synthetic checkout logs unavailable")
+            if "/attempts/" in url:
+                path = url.removeprefix(self.api_url).removesuffix("/logs") + "/jobs"
+                run_id = int(url.split("/")[-4])
+                return common.checkout_archive(
+                    self.get_json(path)["jobs"],
+                    self.graph.logs[self.preview_head if run_id == common.RUN_ID else self.ci_head],
+                )
             identity = int(url.split("/")[-2])
             return self.graph.logs[self.preview_head if identity >= 2000 else self.ci_head]
         return super().download(url, maximum)
@@ -456,7 +463,7 @@ class SourceQualificationTests(unittest.TestCase):
         for mutation in mutations:
             client = self.client()
             client.mutation = lambda path, p, m=mutation: (
-                m(p) if "/runs/99/attempts/" in path else None
+                m(p) if "/runs/99/attempts/" in path and path.endswith("/jobs") else None
             )
             with (
                 self.subTest(mutation=mutation),
@@ -592,7 +599,7 @@ class SourceQualificationTests(unittest.TestCase):
                 run_id = 99 if kind == "source" else common.RUN_ID
                 client.mutation = lambda path, value, r=run_id: (
                     value["jobs"][0].update(conclusion="failure")
-                    if f"/runs/{r}/attempts/" in path
+                    if f"/runs/{r}/attempts/" in path and path.endswith("/jobs")
                     else None
                 )
             with self.subTest(kind=kind), self.assertRaises(readiness.ReadinessError):

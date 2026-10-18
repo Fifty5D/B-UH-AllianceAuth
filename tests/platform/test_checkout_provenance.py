@@ -1,4 +1,4 @@
-"""Refuse unattributed output and unsupported standalone preview execution."""
+"""Native run-attempt archive attribution and immutable preview execution."""
 
 import json
 import unittest
@@ -11,7 +11,7 @@ from tests.platform import test_readiness as fixture
 from tests.platform.test_source_qualification import GitGraph, GraphAPI
 
 
-class StepAPI(fixture.FakeGitHub):
+class ArchiveAPI(fixture.FakeGitHub):
     def __init__(self):
         super().__init__()
         self.downloads = []
@@ -19,19 +19,25 @@ class StepAPI(fixture.FakeGitHub):
         self.whole_log = fixture.checkout_log()
         self.step_unavailable = False
         self.job_change = None
+        self.preview_execution_unavailable = False
 
     def download(self, url, maximum):
         self.downloads.append(url)
-        if "/steps/" in url:
+        if "/attempts/" in url and url.endswith("/logs"):
             if self.step_unavailable:
-                raise readiness.ReadinessError("provider step API unavailable")
-            return self.step_log
+                raise readiness.ReadinessError("provider native archive unavailable")
+            path = url.removeprefix(self.api_url).removesuffix("/logs") + "/jobs"
+            return fixture.checkout_archive(self.get_json(path)["jobs"], self.step_log, self.whole_log)
+        if "/steps/" in url:
+            raise AssertionError("The unavailable step endpoint must not be used")
         if "/jobs/" in url and url.endswith("/logs"):
             return self.whole_log
         return super().download(url, maximum)
 
     def get_json(self, path, query=None):
         value = super().get_json(path, query)
+        if self.preview_execution_unavailable and "/workflows/ui-preview.yml/runs" in path:
+            value["workflow_runs"][0]["referenced_workflows"] = []
         if "/actions/jobs/" in path and self.job_change:
             self.job_change(value)
         return value
@@ -42,7 +48,7 @@ class CheckoutProvenanceTests(unittest.TestCase):
         client = readiness.GitHubClient("https://api.github.com", "synthetic-token")
         self.assertEqual(client.headers["X-GitHub-Api-Version"], "2022-11-28")
         for path, version in (
-            ("/repos/owner/repo/actions/jobs/123/steps/1/logs", "2026-03-10"),
+            ("/repos/owner/repo/actions/runs/123/attempts/1/logs", "2022-11-28"),
             ("/repos/owner/repo/actions/artifacts/123/zip", "2022-11-28"),
         ):
             opener = mock.Mock()
@@ -69,7 +75,7 @@ class CheckoutProvenanceTests(unittest.TestCase):
             self.assertIsNone(redirected.get_header("Authorization"))
             self.assertEqual(
                 redirected.get_header("Accept"),
-                "text/plain" if "/steps/" in path else "application/zip",
+                "application/zip",
             )
         self.assertEqual(client.headers["X-GitHub-Api-Version"], "2022-11-28")
 
@@ -96,7 +102,7 @@ class CheckoutProvenanceTests(unittest.TestCase):
         )
 
     def test_attributed_no_ui_collection_serialization_and_historical_verification(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         record = self.collect(client)
         self.assertEqual(record, self.collect(client))
         self.assertEqual(readiness.validate(json.loads(json.dumps(record))), record)
@@ -106,14 +112,14 @@ class CheckoutProvenanceTests(unittest.TestCase):
                 self.assertEqual(job["checkout_step_number"], 2)
                 self.assertTrue(job["log_sha256"].startswith("sha256:"))
         self.assertTrue(client.downloads)
-        self.assertTrue(all("/steps/1/logs" in url for url in client.downloads))
+        self.assertTrue(all("/runs/99/attempts/1/logs" in url for url in client.downloads))
         self.assertEqual(
             self.verify(self.published())["attestation_mode"], "premerge-published"
         )
 
     def test_saved_r2_later_or_earlier_output_cannot_replace_missing_step(self):
         for position in ("before", "after", "both"):
-            client = StepAPI()
+            client = ArchiveAPI()
             client.step_log = b""
             printed = (
                 b"2026-10-16T01:10:00Z ##[group]Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n"
@@ -133,23 +139,23 @@ class CheckoutProvenanceTests(unittest.TestCase):
                     ),
                 ):
                     self.collect(client)
-            self.assertTrue(all("/steps/" in u for u in client.downloads))
+            self.assertTrue(all("/attempts/" in u for u in client.downloads))
 
     def test_whole_log_is_irrelevant_when_genuine_attributed_step_exists(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         client.whole_log = fixture.checkout_log(fixture.OTHER_SHA) * 2
         self.assertTrue(self.collect(client)["ready"])
 
     def test_missing_step_api_blocks_even_when_whole_log_looks_complete(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         client.step_unavailable = True
         with self.assertRaisesRegex(
-            readiness.ReadinessError, "whole-job logs.*cannot substitute"
+            readiness.ReadinessError, "native run-attempt checkout archive is unavailable"
         ):
             self.collect(client)
 
     def test_printed_group_and_literal_commands_inside_other_output_are_not_proof(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         client.step_log = fixture.checkout_log().replace(
             b" [command]", b" literal fixture diagnostic: [command]"
         )
@@ -167,14 +173,14 @@ class CheckoutProvenanceTests(unittest.TestCase):
             good + b"unframed arbitrary output\n",
         )
         for log in cases:
-            client = StepAPI()
+            client = ArchiveAPI()
             client.step_log = log
             with self.subTest(log=log), self.assertRaises(readiness.ReadinessError):
                 self.collect(client)
 
     def test_step_name_number_success_and_uniqueness_are_bound(self):
         for kind in ("name", "number", "failure", "duplicate", "missing", "order"):
-            client = StepAPI()
+            client = ArchiveAPI()
             original = client.get_json
 
             def get(path, query=None, kind=kind, original=original):
@@ -206,7 +212,7 @@ class CheckoutProvenanceTests(unittest.TestCase):
             ("head_sha", fixture.OTHER_SHA),
             ("id", 999),
         ):
-            client = StepAPI()
+            client = ArchiveAPI()
             client.job_change = lambda job, f=field, v=value: job.update({f: v})
             with (
                 self.subTest(field=field),
@@ -220,15 +226,16 @@ class CheckoutProvenanceTests(unittest.TestCase):
         client = self.published()
         original = client.download
         client.download = lambda url, bound: (
-            fixture.checkout_log(fixture.OTHER_SHA)
-            if "/steps/" in url
-            else original(url, bound)
+            fixture.checkout_archive(
+                client.get_json(url.removeprefix(client.api_url).removesuffix("/logs") + "/jobs")["jobs"],
+                fixture.checkout_log(fixture.OTHER_SHA),
+            ) if "/attempts/" in url else original(url, bound)
         )
         with self.assertRaisesRegex(readiness.ReadinessError, "did not establish"):
             self.verify(client)
 
     def test_old_whole_log_qualification_and_missing_step_fields_cannot_publish(self):
-        record = self.collect(StepAPI())
+        record = self.collect(ArchiveAPI())
         for kind in ("old-version", "missing-number", "wrong-number", "missing-name"):
             changed = deepcopy(record)
             proof = changed["source_qualification"]
@@ -244,7 +251,7 @@ class CheckoutProvenanceTests(unittest.TestCase):
                 readiness.validate(changed)
 
     def test_preview_checkout_attribution_can_be_verified_without_claiming_workflow(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         jobs = readiness._tested_jobs(
             client,
             fixture.REPOSITORY,
@@ -257,16 +264,17 @@ class CheckoutProvenanceTests(unittest.TestCase):
         self.assertEqual(
             client.downloads,
             [
-                f"https://api.github.com/repos/{fixture.REPOSITORY}/actions/jobs/2001/steps/2/logs"
+                f"https://api.github.com/repos/{fixture.REPOSITORY}/actions/runs/{fixture.RUN_ID}/attempts/{fixture.RUN_ATTEMPT}/logs"
             ],
         )
 
     def test_applicable_preview_without_immutable_execution_identity_blocks(self):
-        client = StepAPI()
+        client = ArchiveAPI()
         client.changed_files = ["templates/index.html"]
+        client.preview_execution_unavailable = True
         for _ in range(3):
             with self.assertRaisesRegex(
-                readiness.ReadinessError, "immutable executing workflow"
+                readiness.ReadinessError, "immutable reusable execution"
             ):
                 self.collect(client)
 
@@ -275,13 +283,14 @@ class CheckoutProvenanceTests(unittest.TestCase):
             (["apps/x/static/x.css"], []),
             (["feature.py"], ["ui-preview"]),
         ):
-            client = StepAPI()
+            client = ArchiveAPI()
             client.changed_files = paths
             client.labels.extend(labels)
+            client.preview_execution_unavailable = True
             with (
                 self.subTest(paths=paths),
                 self.assertRaisesRegex(
-                    readiness.ReadinessError, "immutable executing workflow"
+                    readiness.ReadinessError, "immutable reusable execution"
                 ),
             ):
                 self.collect(client)
@@ -289,20 +298,16 @@ class CheckoutProvenanceTests(unittest.TestCase):
     def test_preview_only_v3_record_is_refused_in_validation_and_published_consumption(
         self,
     ):
-        current = self.collect(StepAPI())
+        current = self.collect(ArchiveAPI())
         client = fixture.PublishedGitHub()
         record = deepcopy(client.readiness_record)
         record["schema_version"] = 3
         record["source_qualification"] = current["source_qualification"]
         client.readiness_record = record
         client.rebuild_readiness_artifact()
-        with self.assertRaisesRegex(
-            readiness.ReadinessError, "immutable executing workflow"
-        ):
+        with self.assertRaises(readiness.ReadinessError):
             readiness.validate(record)
-        with self.assertRaisesRegex(
-            readiness.ReadinessError, "immutable executing workflow"
-        ):
+        with self.assertRaises(readiness.ReadinessError):
             self.verify(client)
 
     def test_historical_v2_preview_remains_readable_without_disposition_route(self):
@@ -340,14 +345,45 @@ class RestoredPreviewTests(unittest.TestCase):
             value = original_get(path, query)
             if path.endswith(f"/actions/runs/{fixture.RUN_ID}"):
                 value["pull_requests"][0]["base"] = {"sha": prior}
+            if "/workflows/ui-preview.yml/runs" in path:
+                value["workflow_runs"][0]["referenced_workflows"] = [{
+                    "path": f"{fixture.REPOSITORY}/{readiness.PREVIEW_TEST_WORKFLOW}@{prior}",
+                    "sha": prior, "ref": f"refs/pull/{fixture.PR}/merge",
+                }]
             return value
 
         client.get_json = get
         for _ in range(3):
             with self.assertRaisesRegex(
-                readiness.ReadinessError, "immutable executing workflow"
+                readiness.ReadinessError, "trusted contract"
             ):
                 readiness.collect(client, fixture.REPOSITORY, fixture.PR, graph.h)
+
+        # A structurally valid published record must recheck the same older
+        # executing contract. Current restored YAML cannot qualify it later.
+        supported = GraphAPI(graph)
+        supported.base_sha, supported.combined = restored, graph.merge(restored, graph.h)
+        supported.changed_files = ["templates/index.html"]
+        record = readiness.collect(supported, fixture.REPOSITORY, fixture.PR, graph.h)
+        self.assertEqual(readiness.validate(json.loads(json.dumps(record))), record)
+        supported.publish(record)
+        supported_get = supported.get_json
+
+        def older_preview(path, query=None):
+            value = supported_get(path, query)
+            if "/workflows/ui-preview.yml/runs" in path:
+                value["workflow_runs"][0]["referenced_workflows"] = [{
+                    "path": f"{fixture.REPOSITORY}/{readiness.PREVIEW_TEST_WORKFLOW}@{prior}",
+                    "sha": prior, "ref": f"refs/pull/{fixture.PR}/merge",
+                }]
+            return value
+
+        supported.get_json = older_preview
+        with self.assertRaisesRegex(readiness.ReadinessError, "trusted contract"):
+            readiness.verify_published(
+                supported, fixture.REPOSITORY, fixture.PR, graph.h, supported.combined,
+                allowed_mergers=["Anthony"],
+            )
 
 
 if __name__ == "__main__":

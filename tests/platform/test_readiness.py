@@ -15,6 +15,10 @@ from ops.readiness import (
     SOURCE_JOB_NAMES,
     SOURCE_TEST_WORKFLOW,
     PREVIEW_JOB_NAME,
+    PREVIEW_TEST_WORKFLOW,
+    SOURCE_IDENTITY_STEPS,
+    PREVIEW_EXECUTION_STEPS,
+    _archive_job_directory,
     _trusted_workflow_blobs,
     SOURCE_CHECKOUT_STEPS,
     _manifest_from_zip,
@@ -73,12 +77,34 @@ def qualified_jobs(run_id, attempt, head=SHA, preview=False):
                         "name": "Check out the selected source" if preview else SOURCE_CHECKOUT_STEPS.get(name, (2, "Require every source-test lane"))[1],
                         "status": "completed",
                         "conclusion": "success",
-                    }
+                    },
+                    *[
+                        {"number": number, "name": step_name, "status": "completed", "conclusion": "success"}
+                        for number, step_name in (
+                            PREVIEW_EXECUTION_STEPS[2:] if preview else
+                            (() if name == REQUIRED_CHECK else (SOURCE_IDENTITY_STEPS[name],))
+                        )
+                    ],
                 ],
             }
             for index, name in enumerate(names)
         ],
     }
+
+
+def checkout_archive(jobs, log=None, whole_log=b"untrusted aggregate output\n"):
+    """Synthetic provider archive, explicitly separate from genuine captures."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index, job in enumerate(jobs):
+            directory = _archive_job_directory(job["name"])
+            archive.writestr(zipfile.ZipInfo(f"{index}_{directory}.txt", (2026,10,16,0,0,0)), whole_log)
+            for step in job["steps"]:
+                checkout = step["name"].startswith("Check out")
+                payload = (log if log is not None else checkout_log(job["head_sha"])) if checkout else b"2026-10-16T01:00:00Z synthetic provider step output\n"
+                member = f"{directory}/{step['number']}_{step['name']}.txt"
+                archive.writestr(zipfile.ZipInfo(member, (2026,10,16,0,0,0)), payload)
+    return output.getvalue()
 
 
 def screenshot_inventory():
@@ -572,6 +598,11 @@ class FakeGitHub:
             return next(job for job in jobs if job["id"] == identity)
         if path.endswith(f"/actions/runs/{RUN_ID}"):
             return self.get_json("/actions/workflows/ui-preview.yml/runs")["workflow_runs"][0]
+        if "/attempts/" in path and not path.endswith("/jobs"):
+            run_id, attempt = int(path.split("/")[-3]), int(path.split("/")[-1])
+            run = self.get_json(f"/repos/{REPOSITORY}/actions/runs/{run_id}")
+            run["run_attempt"] = attempt
+            return run
         if "/attempts/" in path and path.endswith("/jobs"):
             run_id, attempt = int(path.split("/")[-4]), int(path.split("/")[-2])
             return qualified_jobs(run_id, attempt, preview=run_id == RUN_ID)
@@ -641,6 +672,10 @@ class FakeGitHub:
                     "id": RUN_ID,
                     "run_attempt": RUN_ATTEMPT,
                     "path": PREVIEW_WORKFLOW,
+                    "referenced_workflows": [{
+                        "path": f"{REPOSITORY}/{PREVIEW_TEST_WORKFLOW}@{WORKFLOW_SHA}",
+                        "sha": WORKFLOW_SHA, "ref": f"refs/pull/{PR}/merge",
+                    }],
                     "repository": {"full_name": REPOSITORY},
                     "display_title": (
                         f"Preview UI / PR #{PR} / {SHA} / synchronize / none"
@@ -717,6 +752,9 @@ class FakeGitHub:
 
     def download(self, url, maximum):
         self.assert_download_bound = maximum
+        if url.endswith("/logs") and "/attempts/" in url:
+            path = url.removeprefix(self.api_url).removesuffix("/logs") + "/jobs"
+            return checkout_archive(self.get_json(path)["jobs"])
         if url.endswith("/logs"):
             return checkout_log()
         return self.manifest_zip if url.endswith("manifest.zip") else self.evidence_zip
@@ -861,6 +899,10 @@ class PublishedGitHub(FakeGitHub):
         if path.endswith(f"/actions/runs/{RUN_ID}"):
             return {
                 "id": RUN_ID,
+                "referenced_workflows": [{
+                    "path": f"{REPOSITORY}/{PREVIEW_TEST_WORKFLOW}@{WORKFLOW_SHA}",
+                    "sha": WORKFLOW_SHA, "ref": f"refs/pull/{PR}/merge",
+                }],
                 "run_attempt": RUN_ATTEMPT,
                 "path": PREVIEW_WORKFLOW,
                 "event": "pull_request",
@@ -942,7 +984,7 @@ class CollectionTests(unittest.TestCase):
         result = collect(FakeGitHub(), REPOSITORY, PR, SHA)
         self.assertTrue(result["ready"])
         self.assertIsNone(result["preview"])
-        self.assertEqual(result["source_qualification"]["schema_version"], 2)
+        self.assertEqual(result["source_qualification"]["schema_version"], 3)
         self.assertRegex(result["review_evidence"]["digest"], r"^sha256:[0-9a-f]{64}$")
 
     def test_changed_file_enumeration_is_complete_and_below_the_api_cap(self):
@@ -1151,8 +1193,9 @@ class CollectionTests(unittest.TestCase):
         client = FakeGitHub()
         client.changed_files = ["templates/index.html"]
         client.ignored_preview_run = True
-        with self.assertRaisesRegex(ReadinessError, "immutable executing workflow"):
-            collect(client, REPOSITORY, PR, SHA)
+        result = collect(client, REPOSITORY, PR, SHA)
+        self.assertTrue(result["preview_required"])
+        self.assertEqual(result["source_qualification"]["preview_workflow_commit_sha"], WORKFLOW_SHA)
 
     def test_duplicate_authoritative_checks_fail_closed(self):
         client = FakeGitHub()
