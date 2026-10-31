@@ -1,0 +1,3 @@
+app = "memberaudit-autoreg"
+kind = "fix"
+summary = "Recover sticky token-error sections through supported Member Audit tasks after a new matching full-scope authorization, preserving disabled characters and audit history."

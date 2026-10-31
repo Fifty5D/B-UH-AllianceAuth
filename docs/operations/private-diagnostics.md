@@ -87,3 +87,17 @@ ChatGPT GitHub connector. If publication fails, the previous private report
 must be treated as stale; if collection fails, its source freshness/gaps must
 prevent a healthy conclusion. Initial `earliest_retained_log_at` and per-source
 first timestamps, rather than a configured 30-day target, state actual coverage.
+# Publisher storage reserve
+
+The publisher defaults to a 25 GiB free-space reserve. Set
+`BUH_DIAGNOSTICS_PUBLISH_MINIMUM_FREE_GIB=0` in the publishing service environment
+to disable that reserve; integers from 0 through 2048 are accepted. Invalid values
+fail before publication. A positive value guards both staging and hourly exports.
+Zero bypasses both reserve probes. Filesystem failures still fail the run, and the
+last-published cursor advances only after the Git push succeeds. Redaction,
+atomic report/state replacement, shard sizes, and 30-day retention are unchanged.
+Set `BUH_DIAGNOSTICS_COLLECTOR_MINIMUM_FREE_GIB=0` in the collector service to
+disable its separate ingestion reserve. It also accepts integers from 0 through
+2048, defaulting to 25. Vacuuming still requires free working space greater than
+twice the database size, in addition to any configured reserve. Capture budgets,
+redaction and rolling retention remain in effect when either reserve is zero.

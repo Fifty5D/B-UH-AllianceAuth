@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Provide deterministic recovery source packaging from raw Git blobs so Windows checkout line-ending conversion cannot change installed source identity."

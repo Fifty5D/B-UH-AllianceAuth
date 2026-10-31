@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Track bounded host recovery and focused tests for stale syncs while preserving recovered helper provenance."
