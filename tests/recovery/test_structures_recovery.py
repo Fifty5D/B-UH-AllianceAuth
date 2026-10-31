@@ -120,37 +120,64 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[0][-2:], ["--inside", "inspect"])
         self.assertIn("timeout", call.call_args.kwargs)
 
-    def apply_fixture(self, token=None, probe_error=None):
+    def apply_fixture(self, token=None, probe_error=None, probe_mutation=None):
         owner, character, tokens = MagicMock(), MagicMock(), MagicMock()
         owner.pk = 41
+        owner.is_active = True
         owner.corporation.corporation_id = 99
         ownership = character.character_ownership
         ownership.pk = character.character_ownership_id = 123
+        ownership.user_id = 451
+        ownership.character_id = 345
         ownership.owner_hash = "fixture-owner-hash"
+        ownership.character.character_id = 9900041
         ownership.character.corporation_id = 99
         ownership.user.has_perm.return_value = True
         character.is_enabled = False
         character.disabled_reason = recovery.TOKEN_DISABLED_REASON
         owners, characters = MagicMock(), MagicMock()
         owners.objects.get.return_value = owner
+        owners.objects.select_for_update.return_value.select_related.return_value.get.return_value = owner
         characters.objects.select_related.return_value.get.return_value = character
         characters.objects.select_for_update.return_value.get.return_value = character
+        if token is not None:
+            token = types.SimpleNamespace(
+                pk=999,
+                user_id=ownership.user_id,
+                character_owner_hash=ownership.owner_hash,
+                character_id=ownership.character.character_id,
+            )
         tokens.objects.filter.return_value.require_scopes.return_value.require_valid.return_value.first.return_value = token
+        tokens.objects.select_for_update.return_value.filter.return_value.require_scopes.return_value.first.return_value = token
         structures = types.ModuleType("structures")
         structures.providers = MagicMock()
         structures.app_settings = types.SimpleNamespace(STRUCTURES_FEATURE_STARBASES=True)
         structures.tasks = MagicMock()
         if probe_error:
             structures.providers.esi.client.Corporation.GetCorporationsCorporationIdStarbases.side_effect = probe_error
+        if probe_mutation:
+            structures.providers.esi.client.Corporation.GetCorporationsCorporationIdStarbases.return_value.results.side_effect = (
+                lambda **_: probe_mutation(ownership, tokens)
+            )
         database = types.ModuleType("django.db")
         database.transaction = types.SimpleNamespace(atomic=nullcontext)
+        authentication = types.ModuleType("allianceauth.authentication.models")
+        authentication.CharacterOwnership = MagicMock()
+        authentication.CharacterOwnership.objects.select_for_update.return_value.select_related.return_value.get.return_value = ownership
         row = self.row(owner_active=True, character_pk=1)
         with (
             patch.object(
                 recovery, "django_context", return_value=(owners, characters, tokens)
             ),
             patch.object(recovery, "inspect_characters", return_value=[row]),
-            patch.dict("sys.modules", {"structures": structures, "django.db": database}),
+            patch.dict(
+                "sys.modules",
+                {
+                    "structures": structures,
+                    "django.db": database,
+                    "allianceauth.authentication.models": authentication,
+                },
+            ),
         ):
             result = recovery.inside("apply", {"owner_ids": [41]})
         return result, owner, ownership, tokens
@@ -178,6 +205,30 @@ class RecoveryTests(unittest.TestCase):
             "fixture-owner-hash",
         )
         owner.update_is_up.assert_not_called()
+
+    def test_in_place_user_transfer_during_role_probe_stays_disabled(self):
+        def transfer(ownership, _tokens):
+            ownership.user_id += 1
+
+        result, owner, _, _ = self.apply_fixture(token=object(), probe_mutation=transfer)
+        self.assertEqual(result["outcomes"][0]["result"], "authorization_changed")
+        owner.add_character.assert_not_called()
+
+    def test_in_place_owner_hash_change_during_role_probe_stays_disabled(self):
+        def transfer(ownership, _tokens):
+            ownership.owner_hash = "replacement-owner-hash"
+
+        result, owner, _, _ = self.apply_fixture(token=object(), probe_mutation=transfer)
+        self.assertEqual(result["outcomes"][0]["result"], "authorization_changed")
+        owner.add_character.assert_not_called()
+
+    def test_validated_token_deleted_during_role_probe_stays_disabled(self):
+        def delete(_ownership, tokens):
+            tokens.objects.select_for_update.return_value.filter.return_value.require_scopes.return_value.first.return_value = None
+
+        result, owner, _, _ = self.apply_fixture(token=object(), probe_mutation=delete)
+        self.assertEqual(result["outcomes"][0]["result"], "authorization_changed")
+        owner.add_character.assert_not_called()
 
     @unittest.skipUnless(hasattr(recovery.os, "fchmod"), "POSIX-only private modes")
     def test_private_snapshot_is_atomic_and_mode_600(self):

@@ -122,6 +122,22 @@ def django_context():
     return Owner, OwnerCharacter, Token
 
 
+def ownership_authorization(ownership) -> tuple:
+    """Immutable identity that was authorized before contacting ESI."""
+    return (
+        ownership.pk,
+        ownership.user_id,
+        ownership.owner_hash,
+        ownership.character_id,
+        ownership.character.character_id,
+        ownership.character.corporation_id,
+    )
+
+
+def token_authorization(token) -> tuple:
+    return (token.user_id, token.character_owner_hash, token.character_id)
+
+
 def inspect_characters(Owner, Token) -> list[dict]:
     output = []
     for owner in Owner.objects.select_related("corporation").order_by("pk"):
@@ -213,6 +229,7 @@ def inside(action: str, request: dict) -> dict:
         raise ValueError("Unsupported inner action")
     from structures import providers, app_settings, tasks
     from django.db import transaction
+    from allianceauth.authentication.models import CharacterOwnership
 
     outcomes = []
     for owner_id in request["owner_ids"]:
@@ -239,6 +256,13 @@ def inside(action: str, request: dict) -> dict:
             "character_ownership__character", "character_ownership__user"
         ).get(pk=row["character_pk"])
         ownership = character.character_ownership
+        validated_ownership = ownership_authorization(ownership)
+        validated_corporation_id = owner.corporation.corporation_id
+        expected_token_authorization = (
+            validated_ownership[1],
+            validated_ownership[2],
+            validated_ownership[4],
+        )
         try:
             # This is the upstream validity/refresh API. It may delete unusable
             # expired token rows; the host snapshot was saved before this step.
@@ -255,6 +279,10 @@ def inside(action: str, request: dict) -> dict:
             if token is None:
                 outcomes.append({"owner_id": owner_id, "result": "needs_reauthorization"})
                 continue
+            if token_authorization(token) != expected_token_authorization:
+                outcomes.append({"owner_id": owner_id, "result": "authorization_changed"})
+                continue
+            validated_token_pk = token.pk
             # Director/CEO check is a read-only ESI request and stores no data.
             # A 403 is reported and leaves the disabled character unchanged.
             if app_settings.STRUCTURES_FEATURE_STARBASES:
@@ -266,6 +294,11 @@ def inside(action: str, request: dict) -> dict:
                     corporation_id=owner.corporation.corporation_id, token=token
                 ).results(use_etag=False)
             with transaction.atomic():
+                owner = (
+                    Owner.objects.select_for_update()
+                    .select_related("corporation")
+                    .get(pk=owner_id)
+                )
                 locked = OwnerCharacter.objects.select_for_update().get(pk=character.pk)
                 if locked.is_enabled or locked.disabled_reason != TOKEN_DISABLED_REASON:
                     outcomes.append(
@@ -273,14 +306,45 @@ def inside(action: str, request: dict) -> dict:
                     )
                     continue
                 # Re-check ownership and permission immediately before enabling.
-                if locked.character_ownership_id != ownership.pk:
+                if locked.character_ownership_id != validated_ownership[0]:
                     outcomes.append({"owner_id": owner_id, "result": "ownership_changed"})
                     continue
-                ownership.refresh_from_db()
-                ownership.character.refresh_from_db()
+                # Lock and reload the actual ownership row. A user or owner hash
+                # may change in place while the network probe is outstanding.
+                ownership = (
+                    CharacterOwnership.objects.select_for_update()
+                    .select_related("character", "user")
+                    .get(pk=locked.character_ownership_id)
+                )
                 if (
-                    ownership.character.corporation_id != owner.corporation.corporation_id
+                    ownership_authorization(ownership) != validated_ownership
+                    or not owner.is_active
+                    or owner.corporation.corporation_id != validated_corporation_id
+                    or ownership.character.corporation_id
+                    != owner.corporation.corporation_id
                     or not ownership.user.has_perm("structures.add_structure_owner")
+                ):
+                    outcomes.append(
+                        {"owner_id": owner_id, "result": "authorization_changed"}
+                    )
+                    continue
+                # Validate the same token row under lock without refreshing in
+                # this transaction. Deleted, transferred or scope-revoked tokens
+                # must not enable a character using an earlier successful probe.
+                locked_token = (
+                    Token.objects.select_for_update()
+                    .filter(
+                        pk=validated_token_pk,
+                        user_id=ownership.user_id,
+                        character_id=ownership.character.character_id,
+                        character_owner_hash=ownership.owner_hash,
+                    )
+                    .require_scopes(Owner.esi_scopes())
+                    .first()
+                )
+                if (
+                    locked_token is None
+                    or token_authorization(locked_token) != expected_token_authorization
                 ):
                     outcomes.append(
                         {"owner_id": owner_id, "result": "authorization_changed"}
