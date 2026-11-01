@@ -205,6 +205,15 @@ export function registerThemeChecks(capture: boolean) {
             const directory = join(process.env.BUH_PREVIEW_OUTPUT_DIR || "preview-output", "themes", theme.tag, viewport);
             mkdirSync(directory, {recursive: true});
             await page.screenshot({path: join(directory, `${app}.png`), fullPage: true, animations: "disabled"});
+            if (app === "vps") {
+              // Auth scrolls its content inside .nav-padding, so a document
+              // screenshot can leave both storage cards below the mobile fold.
+              const storage = page.locator('section[aria-labelledby="vh-storage-heading"]');
+              await storage.scrollIntoViewIfNeeded();
+              await expect(page.locator("article:has(#vh-disk)")).toBeInViewport({ratio: 1});
+              await expect(page.locator("article:has(#vh-data-disk)")).toBeInViewport({ratio: 1});
+              await storage.screenshot({path: join(directory, "vps-storage.png"), animations: "disabled"});
+            }
           }
           await checkStickyHeaders(page, root);
           if (capture && (app === "moon-tax" || app === "structure-operations")) {
