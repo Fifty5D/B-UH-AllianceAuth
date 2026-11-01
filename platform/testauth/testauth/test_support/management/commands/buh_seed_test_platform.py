@@ -94,6 +94,9 @@ class Command(BaseCommand):
         director.user_permissions.add(
             *Permission.objects.filter(content_type__app_label="buh_max_history")
         )
+        director.user_permissions.add(
+            *Permission.objects.filter(content_type__app_label="buh_vps_health")
+        )
         member_permissions = all_tax_permissions.filter(
             codename__in=(
                 "view_moon_tax",

@@ -33,6 +33,18 @@ MAX_REQUEST_BYTES = 64 * 1024
 ACTION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 PERCENT_RE = re.compile(r"[^0-9.+-]")
 ENV_COUNT_RE = re.compile(r"(?m)^BUH_AUTH_WORKER_COUNT=.*$")
+MOUNTINFO_PATH = Path("/proc/self/mountinfo")
+FILESYSTEMS = (
+    ("system", "System disk", "/"),
+    ("data", "Auth data", "/srv/buh-data"),
+)
+FILESYSTEM_BYTE_FIELDS = (
+    "total_bytes",
+    "used_bytes",
+    "free_bytes",
+    "available_bytes",
+    "percent",
+)
 
 AUTH_RESTART_SERVICES = (
     "allianceauth_gunicorn",
@@ -183,6 +195,95 @@ def read_network() -> tuple[float, float]:
     return round(rx_rate, 2), round(tx_rate, 2)
 
 
+def read_filesystems() -> list[dict]:
+    """Read only the two canonical filesystems, never Docker or bind aliases."""
+    mounts = {}
+    try:
+        for line in MOUNTINFO_PATH.read_text(encoding="utf-8").splitlines():
+            before, separator, _after = line.partition(" - ")
+            fields = before.split()
+            if not separator or len(fields) < 6:
+                continue
+            mountpoint = re.sub(
+                r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[4]
+            )
+            mounts.setdefault(mountpoint, set()).add(fields[2])
+    except OSError:
+        mounts = None
+
+    result = []
+    seen_devices = set()
+    seen_stat_devices = set()
+    try:
+        system_device = os.stat("/").st_dev
+    except OSError:
+        system_device = None
+    for identifier, label, mountpoint in FILESYSTEMS:
+        row = {
+            "id": identifier,
+            "label": label,
+            "mountpoint": mountpoint,
+            "available": False,
+            "status": "unavailable",
+            **dict.fromkeys(FILESYSTEM_BYTE_FIELDS),
+        }
+        try:
+            if mounts is None:
+                result.append(row)
+                continue
+            if mountpoint not in mounts:
+                row["status"] = "not_mounted"
+                result.append(row)
+                continue
+            descriptor = os.open(mountpoint, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                device = os.fstat(descriptor).st_dev
+                device_number = f"{os.major(device)}:{os.minor(device)}"
+                # An open directory keeps statvfs tied to the checked device
+                # even if its mount disappears during this collection.
+                if device_number not in mounts[mountpoint]:
+                    result.append(row)
+                    continue
+                if (
+                    device in seen_stat_devices
+                    or device_number in seen_devices
+                    or identifier != "system"
+                    and device == system_device
+                ):
+                    row["status"] = "duplicate"
+                    result.append(row)
+                    continue
+                seen_stat_devices.add(device)
+                seen_devices.add(device_number)
+                value = os.fstatvfs(descriptor)
+                if os.stat(mountpoint).st_dev != device:
+                    result.append(row)
+                    continue
+            finally:
+                os.close(descriptor)
+            total = value.f_blocks * value.f_frsize
+            free = value.f_bfree * value.f_frsize
+            available = value.f_bavail * value.f_frsize
+            if total <= 0 or not 0 <= available <= free <= total:
+                result.append(row)
+                continue
+            used = total - free
+            row.update(
+                available=True,
+                status="mounted",
+                total_bytes=total,
+                used_bytes=used,
+                free_bytes=free,
+                available_bytes=available,
+                percent=round(100 * used / total, 2),
+            )
+        except (OSError, ValueError, AttributeError):
+            # A failed additional-volume stat must not erase CPU/root metrics.
+            pass
+        result.append(row)
+    return result
+
+
 def host_metrics() -> dict:
     cpu, cpu_count = read_cpu()
     memory = read_memory()
@@ -200,6 +301,7 @@ def host_metrics() -> dict:
         "disk_total_bytes": disk.total,
         "disk_used_bytes": disk.used,
         "disk_percent": round(100 * disk.used / disk.total, 2) if disk.total else 0,
+        "filesystems": read_filesystems(),
         "network_rx_bytes_per_second": rx_rate,
         "network_tx_bytes_per_second": tx_rate,
         "uptime_seconds": round(uptime),
@@ -272,9 +374,7 @@ def docker_metrics() -> tuple[dict, dict]:
         healthy = (
             running
             and health.lower() != "unhealthy"
-            and not re.search(
-                r"restarting|exited|dead|unhealthy", status, re.IGNORECASE
-            )
+            and not re.search(r"restarting|exited|dead|unhealthy", status, re.IGNORECASE)
         )
         stats = stats_by_name.get(name, {})
         containers.append(
@@ -381,9 +481,7 @@ def read_action(action_id: str) -> dict | None:
     if not ACTION_ID_RE.fullmatch(action_id):
         return None
     try:
-        return json.loads(
-            (ACTIONS_DIR / f"{action_id}.json").read_text(encoding="utf-8")
-        )
+        return json.loads((ACTIONS_DIR / f"{action_id}.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -422,7 +520,7 @@ def parse_json_output(raw: str, fallback):
             return fallback
         decoder = json.JSONDecoder()
         try:
-            value, _end = decoder.raw_decode(raw[min(starts):])
+            value, _end = decoder.raw_decode(raw[min(starts) :])
             return value
         except json.JSONDecodeError:
             return fallback
@@ -517,7 +615,9 @@ def python_package_updates() -> dict:
     ]
     errors = []
     if installed_result.returncode != 0:
-        errors.append("Could not inventory Auth Python packages: " + installed_result.stdout[-1000:])
+        errors.append(
+            "Could not inventory Auth Python packages: " + installed_result.stdout[-1000:]
+        )
     if outdated_result.returncode != 0:
         errors.append("PyPI update check failed: " + outdated_result.stdout[-1000:])
     return {
@@ -589,7 +689,9 @@ def docker_image_updates() -> dict:
         return {
             "images": [],
             "count": 0,
-            "errors": ["Docker Compose image inventory failed: " + config_result.stdout[-1200:]],
+            "errors": [
+                "Docker Compose image inventory failed: " + config_result.stdout[-1200:]
+            ],
         }
     config = parse_json_output(config_result.stdout, {})
     services = config.get("services", {}) if isinstance(config, dict) else {}
@@ -630,13 +732,21 @@ def docker_image_updates() -> dict:
         if remote_result.returncode == 0:
             remote_digest = remote_result.stdout.strip().strip('"')
         else:
-            fallback = run(["docker", "manifest", "inspect", "--verbose", image], timeout=120)
-            payload = parse_json_output(fallback.stdout, {}) if fallback.returncode == 0 else {}
+            fallback = run(
+                ["docker", "manifest", "inspect", "--verbose", image], timeout=120
+            )
+            payload = (
+                parse_json_output(fallback.stdout, {}) if fallback.returncode == 0 else {}
+            )
             if isinstance(payload, dict):
                 remote_digest = str((payload.get("Descriptor") or {}).get("digest") or "")
             if not remote_digest:
-                errors.append(f"Could not check registry digest for {image}: {(remote_result.stdout or fallback.stdout)[-600:]}")
-        update_available = bool(remote_digest and local_digests and remote_digest not in local_digests)
+                errors.append(
+                    f"Could not check registry digest for {image}: {(remote_result.stdout or fallback.stdout)[-600:]}"
+                )
+        update_available = bool(
+            remote_digest and local_digests and remote_digest not in local_digests
+        )
         images.append(
             {
                 "image": image[:300],
@@ -702,9 +812,7 @@ def perform_action(action: dict) -> None:
     try:
         if action["action"] == "restart_auth":
             result = compose("restart", *restart_service_names(), timeout=180)
-            success_message = (
-                "Alliance Auth application services restarted successfully."
-            )
+            success_message = "Alliance Auth application services restarted successfully."
         elif action["action"] == "set_workers":
             count = int(action["worker_count"])
             if not 1 <= count <= 8:
@@ -725,16 +833,13 @@ def perform_action(action: dict) -> None:
             result = subprocess.CompletedProcess([], 0, stdout="")
             total = action["result"]["summary"]["total_updates"]
             errors = action["result"]["summary"]["errors"]
-            success_message = (
-                f"Update scan completed: {total} update(s) found"
-                + (f" with {errors} check warning(s)." if errors else ".")
+            success_message = f"Update scan completed: {total} update(s) found" + (
+                f" with {errors} check warning(s)." if errors else "."
             )
         else:
             raise RuntimeError("Unsupported action.")
         if result.returncode != 0:
-            raise RuntimeError(
-                result.stdout.strip()[-2000:] or "Docker Compose failed."
-            )
+            raise RuntimeError(result.stdout.strip()[-2000:] or "Docker Compose failed.")
         action["status"] = "succeeded"
         action["message"] = success_message
     except Exception as exc:  # noqa: BLE001 - every action outcome must be persisted
@@ -871,9 +976,7 @@ def prepare_runtime() -> None:
             continue
         if action.get("status") in {"accepted", "running"}:
             action["status"] = "failed"
-            action["message"] = (
-                "The host agent restarted before this operation completed."
-            )
+            action["message"] = "The host agent restarted before this operation completed."
             action["finished_at"] = utc_now()
             atomic_json(path, action)
     if SOCKET_PATH.exists() or SOCKET_PATH.is_socket():

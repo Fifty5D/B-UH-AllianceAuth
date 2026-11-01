@@ -33,17 +33,38 @@
         <div class="vh-metric-grid">
             <article class="vh-metric" data-metric="cpu"><div class="vh-metric-top"><span>CPU</span><i class="fa-solid fa-microchip"></i></div><strong id="vh-cpu">—</strong><div class="vh-meter"><i id="vh-cpu-bar"></i></div><small id="vh-cpu-detail">—</small></article>
             <article class="vh-metric" data-metric="memory"><div class="vh-metric-top"><span>Memory</span><i class="fa-solid fa-memory"></i></div><strong id="vh-memory">—</strong><div class="vh-meter"><i id="vh-memory-bar"></i></div><small id="vh-memory-detail">—</small></article>
-            <article class="vh-metric" data-metric="disk"><div class="vh-metric-top"><span>Disk</span><i class="fa-solid fa-hard-drive"></i></div><strong id="vh-disk">—</strong><div class="vh-meter"><i id="vh-disk-bar"></i></div><small id="vh-disk-detail">—</small></article>
             <article class="vh-metric" data-metric="load"><div class="vh-metric-top"><span>Load average</span><i class="fa-solid fa-wave-square"></i></div><strong id="vh-load">—</strong><div class="vh-load-steps"><i></i><i></i><i></i></div><small id="vh-load-detail">1 / 5 / 15 minute</small></article>
             <article class="vh-metric" data-metric="network"><div class="vh-metric-top"><span>Network</span><i class="fa-solid fa-arrow-right-arrow-left"></i></div><strong id="vh-network">—</strong><small id="vh-network-detail">Receive / transmit</small></article>
             {% if permissions.view_task_queue %}<article class="vh-metric" data-metric="queue"><div class="vh-metric-top"><span>Task queue</span><i class="fa-solid fa-list-check"></i></div><strong id="vh-queue">—</strong><small id="vh-queue-detail">Waiting for workers</small></article>{% endif %}
         </div>
     </section>
 
+    <section class="vh-section" aria-labelledby="vh-storage-heading">
+        <div class="vh-section-heading"><div><p class="vh-kicker">Disk space</p><h2 id="vh-storage-heading">Storage</h2></div></div>
+        <div class="vh-storage-grid">
+            <article class="vh-metric vh-storage-metric" data-metric="disk">
+                <div class="vh-metric-top"><span>System disk</span><i class="fa-solid fa-hard-drive"></i></div>
+                <p class="vh-storage-purpose">Operating system and other files</p>
+                <strong id="vh-disk">—</strong>
+                <div class="vh-meter"><i id="vh-disk-bar"></i></div>
+                <small id="vh-disk-detail">Waiting for storage reading</small>
+                <small id="vh-disk-free">—</small>
+            </article>
+            <article class="vh-metric vh-storage-metric" data-metric="data-disk">
+                <div class="vh-metric-top"><span>Auth data</span><i class="fa-solid fa-database"></i></div>
+                <p class="vh-storage-purpose">Database and history archive</p>
+                <strong id="vh-data-disk">—</strong>
+                <div class="vh-meter"><i id="vh-data-disk-bar"></i></div>
+                <small id="vh-data-disk-detail">Waiting for storage reading</small>
+                <small id="vh-data-disk-free">—</small>
+            </article>
+        </div>
+    </section>
+
     <section class="vh-section vh-chart-shell">
         <div class="vh-section-heading vh-chart-heading"><div><p class="vh-kicker">Stored history</p><h2>Pressure over time</h2></div><div class="vh-range" role="group" aria-label="History range"><button type="button" data-hours="1">1h</button><button type="button" data-hours="6">6h</button><button class="active" type="button" data-hours="24">24h</button><button type="button" data-hours="168">7d</button><button type="button" data-hours="720">30d</button></div></div>
-        <div class="vh-chart-wrap"><canvas id="vh-history-chart" height="260" aria-label="CPU, memory, and disk use history"></canvas><div id="vh-chart-empty" class="vh-chart-empty d-none">History will appear after the first scheduled snapshots.</div></div>
-        <div class="vh-chart-legend"><span><i class="cpu"></i>CPU</span><span><i class="memory"></i>Memory</span><span><i class="disk"></i>Disk</span></div>
+        <div class="vh-chart-wrap"><canvas id="vh-history-chart" height="260" aria-label="CPU, memory, and system disk use history"></canvas><div id="vh-chart-empty" class="vh-chart-empty d-none">History will appear after the first scheduled snapshots.</div></div>
+        <div class="vh-chart-legend"><span><i class="cpu"></i>CPU</span><span><i class="memory"></i>Memory</span><span><i class="disk"></i>System disk</span></div>
     </section>
     {% endif %}
 

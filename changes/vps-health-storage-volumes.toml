@@ -1,0 +1,3 @@
+app = "vps-health"
+kind = "feature"
+summary = "Show system and Auth data disk usage separately and monitor sustained pressure on each filesystem."

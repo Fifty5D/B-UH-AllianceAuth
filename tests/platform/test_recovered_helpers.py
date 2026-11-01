@@ -1,4 +1,4 @@
-"""Pin recovered helper provenance and explicitly reviewed Member Audit changes."""
+"""Pin recovered helper provenance and explicitly reviewed source extensions."""
 
 from __future__ import annotations
 
@@ -30,14 +30,56 @@ MEMBERAUDIT_RECOVERY_SOURCE = {
     ),
 }
 
+# The storage extension is additive telemetry, per-volume alerts and presentation.
+# Every unlisted VPS package byte is still compared with the original wheel.
+VPS_STORAGE_SOURCE = {
+    "migrations/0003_metricsnapshot_filesystems.py": (
+        "4a8e2fc72b95ae457f31306259bcdb2e8d512f239b9c16ab6b4bc280a66c6677"
+    ),
+    "models.py": "e0a8711efd83a4cc53358a2b64b327d8b9363fa326fda82efd6a43b1db8d28ff",
+    "services.py": "b5fe65f89888959e875d2652a214962454b351a0a0db8b6bcfccfa7e907cb67b",
+    "static/buh_vps_health/css/vps-health.css": (
+        "600564b455c33962afc8bfcc7afc1e43a3f196540f49c33790a371839a0448ca"
+    ),
+    "static/buh_vps_health/js/vps-health.js": (
+        "4a13b5cbb2332fb8485740776a5b62da96a13223fe05c9dd34c80a16234b3003"
+    ),
+    "templates/buh_vps_health/dashboard.html": (
+        "c64d48f20c8b7b9f3174ff1311ed87de941f481399e724369f4496560a1dd0f9"
+    ),
+    "tests/test_agent.py": (
+        "643dc3c7aa808fa7a3d0827c29c1a6ae950b846e33c246adcba7d91d1a5a9409"
+    ),
+    "tests/test_views_services.py": (
+        "43def7c65f6a64134260b881e06221a77ec7f3fabc37f014fe3c5024aa8e6e3d"
+    ),
+    "views.py": "c3eddbe4d8d9f093ff59ffa75589130eaeaa4fe8dc1650567be11ac20cee55b8",
+}
+
+# The standalone host agent is not shipped in the recovered wheel. Preserve its
+# recovered baseline (Git blob 26dd6a83b6ad35a4207de0ac7170c8f09262d270) and pin
+# the separately reviewed canonical-filesystem telemetry extension in full.
+VPS_RECOVERED_HOST_AGENT_SHA256 = (
+    "a4b37e4e38dd5b683afec767a9bb1c7973e137b87ceeaad7f6e0ed7378ad4f40"
+)
+VPS_STORAGE_HOST_AGENT_SHA256 = (
+    "b8eaf7c76f573a092f38b14950b2f62ed7b1ff9086b259117240227c51711e21"
+)
+
+
+def _source_bytes(path):
+    """Compare Git's LF bytes even when the checkout uses Windows line endings."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
 
 class RecoveredHelperSourceTests(unittest.TestCase):
-    def test_existing_vps_host_agent_source_is_pinned(self):
+    def test_reviewed_vps_host_agent_storage_extension_is_pinned(self):
         agent = ROOT / "apps/vps-health/src/host-agent/buh-vps-health-agent.py"
         self.assertEqual(
-            hashlib.sha256(agent.read_bytes()).hexdigest(),
-            "a4b37e4e38dd5b683afec767a9bb1c7973e137b87ceeaad7f6e0ed7378ad4f40",
+            hashlib.sha256(_source_bytes(agent)).hexdigest(),
+            VPS_STORAGE_HOST_AGENT_SHA256,
         )
+        self.assertNotEqual(VPS_STORAGE_HOST_AGENT_SHA256, VPS_RECOVERED_HOST_AGENT_SHA256)
 
     def test_recovered_source_matches_installed_wheels(self):
         cases = (
@@ -66,7 +108,7 @@ class RecoveredHelperSourceTests(unittest.TestCase):
                         if name.startswith(f"{package}/")
                     }
                 actual = {
-                    str(path.relative_to(source)).replace("\\", "/"): path.read_bytes()
+                    str(path.relative_to(source)).replace("\\", "/"): _source_bytes(path)
                     for path in source.rglob("*")
                     if path.is_file() and "__pycache__" not in path.parts
                 }
@@ -79,7 +121,11 @@ class RecoveredHelperSourceTests(unittest.TestCase):
                         b'__version__ = "<release version>"',
                         files["__init__.py"],
                     )
-                reviewed = MEMBERAUDIT_RECOVERY_SOURCE if app == "memberaudit-autoreg" else {}
+                reviewed = (
+                    MEMBERAUDIT_RECOVERY_SOURCE
+                    if app == "memberaudit-autoreg"
+                    else VPS_STORAGE_SOURCE
+                )
                 additions = set(reviewed) - set(members)
                 self.assertEqual(set(actual), set(members) | additions)
                 for name, content in actual.items():
