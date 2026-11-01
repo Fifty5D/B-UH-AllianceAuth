@@ -240,5 +240,606 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(json.loads(target.read_text()), {"secret": "fixture-only"})
 
 
+class InsideDispatchTests(unittest.TestCase):
+    def dispatch(self, change_hash=False):
+        owner, character, ownership = MagicMock(), MagicMock(), MagicMock()
+        owner.pk = 41
+        owner.is_active = True
+        owner.corporation.corporation_id = 99
+        character.is_enabled = True
+        character.disabled_reason = ""
+        character.character_ownership_id = ownership.pk = 123
+        ownership.user_id = 451
+        ownership.owner_hash = "synthetic-owner"
+        ownership.character_id = 345
+        ownership.character.character_id = 9900041
+        ownership.character.corporation_id = 99
+        ownership.user.has_perm.return_value = True
+        pending = {
+            "character_pk": 1,
+            "authorization_fingerprint": recovery.authorization_fingerprint(ownership),
+        }
+        if change_hash:
+            ownership.owner_hash = "replacement-owner"
+        owners, characters, tokens = MagicMock(), MagicMock(), MagicMock()
+        owners.objects.select_for_update.return_value.select_related.return_value.get.return_value = owner
+        characters.objects.select_for_update.return_value.get.return_value = character
+        tokens.objects.filter.return_value.require_scopes.return_value.exists.return_value = True
+        structures = types.ModuleType("structures")
+        structures.tasks = MagicMock()
+        publish = structures.tasks.update_structures_for_owner.apply_async
+        publish.return_value.id = "synthetic-task"
+        database = types.ModuleType("django.db")
+        database.transaction = types.SimpleNamespace(atomic=nullcontext)
+        authentication = types.ModuleType("allianceauth.authentication.models")
+        authentication.CharacterOwnership = MagicMock()
+        authentication.CharacterOwnership.objects.select_for_update.return_value.select_related.return_value.get.return_value = ownership
+        with patch.dict(
+            "sys.modules",
+            {
+                "structures": structures,
+                "django.db": database,
+                "allianceauth.authentication.models": authentication,
+            },
+        ):
+            result = recovery.dispatch_inside(
+                {
+                    "owner_id": 41,
+                    "pending": pending,
+                    "task": "structures",
+                    "task_id": "synthetic-task",
+                },
+                owners,
+                characters,
+                tokens,
+            )
+        return result, publish
+
+    def test_publish_disables_celery_internal_retries_after_ambiguous_failure(self):
+        result, publish = self.dispatch()
+        self.assertEqual(result["result"], "accepted")
+        publish.assert_called_once_with(args=[41], task_id="synthetic-task", retry=False)
+
+    def test_pending_dispatch_does_not_publish_for_replaced_ownership(self):
+        result, publish = self.dispatch(change_hash=True)
+        self.assertEqual(result["result"], "not_submitted")
+        publish.assert_not_called()
+
+
+class ReconciliationAndHostTests(unittest.TestCase):
+    def row(self, enabled=False):
+        return {
+            "owner_id": 41,
+            "character_pk": 1,
+            "authorization_fingerprint": "synthetic-identity",
+            "matching_token_ids": [101],
+            "owner_active": True,
+            "membership_ok": True,
+            "permission_ok": True,
+            "scope_complete_tokens": 1,
+            "enabled": enabled,
+            "disabled_reason": "" if enabled else recovery.TOKEN_DISABLED_REASON,
+        }
+
+    def args(self, directory, **values):
+        return types.SimpleNamespace(
+            **{
+                "state_dir": Path(directory),
+                "container": "auth",
+                "cooldown_hours": 24,
+                "max_owner_attempts": 2,
+                "action": "recover",
+                "owner_ids": [41],
+                "schedule": True,
+                "alliance_main_owner_id": None,
+                **values,
+            }
+        )
+
+    @staticmethod
+    def write(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    def evidence(self, record, task, decision="not_submitted"):
+        target = record if task == "enablement" else record["tasks"][task]
+        source = MagicMock()
+        source.lstat.return_value = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0
+        )
+        source.read_text.return_value = json.dumps(
+            {
+                "owner_id": 41,
+                "recovery_id": record["recovery_id"],
+                "task_id": record["recovery_id"]
+                if task == "enablement"
+                else target["task_id"],
+                "publication_id": record["enablement_attempt_id"]
+                if task == "enablement"
+                else target["publication_id"],
+                "decision": decision,
+                "evidence": "Synthetic reviewed broker evidence",
+            }
+        )
+        return source
+
+    def test_reconciliation_cannot_reuse_old_review_for_later_publication(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        record = recovery.prepare_dispatch(self.row())
+        target = record["tasks"]["structures"]
+        target.update(state="uncertain", publication_id="first-attempt", attempts=1)
+        pending = {"41": record}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(recovery, "private_write", side_effect=self.write),
+        ):
+            args = self.args(
+                directory,
+                dispatch_task="structures",
+                dispatch_evidence_file=self.evidence(record, "structures"),
+            )
+            recovery.reconcile_dispatch(args, [41], pending, now)
+            self.assertEqual(target["state"], "prepared")
+            target.update(state="uncertain", publication_id="later-attempt", attempts=1)
+            before = json.dumps(pending, sort_keys=True)
+            with self.assertRaises(ValueError):
+                recovery.reconcile_dispatch(args, [41], pending, now)
+            self.assertEqual(json.dumps(pending, sort_keys=True), before)
+
+    def test_reconciliation_rejects_stale_owner_task_and_recovery_evidence(self):
+        record = recovery.prepare_dispatch(self.row())
+        record["tasks"]["structures"].update(state="uncertain", publication_id="attempt")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(recovery, "private_write", side_effect=self.write),
+        ):
+            for field, invalid in [
+                ("owner_id", 42),
+                ("task_id", "other-task"),
+                ("recovery_id", "other-recovery"),
+                ("publication_id", "other-attempt"),
+            ]:
+                source = self.evidence(record, "structures")
+                data = json.loads(source.read_text.return_value)
+                data[field] = invalid
+                source.read_text.return_value = json.dumps(data)
+                args = self.args(
+                    directory, dispatch_task="structures", dispatch_evidence_file=source
+                )
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    recovery.reconcile_dispatch(
+                        args, [41], {"41": record}, dt.datetime.now(dt.timezone.utc)
+                    )
+                self.assertEqual(record["tasks"]["structures"]["state"], "uncertain")
+
+    def test_enablement_reconciliation_requires_current_matching_authorization(self):
+        record = recovery.prepare_dispatch(self.row())
+        record["enablement"] = "uncertain"
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(recovery, "private_write", side_effect=self.write),
+        ):
+            args = self.args(
+                directory,
+                dispatch_task="enablement",
+                dispatch_evidence_file=self.evidence(record, "enablement", "accepted"),
+            )
+            with (
+                patch.object(
+                    recovery,
+                    "container_call",
+                    return_value={
+                        "characters": [
+                            {
+                                **self.row(True),
+                                "authorization_fingerprint": "other-identity",
+                            }
+                        ]
+                    },
+                ),
+                self.assertRaises(ValueError),
+            ):
+                recovery.reconcile_dispatch(
+                    args, [41], {"41": record}, dt.datetime.now(dt.timezone.utc)
+                )
+            self.assertEqual(record["enablement"], "uncertain")
+
+    def test_pending_intent_does_not_bypass_exhausted_authorization_budget(self):
+        row = self.row()
+        record = recovery.prepare_dispatch(row)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(recovery, "private_write", side_effect=self.write),
+            patch("builtins.print"),
+        ):
+            args = self.args(directory)
+            self.write(args.state_dir / "pending-dispatch.json", {"41": record})
+            self.write(
+                args.state_dir / "retry-budget.json",
+                {
+                    "41": {
+                        "authorization_fingerprint": row["authorization_fingerprint"],
+                        "matching_token_ids": [101],
+                        "attempts": 2,
+                    }
+                },
+            )
+            with patch.object(
+                recovery, "container_call", return_value={"characters": [row]}
+            ) as call:
+                self.assertEqual(recovery.run_host(args, MagicMock()), 1)
+            self.assertEqual([entry.args[1] for entry in call.call_args_list], ["inspect"])
+            self.assertEqual(
+                json.loads((args.state_dir / "retry-budget.json").read_text())["41"][
+                    "attempts"
+                ],
+                2,
+            )
+
+    def test_unknown_enablement_result_survives_restart_without_task_publication(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(recovery, "private_write", side_effect=self.write),
+            patch("builtins.print"),
+        ):
+            args = self.args(directory)
+
+            def fail_after_commit(_container, action, _payload):
+                if action == "inspect":
+                    return {"characters": [self.row()]}
+                if action == "snapshot":
+                    return {"synthetic": True}
+                raise RuntimeError("Synthetic lost enablement acknowledgement")
+
+            with (
+                patch.object(recovery, "container_call", side_effect=fail_after_commit),
+                self.assertRaises(RuntimeError),
+            ):
+                recovery.run_host(args, MagicMock())
+            pending = json.loads((args.state_dir / "pending-dispatch.json").read_text())
+            self.assertEqual(pending["41"]["enablement"], "prepared")
+            with patch.object(
+                recovery, "container_call", return_value={"characters": [self.row(True)]}
+            ) as call:
+                self.assertEqual(recovery.run_host(args, MagicMock()), 1)
+            self.assertEqual([entry.args[1] for entry in call.call_args_list], ["inspect"])
+            self.assertEqual(
+                json.loads((args.state_dir / "pending-dispatch.json").read_text())["41"][
+                    "enablement"
+                ],
+                "uncertain",
+            )
+
+
+class BudgetAndStateLockTests(unittest.TestCase):
+    def record(self, **changes):
+        return {
+            "attempts": 2,
+            "last_attempt": "2026-10-31T23:00:00+00:00",
+            "authorization_fingerprint": "synthetic-owner-identity",
+            "matching_token_ids": [101, 102],
+            **changes,
+        }
+
+    def grant(self, **changes):
+        return {
+            "authorization_fingerprint": "synthetic-owner-identity",
+            "matching_token_ids": [101, 102],
+            **changes,
+        }
+
+    def test_genuinely_new_matching_token_resets_exhausted_budget(self):
+        original = self.record()
+        updated = recovery.authorization_budget(
+            original, self.grant(matching_token_ids=[101, 102, 103])
+        )
+        self.assertEqual(updated["attempts"], 0)
+        self.assertFalse(updated.get("last_attempt"))
+        self.assertEqual(original, self.record(), "input budget must not be mutated")
+
+    def test_refreshing_same_token_does_not_reset_budget(self):
+        original = self.record()
+        updated = recovery.authorization_budget(
+            original,
+            self.grant(
+                cached_unexpired_tokens=2,
+                token_created="2026-11-01T00:00:00+00:00",
+            ),
+        )
+        self.assertEqual(updated["attempts"], original["attempts"])
+        self.assertEqual(updated["last_attempt"], original["last_attempt"])
+
+    def test_token_removal_and_reappearance_do_not_reset_budget(self):
+        original = self.record()
+        reduced = recovery.authorization_budget(
+            original, self.grant(matching_token_ids=[101])
+        )
+        restored = recovery.authorization_budget(reduced, self.grant())
+        self.assertEqual(restored["attempts"], original["attempts"])
+        self.assertEqual(restored["last_attempt"], original["last_attempt"])
+
+    def test_identity_change_or_ineligibility_preserves_entire_budget(self):
+        original = self.record()
+        for changes in [
+            {"authorization_fingerprint": "different-owner-identity"},
+            {"membership_ok": False},
+            {"permission_ok": False},
+            {"owner_active": False},
+            {"matching_token_ids": []},
+        ]:
+            with self.subTest(changes=changes):
+                row = self.grant(matching_token_ids=[101, 102, 103])
+                row.update(changes)
+                self.assertEqual(recovery.authorization_budget(original, row), original)
+
+    def test_legacy_budget_adopts_identity_without_erasing_attempts(self):
+        original = {"attempts": 2, "last_attempt": "2026-10-31T23:00:00+00:00"}
+        updated = recovery.authorization_budget(original, self.grant())
+        self.assertEqual(updated["attempts"], original["attempts"])
+        self.assertEqual(updated["last_attempt"], original["last_attempt"])
+        self.assertEqual(updated["authorization_fingerprint"], "synthetic-owner-identity")
+
+    @unittest.skipUnless(__import__("os").name == "posix", "POSIX flock required")
+    def test_state_directory_and_lock_file_symlinks_are_rejected(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            target = directory / "actual"
+            target.mkdir(mode=0o700)
+            alias = directory / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            with self.assertRaises((ValueError, OSError, RuntimeError)):
+                with recovery.state_lock(alias):
+                    self.fail("symlink state directory acquired the recovery lock")
+            target_file = directory / "actual-lock"
+            target_file.write_text("untouched")
+            os.symlink(target_file, target / ".recovery.lock")
+            with self.assertRaises((ValueError, OSError, RuntimeError)):
+                with recovery.state_lock(target):
+                    self.fail("symlink lock file acquired the recovery lock")
+            self.assertEqual(target_file.read_text(), "untouched")
+
+    @unittest.skipUnless(__import__("os").name == "posix", "POSIX flock required")
+    def test_concurrent_host_runs_never_overlap_inside_state_lock(self):
+        import subprocess
+        import sys
+
+        source = """
+import importlib.util, os, pathlib, sys, time
+spec = importlib.util.spec_from_file_location('recovery', sys.argv[1])
+recovery = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recovery)
+state, events = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+for iteration in range(3):
+    with recovery.state_lock(state):
+        with events.open('a') as stream:
+            stream.write('enter\\n')
+            stream.flush()
+        time.sleep(0.025)
+        with events.open('a') as stream:
+            stream.write('exit\\n')
+            stream.flush()
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            events = directory / "events"
+            workers = [
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        source,
+                        str(Path(recovery.__file__).resolve()),
+                        str(directory / "state"),
+                        str(events),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(3)
+            ]
+            try:
+                for worker in workers:
+                    stdout, stderr = worker.communicate(timeout=10)
+                    self.assertEqual(worker.returncode, 0, stderr or stdout)
+            finally:
+                for worker in workers:
+                    if worker.poll() is None:
+                        worker.kill()
+                        worker.communicate()
+            active = 0
+            maximum = 0
+            for event in events.read_text().splitlines():
+                active += 1 if event == "enter" else -1
+                maximum = max(maximum, active)
+                self.assertGreaterEqual(active, 0)
+            self.assertEqual(active, 0)
+            self.assertEqual(maximum, 1)
+            self.assertEqual(len(events.read_text().splitlines()), 18)
+
+
+class DispatchReliabilityTests(unittest.TestCase):
+    now = dt.datetime(2026, 10, 31, 23, 0, tzinfo=dt.timezone.utc)
+
+    def character(self):
+        return {
+            "owner_id": 41,
+            "character_pk": 41,
+            "authorization_fingerprint": "synthetic-identity",
+            "matching_token_ids": [101],
+            "owner_active": True,
+            "membership_ok": True,
+            "permission_ok": True,
+            "scope_complete_tokens": 1,
+            "enabled": True,
+            "disabled_reason": "",
+        }
+
+    def arguments(self, directory):
+        return types.SimpleNamespace(
+            state_dir=Path(directory),
+            container="auth",
+            cooldown_hours=24,
+            max_owner_attempts=2,
+        )
+
+    def pending(self, enablement="confirmed"):
+        record = recovery.prepare_dispatch(self.character())
+        record["enablement"] = enablement
+        return {"41": record}
+
+    @staticmethod
+    def write_json(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def accepted(self, _container, action, payload):
+        self.assertEqual(action, "dispatch")
+        return {
+            "result": "accepted",
+            "task_id": payload["task_id"],
+            "publication_id": payload["pending"]["tasks"][payload["task"]][
+                "publication_id"
+            ],
+        }
+
+    def partial_failure(self, failed_task):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.arguments(temporary)
+            pending = self.pending()
+
+            def submit(container, action, payload):
+                if payload["task"] == failed_task:
+                    raise ConnectionError("synthetic acknowledgement loss")
+                return self.accepted(container, action, payload)
+
+            with (
+                patch.object(recovery, "private_write", side_effect=self.write_json),
+                patch.object(recovery, "container_call", side_effect=submit) as call,
+            ):
+                recovery.dispatch_pending(args, pending, [self.character()], [41], self.now)
+            self.assertEqual(call.call_count, 2)
+            accepted_task = "notifications" if failed_task == "structures" else "structures"
+            persisted = json.loads((args.state_dir / "pending-dispatch.json").read_text())
+            self.assertEqual(persisted["41"]["tasks"][failed_task]["state"], "uncertain")
+            self.assertEqual(persisted["41"]["tasks"][accepted_task]["state"], "accepted")
+            with (
+                patch.object(recovery, "private_write", side_effect=self.write_json),
+                patch.object(recovery, "container_call") as restart,
+            ):
+                recovery.dispatch_pending(
+                    args,
+                    persisted,
+                    [self.character()],
+                    [41],
+                    self.now + dt.timedelta(days=2),
+                )
+            restart.assert_not_called()
+
+    def test_first_submission_exception_keeps_second_accepted_without_replay(self):
+        self.partial_failure("structures")
+
+    def test_second_submission_exception_preserves_first_accepted_without_replay(self):
+        self.partial_failure("notifications")
+
+    def test_crash_after_acknowledgement_does_not_republish_uncertain_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.arguments(temporary)
+            pending = self.pending()
+
+            def interrupted_write(path, value):
+                if (
+                    path.name == "pending-dispatch.json"
+                    and value.get("41", {})
+                    .get("tasks", {})
+                    .get("structures", {})
+                    .get("state")
+                    == "accepted"
+                ):
+                    raise SystemExit("synthetic interruption before durable ack")
+                self.write_json(path, value)
+
+            with (
+                patch.object(recovery, "private_write", side_effect=interrupted_write),
+                patch.object(
+                    recovery, "container_call", side_effect=self.accepted
+                ) as first,
+                self.assertRaises(SystemExit),
+            ):
+                recovery.dispatch_pending(args, pending, [self.character()], [41], self.now)
+            self.assertEqual(first.call_count, 1)
+            persisted = json.loads((args.state_dir / "pending-dispatch.json").read_text())
+            self.assertEqual(persisted["41"]["tasks"]["structures"]["state"], "publishing")
+            with (
+                patch.object(recovery, "private_write", side_effect=self.write_json),
+                patch.object(
+                    recovery, "container_call", side_effect=self.accepted
+                ) as restart,
+            ):
+                recovery.dispatch_pending(
+                    args,
+                    persisted,
+                    [self.character()],
+                    [41],
+                    self.now + dt.timedelta(days=2),
+                )
+            self.assertEqual(
+                [call.args[2]["task"] for call in restart.call_args_list],
+                ["notifications"],
+            )
+            self.assertEqual(persisted["41"]["tasks"]["structures"]["state"], "uncertain")
+            self.assertEqual(persisted["41"]["tasks"]["notifications"]["state"], "accepted")
+
+    def test_prepared_enablement_with_enabled_character_requires_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.arguments(temporary)
+            pending = self.pending(enablement="prepared")
+            with (
+                patch.object(recovery, "private_write", side_effect=self.write_json),
+                patch.object(recovery, "container_call") as submit,
+            ):
+                recovery.dispatch_pending(args, pending, [self.character()], [41], self.now)
+            submit.assert_not_called()
+            persisted = json.loads((args.state_dir / "pending-dispatch.json").read_text())
+            self.assertEqual(persisted["41"]["enablement"], "uncertain")
+            self.assertTrue(
+                all(
+                    task["state"] == "prepared"
+                    for task in persisted["41"]["tasks"].values()
+                )
+            )
+
+    def test_proven_not_submitted_retries_are_bounded_and_preserve_other_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.arguments(temporary)
+            pending = self.pending()
+
+            def submit(container, action, payload):
+                if payload["task"] == "structures":
+                    return {"result": "not_submitted"}
+                return self.accepted(container, action, payload)
+
+            with (
+                patch.object(recovery, "private_write", side_effect=self.write_json),
+                patch.object(recovery, "container_call", side_effect=submit) as call,
+            ):
+                for hours in (0, 1, 25, 50):
+                    recovery.dispatch_pending(
+                        args,
+                        pending,
+                        [self.character()],
+                        [41],
+                        self.now + dt.timedelta(hours=hours),
+                    )
+            self.assertEqual(
+                [item.args[2]["task"] for item in call.call_args_list],
+                ["structures", "notifications", "structures"],
+            )
+            self.assertEqual(pending["41"]["tasks"]["notifications"]["state"], "accepted")
+            self.assertEqual(pending["41"]["tasks"]["structures"]["attempts"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
