@@ -122,6 +122,7 @@ class MetricSnapshot(models.Model):
     disk_percent = models.FloatField(default=0)
     disk_used_bytes = models.PositiveBigIntegerField(default=0)
     disk_total_bytes = models.PositiveBigIntegerField(default=0)
+    filesystems = models.JSONField(default=list, blank=True)
     network_rx_bytes_per_second = models.FloatField(default=0)
     network_tx_bytes_per_second = models.FloatField(default=0)
     container_total = models.PositiveSmallIntegerField(default=0)
