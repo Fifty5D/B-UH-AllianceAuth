@@ -35,7 +35,15 @@ RETENTION = timedelta(days=30)
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_LOG_BATCH_BYTES = 512 * 1024 * 1024
 MAX_MESSAGE_BYTES = 16 * 1024
-MINIMUM_FREE_BYTES = 25 * 1024**3
+def minimum_free_bytes():
+    """Read the collector reserve; zero permits capture without a reserve."""
+    value = os.environ.get("BUH_DIAGNOSTICS_COLLECTOR_MINIMUM_FREE_GIB", "25")
+    if not value.isascii() or not value.isdecimal() or not 0 <= int(value) <= 2048:
+        raise ValueError("BUH_DIAGNOSTICS_COLLECTOR_MINIMUM_FREE_GIB must be an integer from 0 to 2048")
+    return int(value) * 1024**3
+
+
+MINIMUM_FREE_BYTES = minimum_free_bytes()
 STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s(.*)$", re.S)
 ERROR = re.compile(r"(?i)\b(error|exception|traceback|failed|fatal|oom|out of memory)\b")
 VARIABLE = re.compile(r"\b(?:[0-9a-f]{8}-[0-9a-f-]{27,}|\d{4,}|0x[0-9a-f]+)\b", re.I)
@@ -710,7 +718,7 @@ def collect():
             if get_meta(db, "collector:started_at") is None:
                 set_meta(db, "collector:started_at", stamp(end))
                 gap(db, "historical-coverage", "Logs that rotated before collector installation cannot be recovered; verify each source's earliest retained record")
-            if shutil.disk_usage(ROOT).free < MINIMUM_FREE_BYTES:
+            if MINIMUM_FREE_BYTES > 0 and shutil.disk_usage(ROOT).free < MINIMUM_FREE_BYTES:
                 containers = []
                 gap(db, "storage", "Diagnostic log capture paused by free-space guard")
             else:

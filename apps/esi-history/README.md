@@ -82,8 +82,15 @@ and ESI records remain private even when related ESI routes are public.
 
 ## Storage, search and operation
 
-The existing limits are preserved: default 25 GiB free-space reserve and 512 MiB
-capture-response limit. Public failures and partial transfers count toward byte
+The free-space reserve defaults to 25 GiB. Set the singleton archive configuration's
+`minimum_free_gib` to `0` to disable that reserve for passive capture, active ESI
+collection, local business history, and public mirroring. When no singleton exists,
+passive capture uses `BUH_ESI_ARCHIVE_MINIMUM_FREE_GIB` (default `25`). The database
+singleton takes precedence; capture processes refresh their cached value within
+60 seconds. Disabling the reserve does not change capture switches, public mirror
+pause state, the 512 MiB response limit, or other batch, rate and memory limits.
+Actual filesystem write failures still fail capture or leave work retryable.
+Public failures and partial transfers count toward byte
 and attempt budgets. Oversized files stay pending and are reported. Discovery,
 catalog traversal, downloads and active reads have bounded time/work budgets;
 current data, backlog and retries share turns. At a large scale, targets can be

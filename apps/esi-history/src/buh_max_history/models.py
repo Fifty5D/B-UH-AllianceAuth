@@ -51,8 +51,8 @@ class ArchiveConfiguration(models.Model):
     )
     minimum_free_gib = models.PositiveIntegerField(
         default=25,
-        validators=[MinValueValidator(5), MaxValueValidator(2048)],
-        help_text="Archiving pauses before the host drops below this much free space.",
+        validators=[MinValueValidator(0), MaxValueValidator(2048)],
+        help_text="Archiving pauses before the host drops below this much free space. Set to 0 to disable the reserve.",
     )
     public_mirror_enabled = models.BooleanField(default=True)
     discover_public_datasets = models.BooleanField(default=True, db_default=True)

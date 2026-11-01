@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from esi.models import Scope, Token
 
 from app_utils.testdata_factories import UserMainFactory
-from memberaudit.models import Character
+from memberaudit.models import Character, CharacterUpdateStatus
 
 from buh_memberaudit_autoreg.scopes import (
     LOGIN_TOKEN_SCOPES,
@@ -104,6 +104,33 @@ class AutoRegistrationTests(TestCase):
             1,
         )
         update_character.assert_not_called()
+
+    @patch("buh_memberaudit_autoreg.tasks.recover_character_sections.delay")
+    @patch(MODULE_PATH + ".update_character.apply_async")
+    def test_existing_registration_recovers_failed_sections_after_commit(
+        self, update_character, recover_character
+    ):
+        character = Character.objects.create(
+            eve_character=self.user.profile.main_character,
+            is_disabled=False,
+        )
+        failed = CharacterUpdateStatus.objects.create(
+            character=character,
+            section=Character.UpdateSection.SKILLS,
+            has_token_error=True,
+            is_success=False,
+            error_message="Synthetic historical token failure",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.token.scopes.add(*self._scopes(MEMBERAUDIT_ESI_SCOPES))
+            recover_character.assert_not_called()
+
+        recover_character.assert_called_once_with(character.pk)
+        update_character.assert_not_called()
+        failed.refresh_from_db()
+        self.assertTrue(failed.has_token_error)
+        self.assertEqual(failed.error_message, "Synthetic historical token failure")
 
     @patch(MODULE_PATH + ".update_character.apply_async")
     def test_disabled_character_is_reenabled(self, update_character):

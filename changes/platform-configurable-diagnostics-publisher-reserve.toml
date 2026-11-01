@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Make the private diagnostics publisher storage reserve configurable, including zero to disable it, without changing redaction, retention or atomic publishing."

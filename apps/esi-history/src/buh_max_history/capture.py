@@ -272,9 +272,10 @@ def _write_payload(relative: Path, payload: bytes) -> int:
         return target.stat().st_size
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     compressed = gzip.compress(payload, compresslevel=6, mtime=0)
+    minimum_free = int(_configuration()["minimum_free_gib"]) * 1024**3
     if (
-        shutil.disk_usage(target.parent).free - len(compressed)
-        < int(_configuration()["minimum_free_gib"]) * 1024**3
+        minimum_free > 0
+        and shutil.disk_usage(target.parent).free - len(compressed) < minimum_free
     ):
         raise OSError("Archive free-space reserve reached.")
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -319,7 +320,7 @@ def archive_esi_result(operation, data: Any, response: Any, extra=None):
     skipped_reason = ""
     if len(payload) > maximum:
         skipped_reason = "response_too_large"
-    elif _free_bytes() - len(payload) < minimum_free:
+    elif minimum_free > 0 and _free_bytes() - len(payload) < minimum_free:
         skipped_reason = "minimum_free_space_guard"
 
     from .models import ArchiveSnapshot, ArchiveStream
