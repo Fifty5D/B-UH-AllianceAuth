@@ -841,5 +841,108 @@ class DispatchReliabilityTests(unittest.TestCase):
             self.assertEqual(pending["41"]["tasks"]["structures"]["attempts"], 2)
 
 
+class DurableStatePublicationTests(unittest.TestCase):
+    def exercise_publication(self, fail_sync=None):
+        fixture = DispatchReliabilityTests()
+        events = []
+        real_open = recovery.os.open
+        real_close = recovery.os.close
+        real_fsync = recovery.os.fsync
+        real_replace = recovery.os.replace
+        directory_fd = 999999
+
+        def open_descriptor(path, flags, *args, **kwargs):
+            if Path(path).is_dir():
+                return directory_fd
+            return real_open(path, flags, *args, **kwargs)
+
+        def sync(descriptor):
+            kind = "directory" if descriptor == directory_fd else "file"
+            events.append(kind)
+            if fail_sync == kind:
+                raise OSError("Synthetic durability failure")
+            if kind == "file":
+                real_fsync(descriptor)
+
+        def replace(source, target):
+            real_replace(source, target)
+            events.append("replace")
+
+        def submit(container, action, payload):
+            self.assertEqual(events[-3:], ["file", "replace", "directory"])
+            self.assertEqual(
+                json.loads((args.state_dir / "pending-dispatch.json").read_text())["41"][
+                    "tasks"
+                ][payload["task"]]["state"],
+                "publishing",
+            )
+            events.append("publish")
+            return fixture.accepted(container, action, payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = fixture.arguments(directory)
+            with (
+                patch.object(recovery.os, "open", side_effect=open_descriptor),
+                patch.object(
+                    recovery.os,
+                    "close",
+                    side_effect=lambda fd: None if fd == directory_fd else real_close(fd),
+                ),
+                patch.object(recovery.os, "fsync", side_effect=sync),
+                patch.object(recovery.os, "replace", side_effect=replace),
+                patch.object(recovery.os, "fchmod", create=True),
+                patch.object(
+                    recovery.os,
+                    "O_DIRECTORY",
+                    getattr(recovery.os, "O_DIRECTORY", 0),
+                    create=True,
+                ),
+                patch.object(
+                    recovery.os,
+                    "O_NOFOLLOW",
+                    getattr(recovery.os, "O_NOFOLLOW", 0),
+                    create=True,
+                ),
+                patch.object(recovery, "container_call", side_effect=submit) as publish,
+            ):
+                if fail_sync:
+                    with self.assertRaises(OSError):
+                        recovery.dispatch_pending(
+                            args,
+                            fixture.pending(),
+                            [fixture.character()],
+                            [41],
+                            fixture.now,
+                        )
+                    publish.assert_not_called()
+                else:
+                    recovery.dispatch_pending(
+                        args, fixture.pending(), [fixture.character()], [41], fixture.now
+                    )
+                    self.assertEqual(publish.call_count, 2)
+                    self.assertEqual(events.count("publish"), 2)
+
+    def test_file_replace_and_directory_are_durable_before_publishing(self):
+        self.exercise_publication()
+
+    def test_file_fsync_failure_prevents_publication(self):
+        self.exercise_publication("file")
+
+    def test_directory_fsync_failure_prevents_publication(self):
+        self.exercise_publication("directory")
+
+    def test_bootstrap_persists_every_new_directory_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            target = parent / "state" / "nested"
+            with patch.object(recovery, "fsync_directory") as sync:
+                recovery.make_directory_durable(target)
+            self.assertEqual(
+                [call.args[0] for call in sync.call_args_list],
+                [parent / "state", parent, target, parent / "state"],
+            )
+            self.assertTrue(target.is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

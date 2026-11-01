@@ -94,12 +94,38 @@ def authorization_budget(record: dict, character: dict) -> dict:
     return result
 
 
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def make_directory_durable(path: Path) -> None:
+    """Persist every newly created directory and its parent entry."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        make_directory_durable(path.parent)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass  # Another process may have created it before acquiring the lock.
+        fsync_directory(path)
+        fsync_directory(path.parent)
+
+
 @contextmanager
 def state_lock(state_dir: Path):
     """Serialize inspection, reservation, mutation, dispatch and rollback."""
     import fcntl
 
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    make_directory_durable(state_dir)
+    # Another creator can expose a directory before its own parent fsync ends.
+    # Persist the complete ancestry before any concurrent caller may proceed.
+    for parent in state_dir.parents:
+        fsync_directory(parent)
     details = state_dir.lstat()
     if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.geteuid():
         raise ValueError("Recovery state must be an owned private directory")
@@ -119,7 +145,7 @@ def state_lock(state_dir: Path):
 
 
 def private_write(path: Path, value: dict) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    make_directory_durable(path.parent)
     os.chmod(path.parent, 0o700)
     descriptor, temporary = tempfile.mkstemp(prefix=".recovery-", dir=path.parent)
     try:
@@ -129,6 +155,9 @@ def private_write(path: Path, value: dict) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        # A flushed temporary file is insufficient: the replacement directory
+        # entry must be durable before enabling or submitting any external work.
+        fsync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
