@@ -1,4 +1,4 @@
-# Codex working agreement
+# Project working agreement
 
 This repository deploys a live Alliance Auth installation. Treat authentication,
 permissions, accounting, migrations, backups, releases, and deployments as
@@ -43,28 +43,41 @@ production-critical paths.
 
 ## Review and release boundaries
 
-- Codex owns implementation, focused tests, synthetic preview preparation, and
+- The implementer owns source changes, focused tests, synthetic preview preparation, and
   creation or updates of the single feature pull request targeting `main`. After
-  the exact head's checks and applicable preview are green, Codex applies
+  the exact head's checks and applicable preview are green, the implementer applies
   `ready-for-work`. The
   trusted handoff policy removes that request while it validates and publishes
-  the exact-head record, then re-adds it as the final signal. Codex stops only
+  the exact-head record, then re-adds it as the final signal. The implementer stops only
   after that handoff succeeds; any head, check, preview, or review change
-  invalidates it and requires Codex to apply it again after the head is green.
-- Codex never merges, publishes, approves, or deploys. ChatGPT Work owns final
-  risk review, merge of a validated non-production PR, release/preflight evidence
-  verification, the single production-approval request, deployment monitoring,
-  and final reporting. A Work rejection uses `needs-codex` and includes an exact
-  remediation prompt for the same PR.
+  invalidates it and requires the implementer to apply it again after the head is green.
+- A capable, authorized operator owns merge of a validated non-production PR,
+  release/preflight evidence verification, the applicable owner-approval request,
+  production execution, monitoring, and final reporting. The operator may be the
+  implementer only after a genuinely separate independent reviewer has reviewed
+  the exact final commit and, before an operational action, its exact payload and
+  evidence. The reviewer must not author or amend that implementation, prepare or
+  execute that payload, or approve their own work. Resolve blocking findings and
+  repeat review when a bound commit, payload or evidence identity changes.
+- These are responsibility and capability requirements, not product names. A
+  changed task title, mode label or receipt owner string supplies neither access
+  nor independence. Retain every platform, user, GitHub and environment approval,
+  least-privilege permission and technical gate. Independent agent review never
+  substitutes for a required human or GitHub approval.
+- Only one authorized operator may write to production at a time. Preserve the
+  existing locks, backups, rollback, recovery holds and immutable evidence. Other
+  agents remain read-only during that operation. Rejection uses `needs-codex`
+  and includes an exact remediation prompt for the same PR.
 
 - Review for authentication and permission regressions, Moon Tax calculation and
   accounting integrity, migration and retention safety, backup/release/deployment
   behavior, unintended feature changes, theme readability, responsive layout,
   sticky tables, and missing tests.
-- Anthony's standing authorization lets ChatGPT Work merge a qualified
-  non-production PR after final risk review without asking for merge permission
+- Anthony's standing authorization lets the authorized operator merge a qualified
+  non-production PR after independent final risk review without asking for merge permission
   again. Source changes to deployment tooling are non-production until installed.
-  Codex still hands the PR to Work. Explicit per-task limits override this rule.
+  The implementer still hands exact reviewable evidence to the independent
+  reviewer. Explicit per-task limits override this rule.
 - Standing non-production merge approval does not cover release publication,
   synchronization merges that initiate production, workflow dispatch/retry,
   receiver installation, recovery completion/cleanup, or production deployment.
@@ -73,6 +86,39 @@ production-critical paths.
 - Production deployments must use the exact immutable release built from the tested
   commit. Production approval binds that release and its associated synchronization
   head, base and evidence; it cannot be reused after those identities change.
+
+## Council discussion and votes
+
+- Consult the five-member council before significant decisions. Whenever a
+  council is called, give all five members the same question, options, evidence
+  and authority limits, plus peer task IDs and a supported direct agent-message
+  channel. Members must exchange positions, challenge alternatives and answer
+  one another before each records an explicit vote and rationale.
+- Record all five votes, abstentions, the tally, the recommendation and unresolved
+  dissent. If direct discussion or a member's vote is unavailable, disclose that
+  limitation; never invent participation or consensus. Council votes recommend a
+  course of action; they grant no permissions and waive no approval or gate.
+  A tie or no recommendation requires an owner decision; unresolved blocking
+  findings remain blocking even when a majority favors proceeding.
+- Strategy discussion is not final artifact review. The independent reviewer must
+  still inspect the exact final commit and payload under the separation above.
+
+## Adoption and existing contracts
+
+- A governance amendment cannot authorize its own adoption. The existing
+  authorized owner/process must independently review and adopt it before the new
+  responsibilities apply. A local proposal or draft PR changes no production
+  authority and does not lift a hold.
+- Preserve the legacy `codex`, `ready-for-work`, `needs-codex` labels, receipts,
+  `work_actor` field and `BUH_CHATGPT_WORK_ACTOR` variable. Their names are
+  compatibility contracts; the configured owner/operator GitHub identity
+  allowlist is a security control and remains mandatory. This policy neither
+  changes that allowlist nor creates credentials or access.
+- Existing immutable evidence, consumed attempts and frozen qualifiers retain
+  their original requirements. Obtain the genuine review those contracts require;
+  never relabel a reviewer or edit frozen bytes to claim compliance. A replacement
+  contract needs its own reviewed, tested, separately qualified artifact and the
+  applicable authorization. Historical failures and unknown outcomes stay intact.
 
 ## Avoid repeated work
 

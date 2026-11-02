@@ -17,16 +17,26 @@ release directories are immutable outputs and must never be edited in place.
    `Source test suite / Required source checks` and every applicable preview pass
    for that same head. The trusted readiness record must bind that head, contain
    no unresolved serious review finding, and leave `needs-codex` absent.
-8. ChatGPT Work performs the final risk review and merges that exact qualified
-   non-production head under Anthony's standing authorization; no repeated merge
+8. A genuinely separate independent reviewer reviews the exact final head. A
+   capable, authorized operator then merges that qualified non-production head
+   under Anthony's standing authorization; no repeated merge
    approval is needed. A stale label or record, a changed head, an expired preview,
    a pending or failed check, or a new serious finding blocks the merge.
 9. Release automation builds from the exact tested merge when recovery is clear.
    During an active recovery hold, features accumulate on main with their change
    fragments; no additional repair PR is needed to keep that hold valid.
 10. Request one production approval for the concrete immutable candidate and
-    preflight evidence. Receiver maintenance and recovery cleanup retain their
-    own exact approvals. See [the delivery process](docs/operations/delivery-process.md).
+    preflight evidence after independent review of the exact operational payload.
+    The operator may be the implementer after that separate review; only one
+    operator writes to production. Existing identity allowlists, platform/user
+    approvals and all technical gates remain mandatory. Receiver maintenance and
+    recovery cleanup retain their own exact approvals. See
+    [the delivery process](docs/operations/delivery-process.md).
+
+The [working agreement](AGENTS.md) defines review independence, five-member
+council discussion/voting and adoption. Governance changes use the existing
+authorized adoption process; they cannot authorize their own merge or execution.
+Legacy labels, actor fields and historical contracts are preserved.
 
 Dependency and image inputs are source contracts. Run
 `python ops/supply_chain.py verify` for an offline consistency check. Maintainers
