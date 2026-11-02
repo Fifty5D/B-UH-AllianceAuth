@@ -128,8 +128,8 @@ variable `BUH_CHATGPT_WORK_ACTOR` to the exact already-authorized GitHub login
 Trusted workflows allow only `Fifty5D` and that one nonempty configured login as
 feature-merger identities. Keep `work_actor`, this variable, legacy labels and
 receipt schemas unchanged. They remain identity security controls; this governance
-amendment grants no new login, credential or permission. Keep the deploy-capable
-`BUH_DEPLOY_SSH_KEY` only in
+amendment grants no new login, credential or permission.
+Keep the deploy-capable `BUH_DEPLOY_SSH_KEY` only in
 the protected `production` environment and expose it only through Deploy
 Production. The forced-command `BUH_OBSERVER_SSH_KEY` is a separate, read-only
 credential used by Deploy Production, Operations and Recovery, and Production
