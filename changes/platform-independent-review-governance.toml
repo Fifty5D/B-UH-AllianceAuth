@@ -1,0 +1,3 @@
+app = "platform"
+kind = "internal"
+summary = "Define authorized operator and independent reviewer responsibilities and council discussion while preserving identity authorization gates."

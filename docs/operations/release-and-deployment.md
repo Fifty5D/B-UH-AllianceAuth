@@ -21,6 +21,24 @@ directory.
 
 ## Routine delivery and responsibility boundary
 
+Use the roles and adoption requirements in [the working agreement](../../AGENTS.md).
+The implementer prepares source and evidence; a genuinely separate independent
+reviewer checks the exact final commit and operational payload. A capable,
+authorized operator may also be the implementer after that review. Only one
+operator writes to production. Product names or task labels supply no authority,
+independence or additional access. Required user/platform/GitHub approvals,
+identity allowlists, locks, tests, recovery holds, backups, rollback and immutable
+evidence remain mandatory. Governance changes must be adopted through the existing
+authorized owner/process and cannot authorize their own adoption or execution.
+
+Council strategy discussions use all five members, direct peer communication and
+explicit recorded votes, including dissent; they do not replace exact artifact
+review or any authorization gate. Historical procedures and frozen qualifiers
+keep their original contracts. If a qualifier requires a genuine Work review,
+provide that review; a new owner string is not a migration. Replacing such a
+contract requires a separately reviewed and qualified artifact, never editing
+the frozen evidence or replaying a consumed attempt.
+
 The operator-facing Actions stages are **Validate PR**, **Preview UI**, **Prepare
 Release**, **Deploy Production**, and **Operations and Recovery**. The Validate
 PR check `Source test suite / Required source checks` remains the single required
@@ -30,7 +48,7 @@ integration, upgrade, restore, browser, migration, permission, accounting,
 release-plan, and immutable legacy-artifact lanes. Every lane checks out the
 exact PR head rather than GitHub's synthetic merge ref.
 
-Codex opens or updates one feature PR. UI paths (templates, static assets,
+The implementer opens or updates one feature PR. UI paths (templates, static assets,
 JavaScript/CSS, themes, and browser tests) automatically run the synthetic
 preview; `ui-preview` remains a manual override. Every preview artifact is
 retained for three days and its JSON manifest binds the repository, PR, head,
@@ -42,7 +60,7 @@ label from another same-repository PR. A head, base retarget, preview-policy,
 check-run, review, review-comment, or PR-conversation-comment change removes `ready-for-work`, adds
 `needs-codex`, and never restores readiness on its own; a requested or in-progress
 rerun invalidates readiness before it can finish.
-After both exact-head workflows are green, Codex applies `ready-for-work`. The
+After both exact-head workflows are green, the implementer applies `ready-for-work`. The
 trusted workflow immediately removes that request label, re-fetches the current
 required check, review state, workflow run, non-expired artifact IDs and digests,
 and bounded manifest, and publishes a three-day readiness record. The record
@@ -56,16 +74,20 @@ One bot-owned PR comment is the sole authoritative pointer
 to the current record and artifact digest, explicitly superseding older artifacts.
 Only after that pointer exists does the workflow remove `needs-codex` and re-add
 `ready-for-work` as its final external signal. Its own label event is ignored, so
-it cannot loop or publish a duplicate. ChatGPT Work must require the current head,
-absence of `needs-codex`, and the qualified pointer before performing the final
-risk/review assessment or merging this non-production PR. Neither the label nor
+it cannot loop or publish a duplicate. The independent reviewer and authorized
+operator must require the current head, absence of `needs-codex`, and the qualified
+pointer before final risk review or merging this non-production PR. Neither the label nor
 that merge authorizes production.
 
-Configure a ChatGPT Work GitHub-event task for feature PRs when
+Use an existing authorized review/merge task for feature PRs when
 `ready-for-work` is added. Use this operating prompt (with the repository and
-status names unchanged):
+status names unchanged). Its independent reviewer must be separate from the
+implementer/operator; a product label does not establish that separation:
 
 > Review the current head of this same-repository pull request targeting `main`.
+> Obtain an independent review from a genuinely separate reviewer and require its
+> exact final head to match this PR; this task cannot supply its own independent
+> review. Acting as operator after that review remains a separate responsibility.
 > Require the exact `Source test suite / Required source checks` success for that
 > head, no pending or failed checks, no `needs-codex` label, and the current
 > GitHub-Actions-owned `buh-readiness-record:v2` pointer. Inspect every applicable
@@ -75,13 +97,15 @@ status names unchanged):
 > accounting integrity, and deployment risk. Re-read the PR head and evidence
 > immediately before acting. If anything is missing, stale, expired, unresolved,
 > or unsafe, do not merge: remove `ready-for-work`, add `needs-codex`, report the
-> exact evidence to Anthony, and give him one exact prompt to paste into Codex to
+> exact evidence to Anthony, and give the implementer one exact prompt to
 > fix this same PR. If everything passes, merge only this exact non-production
-> feature head into `main` with a two-parent merge commit. Never deploy, approve a
+> feature head into `main` with a two-parent merge commit only after genuinely
+> separate independent final review. Never deploy, approve a
 > production release, alter release refs, rerun Actions, or bypass a failed gate.
 
 After merge, Prepare Release builds one immutable release and performs the
-no-change receiver preflight. Work presents the bound readiness record and asks
+no-change receiver preflight. After independent review of the exact operational
+payload, the authorized operator presents the bound readiness record and asks
 Anthony once for production approval. Deploy Production accepts only the exact
 approval-marked release evidence. Receiver upgrades, emergency rollback, and
 diagnostics are not routine application releases: use the separately reviewed
@@ -93,16 +117,19 @@ retry a production failure.
 Configure a `main` ruleset requiring pull requests and the exact status
 `Source test suite / Required source checks` from Validate PR; block force
 pushes and branch deletion, require branches to be up to date, and permit only
-merge commits. Give the ChatGPT Work identity **Contents: write**, **Pull
+merge commits. The existing authorized merge identity needs **Contents: write**, **Pull
 requests: read/write**, and **Actions: read** so it can inspect evidence and merge
 an unchanged, validated non-production head. Give **Issues: read/write** only when
 the task will manage `ready-for-work`/`needs-codex` labels or publish evidence;
 read-only is sufficient if those actions are handled elsewhere. Give it no Actions
 write, Administration, Environments, or Secrets access. Set the repository Actions
-variable `BUH_CHATGPT_WORK_ACTOR` to the exact GitHub login used by the connected
-Work task (not a display name, and never empty when Work differs from `Fifty5D`).
+variable `BUH_CHATGPT_WORK_ACTOR` to the exact already-authorized GitHub login
+(not a display name, and never empty when that actor differs from `Fifty5D`).
 Trusted workflows allow only `Fifty5D` and that one nonempty configured login as
-feature-merger identities. Keep the deploy-capable `BUH_DEPLOY_SSH_KEY` only in
+feature-merger identities. Keep `work_actor`, this variable, legacy labels and
+receipt schemas unchanged. They remain identity security controls; this governance
+amendment grants no new login, credential or permission. Keep the deploy-capable
+`BUH_DEPLOY_SSH_KEY` only in
 the protected `production` environment and expose it only through Deploy
 Production. The forced-command `BUH_OBSERVER_SSH_KEY` is a separate, read-only
 credential used by Deploy Production, Operations and Recovery, and Production
