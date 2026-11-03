@@ -281,9 +281,14 @@ class RecoveredLogTests(unittest.TestCase):
             '  File "/synthetic/assets.py", line 1, in update\n'
             "aiopenapi3.errors.HTTPClientError\n\n"
             "The above exception was the direct cause of the following exception:\n\n"
-            "Traceback (most recent call last):\n"
             "esi.exceptions.HTTPClientError\n"
         )
+        incomplete = text.replace("esi.exceptions.HTTPClientError\n",
+                                  "Traceback (most recent call last):\nesi.exceptions.HTTPClientError\n")
+        with self.assertRaises(LogScanError) as caught:
+            self.classify(incomplete)
+        self.assertFalse(caught.exception.scan_complete)
+        self.assertEqual(self.host.recovered_log_review.summary(), [])
         self.assertTrue(self.classify(text))
         self.assertTrue(self.classify(task_error(ASSET_TASK)))
         with self.assertRaises(LogScanError):
@@ -341,7 +346,9 @@ class RecoveredLogTests(unittest.TestCase):
             "    raise self.model.DoesNotExist(\n"
             "esi.models.CallbackRedirect.DoesNotExist: CallbackRedirect matching query does not exist.\n"
         )
-        self.assertTrue(self.classify(schema + callback, source=web))
+        self.assertTrue(self.classify(schema, source=web))
+        with self.assertRaisesRegex(LogScanError, "Unresolved callback"):
+            self.classify(schema + callback, source=web)
         named = callback.replace("AnonymousUser", "synthetic_user")
         trace = named.split("\n", 1)[1]
         mirrored = (
@@ -349,11 +356,12 @@ class RecoveredLogTests(unittest.TestCase):
             + "DEBUG:esi.decorators:No callback for synthetic_user session xcmnc\n"
             + trace
         )
-        self.assertTrue(self.classify(named, source=web))
-        self.assertTrue(self.classify(mirrored, source=web))
+        for text in (named, mirrored):
+            with self.assertRaisesRegex(LogScanError, "Unresolved callback"):
+                self.classify(text, source=web)
         self.assertEqual(
             {item["category"] for item in self.host.recovered_log_review.summary()},
-            {"ESI-schema-model-name", "caught-ESI-callback-miss"},
+            {"ESI-schema-model-name"},
         )
         ordinary = DockerHost(self.host.config)
         with self.assertRaises(LogScanError):

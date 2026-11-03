@@ -388,8 +388,15 @@ class LogStreamingTests(unittest.TestCase):
         records.append("CRITICAL independent-database-failure\n")
         with self.assertRaises(runtime.LogScanError) as failure:
             self.host._classify_log_batch([("worker", "".join(records))], set(), None)
-        self.assertEqual(len(failure.exception.findings), 3)
+        # These records have a terminal but no native traceback/frames. Keep
+        # that incomplete evidence explicit alongside the grouped diagnostics.
+        self.assertEqual(len(failure.exception.findings), 4)
+        self.assertFalse(failure.exception.scan_complete)
+        self.assertIn("Unverified native exception fragment", str(failure.exception))
         self.assertFalse(failure.exception.findings_truncated)
+        self.assertEqual(sum("Task structures.tasks.update[" in finding
+                             for finding in failure.exception.findings), 1)
+        self.assertIn("independent-database-failure", str(failure.exception))
         self.assertIn("HTTP=403", str(failure.exception))
         self.assertNotIn("example.invalid", str(failure.exception))
         self.assertNotIn("must-never-appear", str(failure.exception))

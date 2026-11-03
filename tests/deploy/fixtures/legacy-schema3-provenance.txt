@@ -1,0 +1,21 @@
+Legacy/schema-3 callback regression provenance
+
+These are sanitized synthetic inputs from the isolated October 14 independent
+re-review of PR91 head 2c853a7492de15db7a9d72ca9e5af1b82bf57daf.
+No production evidence, credentials or endpoints are included.
+
+Original saved synthetic report byte SHA256:
+d4b46194a9f35f513e720f6bef449932ee5b5271c5a7c864d0b8210032b27ca4
+legacy-schema3-report.json is the same parsed report serialized with LF endings.
+Canonical fixture SHA256:
+0d269b32d496bacd902d8dc665a49e3dcf40b55783622435c70726e035a1cac8
+legacy-schema3-review.json replaces only the private report path with a marker;
+the test binds that path and report digest to its private synthetic temporary file.
+Canonical review fixture SHA256:
+3fc09d415800a3acba713d4ef55fbd7c40d882d4ffb495f7dc2a2636c221cac9
+
+The raw synthetic prefix abcde is reconstructed from the legacy report, and every
+original line digest is checked before replay. The old real loader/scanner accepts
+four records, including a callback that both corrected raw adapters leave
+unresolved. This fixture is a negative compatibility regression, not a supported
+positive callback-completion example. Valid legacy asset controls are separate.

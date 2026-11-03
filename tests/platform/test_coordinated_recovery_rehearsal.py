@@ -668,7 +668,10 @@ class SyntheticDockerBoundary:
                 return f"/{state['name']}|{state['image']}|running|{state['restart']}\n"
             if format_value == "{{.State.Status}}|{{.RestartCount}}":
                 return f"running|{state['restart']}\n"
-            if "{{if .State.Health}}" in format_value:
+            if format_value in {
+                "{{.State.Status}}|{{.RestartCount}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+                '{{.State.Status}}|{{.RestartCount}}|{{with index .State "Health"}}{{.Status}}{{else}}none{{end}}',
+            }:
                 return f"running|{state['restart']}|healthy\n"
             if format_value == "{{.State.Status}}|{{.RestartCount}}|{{.Image}}":
                 return f"running|{state['restart']}|{state['image']}\n"
