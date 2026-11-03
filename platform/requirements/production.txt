@@ -1,5 +1,5 @@
 allianceauth==5.4.0
-Django==5.2.17
+Django==5.2.18
 django-esi==9.6.0
 aiopenapi3==0.10.0
 aa-memberaudit==5.0.4

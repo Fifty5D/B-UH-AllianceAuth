@@ -9,6 +9,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 import urllib.error
 from contextlib import contextmanager, nullcontext
@@ -29,6 +30,7 @@ from ops.deploy.docker_host import (
     END_LEGACY,
     END_V2,
     MAX_COMMAND_OUTPUT,
+    LOCKED_DJANGO_HASHES,
     LOCKED_PACKAGING_HASHES,
     LOCKED_PRODUCTION_DEPENDENCIES,
     DockerHost,
@@ -269,6 +271,7 @@ def make_bundle(
                 "production_runtime": {"base_image": image},
                 "runtime": {
                     "allianceauth": "5.4.0",
+                    "django": "5.2.18",
                     "django_esi": "9.6.0",
                     "packaging": "25.0",
                 },
@@ -1181,6 +1184,7 @@ class DockerHostContracts(unittest.TestCase):
             expected = host._expected_versions(bundle)
             self.assertEqual(expected["allianceauth"], "5.4.0")
             self.assertEqual(expected["packaging"], "25.0")
+            self.assertEqual(expected["Django"], "5.2.18")
             self.assertEqual(expected["django-esi"], "9.6.0")
             old = {
                 "versions": {**expected, "allianceauth": "5.2.0"},
@@ -1230,6 +1234,45 @@ class DockerHostContracts(unittest.TestCase):
                 host._check_version_probe_output(
                     json.dumps(wrong_django_esi), expected, config.gunicorn_service
                 )
+
+            stale_django = {
+                **good,
+                "versions": {**expected, "Django": "5.2.17"},
+            }
+            with mock.patch.object(
+                host, "_compose", return_value=json.dumps(stale_django)
+            ), self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._version_probe(config.gunicorn_service, bundle, live=False)
+            with mock.patch.object(
+                host, "_running_service_containers", return_value=replicas
+            ), mock.patch.object(
+                host, "_run", side_effect=(json.dumps(good), json.dumps(stale_django))
+            ), self.assertRaisesRegex(DeploymentError, "Package versions differ"):
+                host._version_probe(config.worker_service, bundle, live=True)
+
+    def test_django_install_and_probe_follow_the_release_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = DockerHost(make_config(root))
+            bundle = make_bundle(root)
+            # The retained v0.8.3 contract stays at 5.2.17. Use synthetic
+            # bundles so this also runs in the standalone receiver export.
+            for version in ("5.2.17", "5.2.18"):
+                with self.subTest(version=version):
+                    bundle.manifest["compatibility"]["values"]["runtime"]["django"] = version
+                    lines = "\n".join(host._production_dependencies_install_lines(bundle))
+                    self.assertIn(f"Django=={version} ", lines)
+                    for digest in LOCKED_DJANGO_HASHES[version]:
+                        self.assertIn(f"--hash=sha256:{digest}", lines)
+                    self.assertIn("--require-hashes", lines)
+                    self.assertEqual(host._expected_versions(bundle)["Django"], version)
+            for invalid in (None, "5.2.19", "5.2.18; arbitrary", []):
+                with self.subTest(invalid=invalid):
+                    bundle.manifest["compatibility"]["values"]["runtime"]["django"] = invalid
+                    with self.assertRaisesRegex(DeploymentError, "hash-pinned Django"):
+                        host._production_dependencies_install_lines(bundle)
+                    with self.assertRaisesRegex(DeploymentError, "hash-pinned Django"):
+                        host._expected_versions(bundle)
 
     def test_effective_host_dockerfile_reconciles_legacy_dependency_resolvers(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1326,8 +1369,13 @@ class DockerHostContracts(unittest.TestCase):
             # tests, but not the source-only lock used to check these constants.
             self.skipTest("production lock is outside the isolated receiver export")
         lines = lock.read_text().splitlines()
+        compatibility = tomllib.loads(
+            (ROOT / "platform/compatibility.toml").read_text(encoding="utf-8")
+        )
+        django_version = compatibility["runtime"]["django"]
         locked = {
             **LOCKED_PRODUCTION_DEPENDENCIES,
+            "django": (django_version, LOCKED_DJANGO_HASHES[django_version]),
             "packaging": ("25.0", LOCKED_PACKAGING_HASHES["25.0"]),
         }
         for name, (version, hashes) in locked.items():
