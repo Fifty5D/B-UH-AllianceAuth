@@ -70,6 +70,19 @@ resolution, and update times; never comment bodies). A conversation comment with
 a serious marker remains blocking until its author edits away the finding or
 deletes the obsolete comment and readiness is requested again. The reserved
 GitHub-Actions-owned readiness-pointer comment is excluded from that snapshot.
+Serious COMMENTED reviews also support an
+[explicit, authenticated whole-review disposition](commented-review-dispositions.md)
+bound to exact source PASS evidence, without rewriting the historical review.
+Only its named reviews receive resolution; native required reviews and every
+other readiness and release gate remain effective.
+New schema-v3 readiness binds the current head/base and combined Git tree to
+provider-attributed source checkout steps. Historical dispositions do not qualify
+a different tree. Native run-attempt archives supply checkout output only after
+provider job/step and immutable workflow verification. Preview UI's local reusable
+workflow supplies its independent execution revision and required browser evidence.
+See the linked guide for scope and exact-tree reuse. Ordinary green CI/preview
+does not clear unresolved review findings. Historical schema-v2 records without
+dispositions remain readable.
 One bot-owned PR comment is the sole authoritative pointer
 to the current record and artifact digest, explicitly superseding older artifacts.
 Only after that pointer exists does the workflow remove `needs-codex` and re-add
@@ -147,7 +160,7 @@ The trusted readiness workflow creates or normalizes the labels idempotently. Fo
 PR #44, which first introduces that `pull_request_target` workflow, no normal
 premerge bot pointer can exist because the workflow is not yet available from
 `main`. Reviewers must validate its exact head manually and must not work around
-the bootstrap by running PR code with a write token. After—and only after—a
+the bootstrap by running PR code with a write token. Afterâ€”and only afterâ€”a
 protected two-parent merge of PR #44, trusted-main Prepare Release may use the
 PR-44-specific `first-introduction-postmerge` attestation. That path proves the
 first parent lacks the workflow, the merge adds it, the second parent is the exact
@@ -439,7 +452,7 @@ Before any production migration, the deployer must:
 Use expand/contract changes whenever possible. Code rollback is automatic only
 while the database remains compatible with the previous release. After an
 incompatible or irreversible migration, the approved recovery action is the
-release's documented forward fix or database restore—not merely restarting old
+release's documented forward fix or database restoreâ€”not merely restarting old
 containers.
 
 The existing legacy v1 updater does not roll back the database. It backs up and
@@ -505,3 +518,19 @@ artifacts.
 Implementation checkmarks describe repository controls. They become operational
 evidence only after the corresponding hosted workflow succeeds; no unchecked
 production item may be inferred from a source test.
+
+### Current source and preview execution evidence
+
+New schema-v3 readiness uses qualification version3. Checkout evidence is read
+from GitHub's native run-attempt archive after binding the complete provider job
+and step metadata to the exact attempt and immutable workflow contract. Separate
+archived step files are available in the newer retained captures; the earlier
+aggregate-only observations remain historical. Whole-job text or a filename
+alone never authenticates checkout execution.
+
+Preview UI now invokes a local reusable preview workflow with the same read-only
+permissions, event/scope behavior and artifacts. Source and preview immutable
+execution references are independently verified, including required preview
+capture/manifest/upload success. See the [disposition and qualification guide](commented-review-dispositions.md).
+Genuine evidence-subsystem success is separate from review acceptance, trusted
+readiness publication, activation and the Prepare Release/host-hold pre-merge gate.

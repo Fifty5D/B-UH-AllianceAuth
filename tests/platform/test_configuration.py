@@ -24,6 +24,7 @@ SOURCE_WORKFLOWS = (
     "source-compatibility.yml",
     "source-supply-chain.yml",
     "ui-preview.yml",
+    "reusable-ui-preview.yml",
     "invalidate-readiness.yml",
     "source-published-release-recovery.yml",
     "continue-published-release-recovery.yml",
@@ -530,7 +531,7 @@ class PlatformConfigurationContracts(TestCase):
                             set(supplied_secrets),
                             "caller omits a required reusable-workflow secret",
                         )
-        self.assertEqual(calls, 6)
+        self.assertEqual(calls, 7)
 
     def test_local_reusable_workflow_callers_cover_callee_job_permissions(self):
         workflows = {
@@ -581,7 +582,7 @@ class PlatformConfigurationContracts(TestCase):
                                 permission_rank[required],
                                 "caller permission caps the called workflow job",
                             )
-        self.assertEqual(calls, 6)
+        self.assertEqual(calls, 7)
 
     def test_supply_chain_python_setup_uses_configuration_output(self):
         workflow = _load_workflow(WORKFLOWS / "source-supply-chain.yml")
@@ -609,7 +610,7 @@ class PlatformConfigurationContracts(TestCase):
             with self.subTest(workflow=name):
                 self.assertNotIn("secrets.", text)
                 self.assertNotRegex(text, r"(?m)^\s*environment:\s*production\s*$")
-        preview = (WORKFLOWS / "ui-preview.yml").read_text(encoding="utf-8")
+        preview = (WORKFLOWS / "reusable-ui-preview.yml").read_text(encoding="utf-8")
         browser = (WORKFLOWS / "reusable-source-tests.yml").read_text(
             encoding="utf-8"
         )
@@ -659,8 +660,14 @@ class PlatformConfigurationContracts(TestCase):
 
     def test_preview_permissions_relevance_theme_matrix_and_provenance(self):
         workflow = _load_workflow(WORKFLOWS / "ui-preview.yml")
-        preview = workflow["jobs"]["preview"]
-        text = (WORKFLOWS / "ui-preview.yml").read_text(encoding="utf-8")
+        caller = workflow["jobs"]["preview"]
+        reusable = _load_workflow(WORKFLOWS / "reusable-ui-preview.yml")
+        preview = reusable["jobs"]["preview"]
+        self.assertEqual(caller["uses"], "./.github/workflows/reusable-ui-preview.yml")
+        self.assertEqual(caller["permissions"], preview["permissions"])
+        self.assertNotIn("secrets", caller)
+        self.assertIn("workflow_call", reusable.get("on", reusable.get(True)))
+        text = (WORKFLOWS / "ui-preview.yml").read_text(encoding="utf-8") + (WORKFLOWS / "reusable-ui-preview.yml").read_text(encoding="utf-8")
         self.assertEqual(
             preview["permissions"], {"contents": "read", "pull-requests": "read"}
         )
@@ -676,7 +683,7 @@ class PlatformConfigurationContracts(TestCase):
         )
         for required in (
             'run-name: "Preview UI / PR #${{ github.event.pull_request.number',
-            "^\\\\.github/workflows/(ui-preview|invalidate-readiness)\\\\.ya?ml$",
+            "^\\\\.github/workflows/(ui-preview|reusable-ui-preview|invalidate-readiness)\\\\.ya?ml$",
             "^ops/readiness\\\\.py$",
             "^platform/test(auth|env)/",
             "^tests/platform/test_(readiness|configuration)\\\\.py$",

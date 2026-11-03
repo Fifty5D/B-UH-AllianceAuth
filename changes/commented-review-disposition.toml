@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Qualify current combined-source readiness with provider run-attempt checkout archives and immutable reusable preview execution while preserving authenticated COMMENTED dispositions."
