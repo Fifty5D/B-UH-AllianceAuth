@@ -1,0 +1,22 @@
+Production-format callback fixture provenance
+
+esi-9.6.0-callback-producer.txt is an unmodified excerpt (lines 1-201) from
+django-esi 9.6.0, esi/decorators.py, obtained from the existing hash-pinned test
+environment. It is inspected as source text, never executed by these tests.
+Upstream: Alliance Auth, https://gitlab.com/allianceauth/django-esi
+Distributed with its GNU GPL v3 license in django-esi-LICENSE.txt.
+Full producer source SHA256:
+aa28bfaed7abb77e86857cd333d4b800bbf98349360b108290d397b0020f47f8
+Excerpt SHA256:
+252835631ca2be808600ed6c206763f52950e2e938494a2a88505b26e1443de1
+
+callback-raw-review-cases.json contains the ten sanitized synthetic raw scenarios
+from the October 14 independent PR91 review. Inputs exercise the actual fresh
+transport and retained-row entry points. They contain no production evidence.
+Input SHA256 (bytes preserved from the extracted reviewer scenarios):
+d8a51c2fa4cb21f1bf8e5fded1e022eeba7706cd62db290975f0e96b925e4fe4
+
+The producer emits a five-character session prefix and logs Returning to view
+before view execution. Its messages and the combined proxy record format cannot
+prove completion of the callback's actual operation. No positive callback
+completion is asserted from invented fields or manually annotated fixtures.
