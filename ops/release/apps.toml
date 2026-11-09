@@ -20,6 +20,7 @@ platform_build_inputs = [
   ".github/workflows/invalidate-readiness.yml",
   ".github/workflows/production-runtime-fingerprint.yml",
   ".github/workflows/ui-preview.yml",
+  ".github/workflows/reusable-ui-preview.yml",
   ".github/workflows/vps-diagnostics.yml",
   "platform/requirements/*.txt",
   "platform/requirements/*.lock",
