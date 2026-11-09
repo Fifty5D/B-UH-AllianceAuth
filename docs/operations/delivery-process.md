@@ -207,17 +207,22 @@ not mean every historical dataset has finished downloading.
    extra screenshot run unless there is a specific visual risk. UI and preview
    policy changes retain their existing full preview requirements.
 4. Request `ready-for-work` once the final head is green. Wait for the trusted
-   record to publish and re-add the label. Work checks that same head and current
-   review evidence, then merges under Anthony's standing non-production approval.
+   record to publish and re-add the label. A separate independent reviewer checks
+   that exact final head and current evidence. The capable, authorized operator
+   then merges under Anthony's standing non-production approval. Follow the
+   [responsibility boundary](release-and-deployment.md#routine-delivery-and-responsibility-boundary);
+   existing labels and actor allowlists remain unchanged.
 5. Main validation runs. During recovery, source changes and fragments accumulate
    while the explicit hold reports success without generating another release.
    The hold is independent of which feature commits are added to main.
 6. Once recovery is cleared through review, release automation follows the
-   guarded candidate/publication/preflight flow. Work presents one concrete
+   guarded candidate/publication/preflight flow. After independent review of the
+   exact payload and evidence, the authorized operator presents one concrete
    immutable candidate and requests the exact production approval.
 7. Deployment remains serialized with the host lock, journal, backup, functional
-   checks and rollback handling. Report the installed result and any unresolved
-   recovery state from the returned evidence.
+   checks and rollback handling, with one production writer. The operator may be
+   the implementer after separate review. Report the installed result and any
+   unresolved recovery state from the returned evidence.
 
 Future source, preview, readiness and v2 release/deployment artifacts use a
 30-day retention window. This reduces expiry-driven rebuilding; it does not

@@ -36,7 +36,7 @@ async function checkReadableText(page: Page, root: string) {
     };
     const failures: string[] = [];
     let checked = 0;
-    const selectors = 'h1,h2,h3,p,small,em,summary,label,th,td,a,button,input,select,.badge,[class*="-status"],[class*="-state"],[class*="-kicker"],[class*="-tag"],.ar-stats strong,.ops-kpi strong';
+    const selectors = 'h1,h2,h3,p,small,em,summary,label,th,td,a,button,input,select,.badge,[class*="-status"],[class*="-state"],[class*="-kicker"],[class*="-tag"],.ar-stats strong,.ops-kpi strong,.vh-metric-top span,.vh-metric > strong';
     for (const element of scope.querySelectorAll(selectors)) {
       const style = getComputedStyle(element);
       if (!element.getClientRects().length || style.visibility !== "visible" || style.opacity === "0"
@@ -174,6 +174,23 @@ export function registerThemeChecks(capture: boolean) {
             await expect(table.locator("tbody tr").first()).toContainText("99000003");
           }
           if (app === "vps") {
+            await expect(page.locator("#vh-disk")).toHaveText("60.0%");
+            await expect(page.locator("#vh-data-disk")).toHaveText("25.0%");
+            const [systemDisk, dataDisk] = await Promise.all([
+              page.locator("article:has(#vh-disk)").boundingBox(),
+              page.locator("article:has(#vh-data-disk)").boundingBox(),
+            ]);
+            if (!systemDisk || !dataDisk) throw new Error("Both source-built storage cards must be visible");
+            const width = page.viewportSize()!.width;
+            for (const card of [systemDisk, dataDisk]) {
+              expect(card.x).toBeGreaterThanOrEqual(0);
+              expect(card.x + card.width).toBeLessThanOrEqual(width + 1);
+            }
+            expect(systemDisk.x + systemDisk.width <= dataDisk.x + 1
+              || dataDisk.x + dataDisk.width <= systemDisk.x + 1
+              || systemDisk.y + systemDisk.height <= dataDisk.y + 1
+              || dataDisk.y + dataDisk.height <= systemDisk.y + 1,
+            "System and Auth data storage cards do not overlap").toBeTruthy();
             await checkChartLabels(page);
             await page.getByRole("button", {name: /Restart Auth services$/}).first().click();
             await expect(page.locator("#vh-restart-submit")).toBeDisabled();
@@ -188,6 +205,15 @@ export function registerThemeChecks(capture: boolean) {
             const directory = join(process.env.BUH_PREVIEW_OUTPUT_DIR || "preview-output", "themes", theme.tag, viewport);
             mkdirSync(directory, {recursive: true});
             await page.screenshot({path: join(directory, `${app}.png`), fullPage: true, animations: "disabled"});
+            if (app === "vps") {
+              // Auth scrolls its content inside .nav-padding, so a document
+              // screenshot can leave both storage cards below the mobile fold.
+              const storage = page.locator('section[aria-labelledby="vh-storage-heading"]');
+              await storage.scrollIntoViewIfNeeded();
+              await expect(page.locator("article:has(#vh-disk)")).toBeInViewport({ratio: 1});
+              await expect(page.locator("article:has(#vh-data-disk)")).toBeInViewport({ratio: 1});
+              await storage.screenshot({path: join(directory, "vps-storage.png"), animations: "disabled"});
+            }
           }
           await checkStickyHeaders(page, root);
           if (capture && (app === "moon-tax" || app === "structure-operations")) {

@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Allow zero to disable the diagnostics collector ingestion reserve while preserving redaction, rolling retention, batch limits and vacuum working-space checks."

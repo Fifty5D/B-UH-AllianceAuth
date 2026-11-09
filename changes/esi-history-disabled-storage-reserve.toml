@@ -1,0 +1,3 @@
+app = "esi-history"
+kind = "fix"
+summary = "Allow zero to disable the archive storage reserve across passive capture, active collection, local history and public mirroring while preserving work limits."

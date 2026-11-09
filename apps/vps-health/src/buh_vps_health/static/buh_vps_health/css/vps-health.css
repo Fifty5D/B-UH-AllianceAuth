@@ -20,3 +20,13 @@
 @media(max-width:1200px){.vh-metric-grid{grid-template-columns:repeat(3,1fr)}.vh-control-grid{grid-template-columns:1fr}.vh-update-summary{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:760px){#buh-vps-health{padding:.7rem .4rem 2rem}.vh-hero{align-items:flex-start;flex-direction:column;padding:1.15rem}.vh-connection{width:100%}.vh-metric-grid{grid-template-columns:repeat(2,1fr)}.vh-workload-summary{grid-template-columns:repeat(2,1fr)}.vh-update-summary{grid-template-columns:repeat(2,1fr)}.vh-section{padding:.9rem}.vh-section-heading{align-items:flex-start;flex-direction:column}.vh-chart-heading{align-items:flex-start}.vh-control-grid article{grid-template-columns:1fr}.vh-control-grid small{grid-column:auto}}
 @media(max-width:440px){.vh-metric-grid{grid-template-columns:1fr}.vh-workload-summary,.vh-update-summary{grid-template-columns:1fr}}
+
+/* Each physical filesystem has its own capacity; bind mounts are not extra disks. */
+#buh-vps-health .vh-metric-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+#buh-vps-health .vh-storage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.8rem}
+#buh-vps-health .vh-storage-purpose{color:var(--vh-muted);font-size:.85rem;margin:.35rem 0 0}
+#buh-vps-health .vh-storage-metric small{white-space:normal;overflow-wrap:anywhere;margin-top:.25rem}
+#buh-vps-health .vh-storage-unavailable>strong{color:var(--vh-muted)}
+#buh-vps-health .vh-storage-unavailable .vh-meter{visibility:hidden}
+@media(max-width:600px){#buh-vps-health .vh-storage-grid{grid-template-columns:1fr}}
+@media(max-width:440px){#buh-vps-health .vh-metric-grid{grid-template-columns:1fr}}

@@ -2,12 +2,14 @@
 
 import tempfile
 import json
+import os
 import subprocess
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from ops.diagnostics import buh_host_diagnostics as diagnostics
 from ops.diagnostics import buh_diagnostics_publish as publisher
@@ -38,6 +40,107 @@ class HostDiagnosticsTests(unittest.TestCase):
         }), encoding="utf-8")
         self.db = diagnostics.database()
         self.addCleanup(self.db.close)
+
+    def test_publisher_reserve_configuration_defaults_and_accepts_zero(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(publisher.minimum_free_bytes(), 25 * 1024**3)
+            for value in ("0", "1", "25", "2048"):
+                os.environ["BUH_DIAGNOSTICS_PUBLISH_MINIMUM_FREE_GIB"] = value
+                self.assertEqual(publisher.minimum_free_bytes(), int(value) * 1024**3)
+            for value in ("-1", "2049", "1.5", "", " 0", "no", "\u0660"):
+                with self.subTest(value=value):
+                    os.environ["BUH_DIAGNOSTICS_PUBLISH_MINIMUM_FREE_GIB"] = value
+                    with self.assertRaisesRegex(ValueError, "integer from 0 to 2048"):
+                        publisher.minimum_free_bytes()
+
+    def test_positive_publisher_reserve_guards_publication_and_hour_export(self):
+        current = datetime(2026, 10, 31, 12, tzinfo=UTC)
+        diagnostics.atomic_report(diagnostics.create_report(self.db, [], current))
+        stage = diagnostics.ROOT / "private-stage"
+        repo = diagnostics.ROOT / "hour-repo"
+        repo.mkdir()
+        with (
+            patch.object(publisher, "HISTORY", diagnostics.ROOT),
+            patch.object(publisher, "STAGING", stage),
+            patch.object(publisher, "MINIMUM_FREE_BYTES", 1024**3),
+            patch.object(publisher.shutil, "disk_usage", return_value=SimpleNamespace(free=0)),
+            patch.object(publisher, "push_snapshot") as push,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "publication paused"):
+                publisher.publish()
+            with self.assertRaisesRegex(RuntimeError, "export paused"):
+                publisher.export_hour(self.db, repo, current)
+            push.assert_not_called()
+        self.assertFalse((stage / "last-published.json").exists())
+        self.assertFalse((repo / "evidence").exists())
+
+    def test_collector_reserve_configuration_defaults_and_accepts_zero(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(diagnostics.minimum_free_bytes(), 25 * 1024**3)
+            for value in ("0", "1", "25", "2048"):
+                os.environ["BUH_DIAGNOSTICS_COLLECTOR_MINIMUM_FREE_GIB"] = value
+                self.assertEqual(diagnostics.minimum_free_bytes(), int(value) * 1024**3)
+            for value in ("-1", "2049", "1.5", "", " 0", "no", "\u0660"):
+                with self.subTest(value=value):
+                    os.environ["BUH_DIAGNOSTICS_COLLECTOR_MINIMUM_FREE_GIB"] = value
+                    with self.assertRaisesRegex(ValueError, "integer from 0 to 2048"):
+                        diagnostics.minimum_free_bytes()
+
+    def test_collector_zero_reserve_resumes_redacted_capture_and_preserves_retention(self):
+        current = datetime(2026, 10, 31, 12, tzinfo=UTC)
+        diagnostics.insert_log(
+            self.db, "docker", "allianceauth_worker", diagnostics.stamp(current - timedelta(days=31)),
+            "expired synthetic event", diagnostics.redactor(),
+        )
+        self.db.commit()
+
+        def collect_log(db, containers, redact, end):
+            diagnostics.insert_log(
+                db, "docker", "allianceauth_worker", diagnostics.stamp(end),
+                "ERROR token=private-value", redact,
+            )
+
+        locking = SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=Mock())
+        with (
+            patch.dict("sys.modules", {"fcntl": locking}),
+            patch.object(diagnostics, "MINIMUM_FREE_BYTES", 0),
+            patch.object(diagnostics.shutil, "disk_usage", return_value=SimpleNamespace(free=0)),
+            patch.object(diagnostics, "utcnow", return_value=current),
+            patch.object(diagnostics, "docker_containers", return_value=[]),
+            patch.object(diagnostics, "collect_docker", side_effect=collect_log) as docker,
+            patch.object(diagnostics, "collect_journal") as journal,
+            patch.object(diagnostics, "collect_events") as events,
+            patch.object(diagnostics, "collect_app"),
+            patch.object(diagnostics, "collect_resources"),
+        ):
+            diagnostics.collect()
+            docker.assert_called_once()
+            journal.assert_called_once()
+            events.assert_called_once()
+        rows = list(diagnostics.query(self.db, current - timedelta(days=32), current + timedelta(seconds=1), None, None, 10))
+        self.assertEqual(len(rows), 1)
+        self.assertIn("<redacted>", rows[0]["message"])
+        self.assertNotIn("private-value", rows[0]["message"])
+        self.assertTrue((diagnostics.ROOT / "buh-diagnostics-latest.json").is_file())
+        self.assertIsNone(diagnostics.get_meta(self.db, "database:last_vacuum"))
+
+    def test_positive_collector_reserve_still_pauses_log_ingestion(self):
+        locking = SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=Mock())
+        with (
+            patch.dict("sys.modules", {"fcntl": locking}),
+            patch.object(diagnostics, "MINIMUM_FREE_BYTES", 25 * 1024**3),
+            patch.object(diagnostics.shutil, "disk_usage", return_value=SimpleNamespace(free=1024**3)),
+            patch.object(diagnostics, "collect_docker") as docker,
+            patch.object(diagnostics, "collect_journal") as journal,
+            patch.object(diagnostics, "collect_events") as events,
+            patch.object(diagnostics, "collect_app"),
+            patch.object(diagnostics, "collect_resources"),
+        ):
+            diagnostics.collect()
+            docker.assert_not_called()
+            journal.assert_not_called()
+            events.assert_not_called()
+        self.assertGreater(self.db.execute("SELECT COUNT(*) FROM gaps WHERE source='storage'").fetchone()[0], 0)
 
     def test_report_and_history_are_redacted_and_stale_sources_are_visible(self):
         current = datetime(2026, 9, 27, 21, 0, tzinfo=UTC)
@@ -281,6 +384,7 @@ class HostDiagnosticsTests(unittest.TestCase):
             patch.object(publisher, "STAGING", stage),
             patch.object(publisher, "REMOTE", str(remote)),
             patch.object(publisher, "MINIMUM_FREE_BYTES", 0),
+            patch.object(publisher.shutil, "disk_usage", return_value=SimpleNamespace(free=0)),
             patch.object(publisher, "utcnow", return_value=current + timedelta(minutes=1)),
         ):
             publisher.publish()
@@ -310,6 +414,7 @@ class HostDiagnosticsTests(unittest.TestCase):
             patch.object(publisher, "STAGING", stage),
             patch.object(publisher, "REMOTE", str(remote)),
             patch.object(publisher, "MINIMUM_FREE_BYTES", 0),
+            patch.object(publisher.shutil, "disk_usage", return_value=SimpleNamespace(free=0)),
             patch.object(publisher, "utcnow", return_value=current + timedelta(days=31)),
         ):
             publisher.publish()

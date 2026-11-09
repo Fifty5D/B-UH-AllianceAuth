@@ -514,7 +514,10 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
     if not target.is_relative_to(root):
         raise ValidationError("Archive file path escapes the shared archive directory.")
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if shutil.disk_usage(root).free - max(record.remote_size, 1) < minimum_free_bytes:
+    if (
+        minimum_free_bytes > 0
+        and shutil.disk_usage(root).free - max(record.remote_size, 1) < minimum_free_bytes
+    ):
         raise StoragePaused("Minimum free-space guard reached; public mirroring paused.")
     PublicArchiveFile.objects.filter(pk=record.pk).update(
         status=PublicArchiveFile.Status.DOWNLOADING, last_error=""
@@ -556,7 +559,10 @@ def _download_file(record, minimum_free_bytes, *, budget_bytes, deadline):
                     raise DownloadBudgetExceeded(
                         "File exceeded the remaining per-run byte budget."
                     )
-                if shutil.disk_usage(root).free - len(chunk) < minimum_free_bytes:
+                if (
+                    minimum_free_bytes > 0
+                    and shutil.disk_usage(root).free - len(chunk) < minimum_free_bytes
+                ):
                     raise StoragePaused(
                         "Minimum free-space guard reached; public mirroring paused."
                     )
@@ -628,7 +634,7 @@ def sync_public_archive(*, catalog_first=True):
     root = archive_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     minimum_free = int(config.minimum_free_gib) * 1024**3
-    if shutil.disk_usage(root).free <= minimum_free:
+    if minimum_free > 0 and shutil.disk_usage(root).free <= minimum_free:
         return {"enabled": True, "blocked": "minimum_free_space", "errors": []}
     deadline = time.monotonic() + 1200
     catalog = catalog_enabled_datasets() if catalog_first else {}

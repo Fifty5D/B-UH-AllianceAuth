@@ -21,6 +21,56 @@ def _number(mapping, key, default=0):
     return default if value is None else value
 
 
+def _snapshot_filesystems(host):
+    """Normalize the additive telemetry without inventing old-agent samples."""
+    raw = host.get("filesystems")
+    if not isinstance(raw, list):
+        return []
+    result = []
+    fields = ("total_bytes", "used_bytes", "free_bytes", "available_bytes")
+    for identifier, label, mountpoint in (
+        ("system", "System disk", "/"),
+        ("data", "Auth data", "/srv/buh-data"),
+    ):
+        source = next(
+            (
+                item
+                for item in raw
+                if isinstance(item, dict) and item.get("id") == identifier
+            ),
+            {},
+        )
+        row = {
+            "id": identifier,
+            "label": label,
+            "mountpoint": mountpoint,
+            "available": False,
+            "status": "unavailable",
+            **dict.fromkeys((*fields, "percent")),
+        }
+        status = source.get("status")
+        if isinstance(status, str) and status in {
+            "not_mounted",
+            "duplicate",
+            "unavailable",
+        }:
+            row["status"] = status
+        if (
+            source.get("available") is True
+            and status == "mounted"
+            and source.get("mountpoint") == mountpoint
+            and all(type(source.get(key)) is int and source[key] >= 0 for key in fields)
+        ):
+            total, used, free, available = (source[key] for key in fields)
+            if total > 0 and used + free == total and available <= free:
+                row.update({key: source[key] for key in fields})
+                row.update(
+                    available=True, status="mounted", percent=round(100 * used / total, 2)
+                )
+        result.append(row)
+    return result
+
+
 def capture_snapshot(metrics=None, workload=None):
     metrics = metrics or get_metrics()
     workload = workload or get_worker_workload(force=True)
@@ -40,6 +90,7 @@ def capture_snapshot(metrics=None, workload=None):
         disk_percent=_number(host, "disk_percent"),
         disk_used_bytes=int(_number(host, "disk_used_bytes")),
         disk_total_bytes=int(_number(host, "disk_total_bytes")),
+        filesystems=_snapshot_filesystems(host),
         network_rx_bytes_per_second=_number(host, "network_rx_bytes_per_second"),
         network_tx_bytes_per_second=_number(host, "network_tx_bytes_per_second"),
         container_total=int(_number(docker, "total")),
@@ -61,6 +112,39 @@ def _sustained(field, threshold, samples):
     return len(values) >= samples and all(
         float(value) >= float(threshold) for value in values
     )
+
+
+def _data_filesystem(snapshot):
+    if not isinstance(snapshot.filesystems, list) or not snapshot.filesystems:
+        return None
+    return next(
+        (
+            item
+            for item in _snapshot_filesystems({"filesystems": snapshot.filesystems})
+            if item["id"] == "data"
+        ),
+        None,
+    )
+
+
+def _data_pressure(snapshot, threshold, samples):
+    current = _data_filesystem(snapshot)
+    if current is None or not current.get("available"):
+        return None
+
+    def high(item):
+        return item["percent"] >= threshold or item["available_bytes"] == 0
+
+    if not high(current):
+        return False
+    recent = list(MetricSnapshot.objects.order_by("-captured_at")[:samples])
+    rows = [_data_filesystem(item) for item in recent]
+    if len(rows) < samples or any(
+        item is None or not item.get("available") for item in rows
+    ):
+        # Missing telemetry cannot prove recovery, or a sustained high sample.
+        return None
+    return all(high(item) for item in rows)
 
 
 def _set_alert(key, *, active, title, message, severity="warning"):
@@ -145,6 +229,33 @@ def evaluate_alerts(snapshot, config=None):
         )
         if changed:
             transitioned.append(alert)
+    data = _data_filesystem(snapshot)
+    if data is not None:
+        available = data.get("available") is True
+        alert, changed = _set_alert(
+            "disk:data:unavailable",
+            active=not available,
+            title="Auth data storage telemetry available"
+            if available
+            else "Auth data storage unavailable",
+            message="The Auth data filesystem is mounted and reporting metrics."
+            if available
+            else "The Auth data filesystem is not mounted or its metrics cannot be read.",
+            severity="danger",
+        )
+        if changed:
+            transitioned.append(alert)
+        pressure = _data_pressure(snapshot, config.warning_disk_percent, samples)
+        if pressure is not None:
+            alert, changed = _set_alert(
+                "disk:data",
+                active=pressure,
+                title="Auth data disk space warning",
+                message=f"Auth data disk utilization remained at or above {config.warning_disk_percent}% or had no available space.",
+                severity="danger",
+            )
+            if changed:
+                transitioned.append(alert)
     return transitioned
 
 

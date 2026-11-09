@@ -143,8 +143,7 @@ def live_metrics(request):
         else {},
         "workload": workload,
         "alerts": [
-            _serialize_alert(item)
-            for item in AlertState.objects.filter(active=True)[:8]
+            _serialize_alert(item) for item in AlertState.objects.filter(active=True)[:8]
         ],
         "actions": actions,
         "latest_update": latest_update,
@@ -172,6 +171,7 @@ def history(request):
             "load_5",
             "memory_percent",
             "disk_percent",
+            "filesystems",
             "network_rx_bytes_per_second",
             "network_tx_bytes_per_second",
             "active_tasks",
@@ -309,9 +309,7 @@ def check_updates(request):
 def action_detail(request, action_id):
     _require(request.user, "view_action_history")
     try:
-        action = OperationalAction.objects.select_related("requested_by").get(
-            pk=action_id
-        )
+        action = OperationalAction.objects.select_related("requested_by").get(pk=action_id)
     except OperationalAction.DoesNotExist:
         return JsonResponse({"ok": False, "error": "Action not found."}, status=404)
     try:

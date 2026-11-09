@@ -413,7 +413,7 @@ def collect_esi_batch(*, deadline=None):
         return {"paused": "disabled"}
     if config.active_retry_at and config.active_retry_at > now():
         return {"paused": "rate_limit", "retry_at": config.active_retry_at.isoformat()}
-    if _free_bytes() < config.minimum_free_gib * 1024**3:
+    if config.minimum_free_gib > 0 and _free_bytes() < config.minimum_free_gib * 1024**3:
         return {"paused": "storage"}
     seed_targets()
     deadline = deadline or time.monotonic() + 180
@@ -442,7 +442,7 @@ def collect_esi_batch(*, deadline=None):
             or time.monotonic() >= deadline
         ):
             break
-        if _free_bytes() < config.minimum_free_gib * 1024**3:
+        if config.minimum_free_gib > 0 and _free_bytes() < config.minimum_free_gib * 1024**3:
             return {"attempted": attempted, "checked": checked, "paused": "storage"}
         if client is None:
             client = esi_client()

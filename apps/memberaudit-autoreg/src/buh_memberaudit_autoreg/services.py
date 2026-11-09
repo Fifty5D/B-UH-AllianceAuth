@@ -143,6 +143,14 @@ def register_token(
                     token.user_id,
                 )
             )
+        elif queue_updates and status == RegistrationStatus.ALREADY_REGISTERED:
+            # A previous transient token failure suppresses normal section
+            # scheduling even after SSO grants a healthy token again.
+            from .tasks import recover_character_sections
+
+            transaction.on_commit(
+                partial(recover_character_sections.delay, audit_character.pk)
+            )
 
     return RegistrationResult(
         status,

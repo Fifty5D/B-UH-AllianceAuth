@@ -21,7 +21,15 @@ REMOTE = os.environ.get("BUH_DIAGNOSTICS_REMOTE", "git@github.com:Fifty5D/B-UH-D
 KEY = Path(os.environ.get("BUH_DIAGNOSTICS_DEPLOY_KEY", "/etc/buh-diagnostics/deploy-key"))
 KNOWN_HOSTS = Path(os.environ.get("BUH_DIAGNOSTICS_KNOWN_HOSTS", "/etc/buh-diagnostics/known_hosts"))
 MAX_PART_BYTES = 384 * 1024
-MINIMUM_FREE_BYTES = 25 * 1024**3
+def minimum_free_bytes():
+    """Keep the existing reserve unless explicitly disabled with zero GiB."""
+    value = os.environ.get("BUH_DIAGNOSTICS_PUBLISH_MINIMUM_FREE_GIB", "25")
+    if not value.isascii() or not value.isdecimal() or not 0 <= int(value) <= 2048:
+        raise ValueError("BUH_DIAGNOSTICS_PUBLISH_MINIMUM_FREE_GIB must be an integer from 0 to 2048")
+    return int(value) * 1024**3
+
+
+MINIMUM_FREE_BYTES = minimum_free_bytes()
 RETENTION = timedelta(days=30)
 
 
@@ -59,7 +67,7 @@ def atomic_json(path, payload):
 
 
 def export_hour(db, repo, hour, cutoff=None):
-    if shutil.disk_usage(repo).free < MINIMUM_FREE_BYTES:
+    if MINIMUM_FREE_BYTES > 0 and shutil.disk_usage(repo).free < MINIMUM_FREE_BYTES:
         raise RuntimeError("Private evidence export paused by free-space guard")
     path = repo / "evidence" / hour.strftime("%Y-%m-%d") / hour.strftime("%H")
     path.mkdir(parents=True, exist_ok=True)
@@ -227,7 +235,7 @@ def publish():
         "format": "redacted JSONL shards grouped by UTC date and hour",
     }
     STAGING.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if shutil.disk_usage(STAGING).free < MINIMUM_FREE_BYTES:
+    if MINIMUM_FREE_BYTES > 0 and shutil.disk_usage(STAGING).free < MINIMUM_FREE_BYTES:
         raise RuntimeError("Private evidence publication paused by free-space guard")
     repo = STAGING / "repo"
     repo.mkdir(mode=0o700, exist_ok=True)
