@@ -175,6 +175,29 @@ PR86_INSTALLED_RECEIVER = {
     },
 }
 
+# The verified v0.8.2 receiver retained PR86's config and managed files except
+# for the observer root command. Bind its own canonical receipt and source map.
+_V082_OBSERVER_SOURCE = "ops/buh-github-observe-root"
+_V082_OBSERVER_SHA256 = "1cee9846a875be0934d3fd2b744f5562cde90e41b54e84df746e589c7a3a729c"
+V082_INSTALLED_RECEIVER = {
+    "config": dict(PR86_INSTALLED_RECEIVER["config"]),
+    "install_record": {
+        **PR86_INSTALLED_RECEIVER["install_record"],
+        "sha256": "1c291fa02542a9d5d5edb161e692e0dace72d72c9543ea7d8282cde357573548",
+        "source_commit": "714a3407b7e84b70110162e22bf61f289773b23b",
+        "source_file_sha256": {
+            **PR86_INSTALLED_SOURCE_FILES,
+            _V082_OBSERVER_SOURCE: _V082_OBSERVER_SHA256,
+        },
+    },
+    "files": {
+        **PR86_INSTALLED_RECEIVER["files"],
+        _PR86_COMMAND_PATHS[_V082_OBSERVER_SOURCE]: {
+            "uid": 0, "gid": 0, "mode": "0755", "sha256": _V082_OBSERVER_SHA256,
+        },
+    },
+}
+
 
 class UpgradeError(RuntimeError):
     """A fail-closed receiver upgrade error safe to show to the operator."""
@@ -416,7 +439,12 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
     expected = next(
         (
             baseline
-            for baseline in (historical, V080_INSTALLED_RECEIVER, PR86_INSTALLED_RECEIVER)
+            for baseline in (
+                historical,
+                V080_INSTALLED_RECEIVER,
+                PR86_INSTALLED_RECEIVER,
+                V082_INSTALLED_RECEIVER,
+            )
             if record_digest == baseline["install_record"]["sha256"]
         ),
         None,
@@ -489,8 +517,9 @@ def _verify_confirmed_installed_receiver(system_root: Path = Path("/")) -> None:
         for installed, source in installed_to_source.items()
     ):
         raise UpgradeError("Confirmed installed receiver source identity changed.")
-    if expected is PR86_INSTALLED_RECEIVER and (
-        record["files"] != PR86_INSTALLED_SOURCE_FILES
+    if (
+        (expected is PR86_INSTALLED_RECEIVER or expected is V082_INSTALLED_RECEIVER)
+        and record["files"] != expected["install_record"]["source_file_sha256"]
     ):
         raise UpgradeError("Confirmed installed receiver source identity changed.")
 

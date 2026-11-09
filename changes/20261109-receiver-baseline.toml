@@ -1,0 +1,3 @@
+app = "platform"
+kind = "fix"
+summary = "Recognize the verified v0.8.2 receiver installation for transactional upgrades."

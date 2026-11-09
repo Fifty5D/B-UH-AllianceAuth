@@ -130,6 +130,11 @@ def independent_fingerprint(root: Path):
 
 
 class ConfirmedReceiverBaselineTests(unittest.TestCase):
+    full_inventory_baselines = {
+        "pr86": receiver_upgrade.PR86_INSTALLED_RECEIVER,
+        "v082": receiver_upgrade.V082_INSTALLED_RECEIVER,
+    }
+
     def _exercise(
         self, *, baseline: str = "historical", changed_path: str | None = None,
         record_changes: dict | None = None, metadata_changes: dict | None = None,
@@ -140,7 +145,7 @@ class ConfirmedReceiverBaselineTests(unittest.TestCase):
             if baseline == "historical"
             else {
                 "v080": receiver_upgrade.V080_INSTALLED_RECEIVER,
-                "pr86": receiver_upgrade.PR86_INSTALLED_RECEIVER,
+                **self.full_inventory_baselines,
             }[baseline]
         )
         identities = {
@@ -213,63 +218,73 @@ class ConfirmedReceiverBaselineTests(unittest.TestCase):
     def test_accepts_the_verified_pr86_receiver_baseline(self):
         self._exercise(baseline="pr86")
 
-    def test_pr86_install_record_hash_binds_the_complete_source_inventory(self):
-        baseline = receiver_upgrade.PR86_INSTALLED_RECEIVER
-        record = {
-            "config_sha256": baseline["config"]["sha256"],
-            "files": baseline["install_record"]["source_file_sha256"],
-            "schema_version": 1,
-            "source_commit": "08b258419d38fc6fd263b4b32dd48e92f9c1cee6",
-        }
-        raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        self.assertEqual(
-            hashlib.sha256(raw).hexdigest(), baseline["install_record"]["sha256"]
-        )
-        self.assertEqual(set(record["files"]), set(receiver_upgrade.INSTALL_SOURCES))
-        self.assertEqual(len(baseline["files"]), len(record["files"]))
+    def test_accepts_the_verified_v082_receiver_baseline(self):
+        self._exercise(baseline="v082")
 
-    def test_rejects_each_changed_pr86_receiver_file_or_record(self):
-        baseline = receiver_upgrade.PR86_INSTALLED_RECEIVER
-        paths = [baseline["config"]["path"], baseline["install_record"]["path"],
-                 *baseline["files"]]
-        for path in paths:
-            with self.subTest(path=path), self.assertRaisesRegex(
-                receiver_upgrade.UpgradeError, "Confirmed installed receiver baseline changed"
-            ):
-                self._exercise(baseline="pr86", changed_path=path)
+    def test_install_record_hashes_bind_each_complete_source_inventory(self):
+        for name, baseline in self.full_inventory_baselines.items():
+            with self.subTest(baseline=name):
+                receipt = baseline["install_record"]
+                record = {
+                    "config_sha256": baseline["config"]["sha256"],
+                    "files": receipt["source_file_sha256"],
+                    "schema_version": 1,
+                    "source_commit": receipt["source_commit"],
+                }
+                raw = (
+                    json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode("ascii")
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), receipt["sha256"])
+                self.assertEqual(set(record["files"]), set(receiver_upgrade.INSTALL_SOURCES))
+                self.assertEqual(len(baseline["files"]), len(record["files"]))
 
-    def test_rejects_stale_pr86_source_commit_even_with_matching_file_hashes(self):
-        with self.assertRaisesRegex(
-            receiver_upgrade.UpgradeError, "Confirmed installed receiver record changed"
-        ):
-            self._exercise(
-                baseline="pr86", record_changes={"source_commit": "71adb7eb48dc722d1e8ca6e69a443abb237596bc"}
-            )
+    def test_rejects_each_changed_file_config_or_receipt_in_complete_baselines(self):
+        for name, baseline in self.full_inventory_baselines.items():
+            paths = [baseline["config"]["path"], baseline["install_record"]["path"],
+                     *baseline["files"]]
+            for path in paths:
+                with self.subTest(baseline=name, path=path), self.assertRaisesRegex(
+                    receiver_upgrade.UpgradeError, "Confirmed installed receiver baseline changed"
+                ):
+                    self._exercise(baseline=name, changed_path=path)
 
-    def test_rejects_missing_altered_or_unexpected_pr86_source_inventory(self):
-        correct = receiver_upgrade.PR86_INSTALLED_SOURCE_FILES
-        cases = {
-            "missing": {key: value for key, value in correct.items()
-                        if key != "ops/deploy/engine.py"},
-            "altered": {**correct, "ops/deploy/engine.py": "0" * 64},
-            "unexpected": {**correct, "ops/deploy/unreviewed.py": "0" * 64},
-        }
-        for name, files in cases.items():
-            with self.subTest(case=name), self.assertRaisesRegex(
-                receiver_upgrade.UpgradeError, "Confirmed installed receiver source identity changed"
-            ):
-                self._exercise(baseline="pr86", record_changes={"files": files})
+    def test_rejects_altered_receipt_fields_even_with_matching_file_hashes(self):
+        for name in self.full_inventory_baselines:
+            for key, value in (("source_commit", "0" * 40), ("config_sha256", "0" * 64)):
+                with self.subTest(baseline=name, field=key), self.assertRaisesRegex(
+                    receiver_upgrade.UpgradeError, "Confirmed installed receiver record changed"
+                ):
+                    self._exercise(baseline=name, record_changes={key: value})
 
-    def test_rejects_unsafe_owner_mode_or_symlink_in_pr86_baseline(self):
-        path = "/usr/local/sbin/buh-github-observe-root"
+    def test_rejects_missing_altered_or_unexpected_complete_source_inventory(self):
+        for name, baseline in self.full_inventory_baselines.items():
+            correct = baseline["install_record"]["source_file_sha256"]
+            cases = {
+                "missing": {key: value for key, value in correct.items()
+                            if key != "ops/deploy/engine.py"},
+                "altered": {**correct, "ops/deploy/engine.py": "0" * 64},
+                "unexpected": {**correct, "ops/deploy/unreviewed.py": "0" * 64},
+            }
+            for case, files in cases.items():
+                with self.subTest(baseline=name, case=case), self.assertRaisesRegex(
+                    receiver_upgrade.UpgradeError, "Confirmed installed receiver source identity changed"
+                ):
+                    self._exercise(baseline=name, record_changes={"files": files})
+
+    def test_rejects_unsafe_metadata_in_complete_baselines(self):
+        paths = ("/etc/buh-platform-v2/INSTALL.json", "/etc/buh-platform-v2/receiver.json",
+                 "/usr/local/sbin/buh-github-observe-root")
         cases = ({"st_uid": 1000}, {"st_gid": 1000},
                  {"st_mode": stat.S_IFREG | 0o777},
                  {"st_mode": stat.S_IFLNK | 0o755})
-        for metadata in cases:
-            with self.subTest(metadata=metadata), self.assertRaisesRegex(
-                receiver_upgrade.UpgradeError, "Confirmed installed receiver baseline changed"
-            ):
-                self._exercise(baseline="pr86", metadata_changes={"path": path, **metadata})
+        for name in self.full_inventory_baselines:
+            for path in paths:
+                for metadata in cases:
+                    with self.subTest(baseline=name, path=path, metadata=metadata):
+                        with self.assertRaisesRegex(
+                            receiver_upgrade.UpgradeError, "Confirmed installed receiver baseline changed"
+                        ):
+                            self._exercise(baseline=name, metadata_changes={"path": path, **metadata})
 
     def test_rejects_any_changed_confirmed_receiver_file(self):
         with self.assertRaisesRegex(
