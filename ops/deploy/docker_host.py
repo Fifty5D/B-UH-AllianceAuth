@@ -62,9 +62,9 @@ LOCKED_DJANGO_HASHES = {
         "9d4d93be539a18ab80d058eb515900e10951e04c537c5a6b394fc49528d3251f",
         "f04fb3b36ee119e1af4fa1d397d5fd6cf12700f49321e84d4f4c642c5b1973db",
     ),
-    "5.2.18": (
-        "461c5dd06d2ea16bd5ca37d3f46e4def1d6b0fe7588c6f4e2119517bb0af8b2d",
-        "92ed81d500be6408ecd704d7bd1366c534f30427bffcc63c5fefb129561aec7c",
+    "5.2.19": (
+        "5965d974a5218a2b68a11dd1276434707f23886525c23f0598eccedaf4f4ca00",
+        "ad03d8abc51dbff95ebf34b27123cf0c26a3b62db7ba0cd520783686362533d1",
     ),
 }
 # The failed v0.8.1 candidate's pip check exposed these missing or mismatched

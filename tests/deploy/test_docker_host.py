@@ -271,7 +271,7 @@ def make_bundle(
                 "production_runtime": {"base_image": image},
                 "runtime": {
                     "allianceauth": "5.4.0",
-                    "django": "5.2.18",
+                    "django": "5.2.19",
                     "django_esi": "9.6.0",
                     "packaging": "25.0",
                 },
@@ -1184,7 +1184,7 @@ class DockerHostContracts(unittest.TestCase):
             expected = host._expected_versions(bundle)
             self.assertEqual(expected["allianceauth"], "5.4.0")
             self.assertEqual(expected["packaging"], "25.0")
-            self.assertEqual(expected["Django"], "5.2.18")
+            self.assertEqual(expected["Django"], "5.2.19")
             self.assertEqual(expected["django-esi"], "9.6.0")
             old = {
                 "versions": {**expected, "allianceauth": "5.2.0"},
@@ -1257,7 +1257,7 @@ class DockerHostContracts(unittest.TestCase):
             bundle = make_bundle(root)
             # The retained v0.8.3 contract stays at 5.2.17. Use synthetic
             # bundles so this also runs in the standalone receiver export.
-            for version in ("5.2.17", "5.2.18"):
+            for version in ("5.2.17", "5.2.19"):
                 with self.subTest(version=version):
                     bundle.manifest["compatibility"]["values"]["runtime"]["django"] = version
                     lines = "\n".join(host._production_dependencies_install_lines(bundle))
@@ -1266,7 +1266,7 @@ class DockerHostContracts(unittest.TestCase):
                         self.assertIn(f"--hash=sha256:{digest}", lines)
                     self.assertIn("--require-hashes", lines)
                     self.assertEqual(host._expected_versions(bundle)["Django"], version)
-            for invalid in (None, "5.2.19", "5.2.18; arbitrary", []):
+            for invalid in (None, "99.99.99", "5.2.19; arbitrary", []):
                 with self.subTest(invalid=invalid):
                     bundle.manifest["compatibility"]["values"]["runtime"]["django"] = invalid
                     with self.assertRaisesRegex(DeploymentError, "hash-pinned Django"):
